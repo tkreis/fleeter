@@ -33,6 +33,7 @@ Master:
   proxy import [DIR]                copy CLIProxyAPI config + logins into the vault (default ~/cli-proxy-api)
   invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]   print a one-line join command
   nodes [--live]                    list registered nodes (--live: ask each node for its status)
+  ssh NODE [COMMAND...]             shell on NODE, or run COMMAND there (e.g. fleet ssh mac2 fleet status)
   provision NODE [--refresh-proxy-auth]   push secrets + files (+ code/config once), run apply on NODE
   reconcile                         enrol new nodes, provision every online node that is behind
   kick NODE [--yes]                 revoke NODE (stop, tailnet delete, deploy keys)
@@ -67,6 +68,7 @@ case "$cmd" in
   files)      [ "${1:-}" = add ] || die "usage: fleet files add PATH"; shift; cmd_files_add "$@" ;;
   proxy)      [ "${1:-}" = import ] || die "usage: fleet proxy import [DIR]"; shift; cmd_proxy_import "$@" ;;
   invite)     cmd_invite "$@" ;;
+  ssh)        cmd_ssh "$@" ;;
   nodes)      cmd_nodes "$@" ;;
   provision)  cmd_provision "$@" ;;
   reconcile)  cmd_reconcile "$@" ;;

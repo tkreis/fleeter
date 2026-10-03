@@ -416,7 +416,15 @@ cmd_memory_sync() {
     node_kv_set "$sf" detail ""
   fi
 
-  branch=$(node_git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+  branch=$(node_git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo main)
+  # Nothing committed yet and the remote branch does not exist: an empty vault.
+  # Not an error; the master adds the scaffolding, the first note creates main.
+  if ! node_git -C "$dir" rev-parse --verify --quiet HEAD >/dev/null 2>&1 \
+     && ! node_git -C "$dir" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    node_kv_set "$sf" state ok
+    node_kv_set "$sf" detail "vault empty (the master adds the scaffolding on its next reconcile)"
+    return 0
+  fi
   [ "$branch" != HEAD ] || { node_kv_set "$sf" state conflict; warn "memory: detached HEAD in $dir"; return 0; }
   attempt=0; delay=2
   while [ "$attempt" -lt 3 ]; do

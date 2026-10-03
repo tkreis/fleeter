@@ -33,9 +33,10 @@ tool_cursor_status() {
   bin=$(_cursor_bin) || { echo "missing run: fleet apply"; return 0; }
   ver=$("$bin" --version 2>/dev/null | head -1)
   if [ -n "${CURSOR_API_KEY:-}" ]; then echo "ok ${ver:-?} env-token"; return 0; fi
-  st=$("$bin" status 2>/dev/null | head -1 | tr -d '\r')
+  st=$("$bin" status 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^[[:space:]]*$' | head -1 | tr -d '\r')
   case "$st" in
     "Logged in"*) echo "ok ${ver:-?} $st" ;;
+    *keychain*)   echo "login ${ver:-?} macOS keychain is locked in this session (ssh/launchd); on the master: fleet secrets set CURSOR_API_KEY --profile minimal" ;;
     "")           echo "error ${ver:-?} status unavailable" ;;
     *)            echo "login ${ver:-?} run: fleet login cursor" ;;
   esac

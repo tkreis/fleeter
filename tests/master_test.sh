@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Offline tests for lib/master.sh. No real Tailscale, GitHub, ssh or ~/.config/fleet.
+export FLEET_MEMORY_SEED=0   # memory_seed clones the real memory repo; never in tests
 #
 #   bash tests/master_test.sh            prints PASS/FAIL per check, exits 1 on any FAIL
 #

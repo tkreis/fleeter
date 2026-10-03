@@ -385,6 +385,29 @@ node_ssh() {
   ssh_to "$(registry_get "$id" user)" "$(registry_get "$id" dnsname)" "$@"
 }
 
+# fleet ssh NODE [COMMAND...] — open a shell on NODE, or run COMMAND there,
+# with the node's fleet environment (PATH, proxy, secrets) loaded. Resolves the
+# name through the registry, so nobody has to remember hostnames, users or keys.
+cmd_ssh() {
+  local q=${1:-} id user host remote a
+  [ -n "$q" ] || die "usage: fleet ssh NODE [COMMAND...]" "names: fleet nodes"
+  shift
+  vault_require
+  id=$(registry_find "$q")
+  [ "$(registry_get "$id" state)" != revoked ] || die "node $q is revoked"
+  user=$(registry_get "$id" user); host=$(registry_get "$id" dnsname)
+  [ -n "$user" ] && [ -n "$host" ] || die "registry entry for $q has no user/host" "fleet reconcile"
+  if [ $# -eq 0 ]; then
+    exec ssh -t -i "$FLEET_VAULT/ssh/fleet_master" -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR "$user@$host"
+  fi
+  # quote every argument for the remote shell, then load env.sh before running
+  remote=""
+  for a in "$@"; do remote="$remote $(printf '%q' "$a")"; done
+  # shellcheck disable=SC2016  # expanded by the node's shell
+  exec ssh -t -i "$FLEET_VAULT/ssh/fleet_master" -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR "$user@$host" \
+    'PATH="$HOME/.local/bin:$PATH"; [ -f "$HOME/.config/fleet/env.sh" ] && . "$HOME/.config/fleet/env.sh";'"$remote"
+}
+
 # ---------- GitHub (gh CLI first, vault token as fallback) ----------
 
 _GH_CLI=""
@@ -1206,11 +1229,46 @@ missing_grace() {
   else echo $(( ${FLEET_MISSING_GRACE_HOURS:-24} * 3600 )); fi
 }
 
+# memory_seed — make sure the memory repo has the vault scaffolding from
+# templates/memory (README, INDEX.md, index workflow, notes/, nodes/). Adds only
+# missing files, so it is safe on a repo nodes already write to. Uses the
+# master's own git credentials. At most once an hour (vault/memory.checked).
+memory_seed() {
+  local mark="$FLEET_VAULT/memory.checked" tmpd f n=0
+  [ -n "${FLEET_MEMORY_REPO:-}" ] && [ "${FLEET_MEMORY_SEED:-1}" != 0 ] || return 0
+  if [ -f "$mark" ] && [ $(( $(now_epoch) - $(cat "$mark" 2>/dev/null || echo 0) )) -lt 3600 ]; then return 0; fi
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/fleet-memory.XXXXXX")
+  if ! GIT_TERMINAL_PROMPT=0 git clone --quiet "$FLEET_MEMORY_REPO" "$tmpd/m" >/dev/null 2>&1; then
+    warn "memory seed: cannot clone $FLEET_MEMORY_REPO with the master's git credentials; retrying in an hour"
+    now_epoch >"$mark"; rm -rf "$tmpd"; return 0
+  fi
+  (cd "$FLEET_ROOT/templates/memory" && find . -type f ! -name '.DS_Store' ! -path '*/__pycache__/*') | while IFS= read -r f; do
+    f=${f#./}
+    [ -e "$tmpd/m/$f" ] && continue
+    mkdir -p "$(dirname "$tmpd/m/$f")"
+    cp -p "$FLEET_ROOT/templates/memory/$f" "$tmpd/m/$f"
+  done
+  git -C "$tmpd/m" add -A
+  if ! git -C "$tmpd/m" diff --cached --quiet; then
+    n=$(git -C "$tmpd/m" diff --cached --name-only | wc -l | tr -d ' ')
+    if git -C "$tmpd/m" -c user.name="fleet master" -c user.email="fleet-master@localhost" \
+         commit --quiet -m "add memory vault scaffolding" \
+       && git -C "$tmpd/m" push --quiet origin HEAD:main >/dev/null 2>&1; then
+      ok "memory seed: added $n template file(s) to the memory repo"; audit "memory.seed" "-" "ok $n"
+    else
+      warn "memory seed: push failed; retrying on a later reconcile"
+    fi
+  fi
+  now_epoch >"$mark"
+  rm -rf "$tmpd"
+}
+
 cmd_reconcile() {
   vault_require
   [ -n "${1:-}" ] && die "usage: fleet reconcile"
   local peers pid host dns online lock id state f key_id applied digest profile devices missing_since rk stops
   peers=$(ts_peers)
+  memory_seed
 
   # 1. expired invites (pending or half-claimed): drop the file, revoke the
   #    unused key. A claimed file left by a crashed enrolment carries the deploy

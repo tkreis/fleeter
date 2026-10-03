@@ -62,8 +62,9 @@ is gone. Inside, the entrypoint copies the root-owned mount to a user-readable
 0600 tmpfs file for the duration of `fleet join` only (and truncates the mount
 itself when it is writable). Container name = node name.
 
-Single container with compose: `(umask 077; fleet invite --ephemeral --code-only
-> docker/invite)`, then `docker compose -f docker/compose.yml up -d --build` and
+Single container with compose: `(umask 077; fleet invite --ephemeral --user fleet
+--code-only > docker/invite)` (`--user fleet`: the image's login is `fleet`, not
+yours), then `docker compose -f docker/compose.yml up -d --build` and
 delete `docker/invite` (git-ignored) once the node has joined. The file is a
 compose *secret* mounted at `/run/secrets/fleet-invite`, not an environment
 variable.
@@ -122,10 +123,18 @@ changes only.
 ## End-to-end test (fake network)
 
 ```sh
-bash tests/e2e.sh              # ~1 min after the first image build; PASS/FAIL per step, exit 1 on any FAIL
+bash tests/e2e.sh              # ~2 min after the first image build; PASS/FAIL per step, exit 1 on any FAIL
 E2E_FULL=1 bash tests/e2e.sh   # FLEET_PREINSTALL=1 image + real tool installs (slow, needs internet)
 E2E_KEEP=1 bash tests/e2e.sh   # keep fleet-e2e-* containers/network/volume for inspection
 ```
+
+With `E2E_KEEP=1` the master container stays running (`docker exec -it -u fleet
+-e HOME=/home/fleet -e FLEET_TS_API=http://127.0.0.1:8899 -e FLEET_GH_API=http://127.0.0.1:8899
+-e FLEET_TS_STATUS_JSON=/home/fleet/ts-status.json fleet-e2e-master bash`, then
+`fleet nodes`, `fleet doctor`, `cat ~/api.log`); the two nodes have exited by
+the end of the run (one is kicked, one stopped), their side is in `docker logs`.
+Clean up with `docker rm -f fleet-e2e-master fleet-e2e-node-a fleet-e2e-node-b;
+docker network rm fleet-e2e-net; docker volume rm fleet-e2e-repos`.
 
 Needs Docker and python3 on the host. Everything it creates is prefixed
 `fleet-e2e-` (containers `fleet-e2e-master`, `fleet-e2e-node-a/b`, network

@@ -1,7 +1,7 @@
 # fleet Docker node — real mode (docs/ARCHITECTURE.md "Docker nodes").
 #
 #   cd docker
-#   (umask 077; fleet invite --ephemeral --code-only > invite)   # on the master
+#   (umask 077; fleet invite --ephemeral --user fleet --code-only > invite)   # on the master; the image's login is `fleet`
 #   docker compose up -d --build && rm -f invite
 #
 # The invite is a compose *secret* (a file mounted at /run/secrets/fleet-invite),

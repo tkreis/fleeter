@@ -1636,7 +1636,15 @@ cmd_config_publish() {
   config_dir_require
   dir=$FLEET_CONFIG_DIR
   [ -d "$dir/.git" ] || die "$dir is not a git checkout" "git -C $dir init && git -C $dir remote add origin \$FLEET_CONFIG_REPO"
-  if [ "$capture" = 1 ] && type harness_capture >/dev/null 2>&1; then harness_capture; fi
+  # the commit below needs an identity; find out now, before capture rewrites anything
+  [ -n "$(git -C "$dir" config --get user.name 2>/dev/null)" ] && [ -n "$(git -C "$dir" config --get user.email 2>/dev/null)" ] \
+    || die "git has no identity for $dir (user.name / user.email)" \
+      "git config --global user.name 'Your Name' && git config --global user.email you@example.com   (or set them in that repo), then rerun"
+  if [ "$capture" = 1 ] && type harness_capture >/dev/null 2>&1; then
+    log "capture is authoritative: harness/ and skills/ are rewritten from this machine's live config;"
+    log "a skill that is not installed here (e.g. the starter skills/fleet-notes) is removed — install it here to keep it, or use --no-capture"
+    harness_capture
+  fi
   # The scan runs on every publish, captured or not: hand-edited files are
   # committed through the same path and must not carry a secret either.
   if type harness_secret_scan >/dev/null 2>&1; then

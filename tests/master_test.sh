@@ -127,7 +127,8 @@ chmod +x "$T/ghbin/gh"
 # fake Tailscale + GitHub API (shared with tests/e2e.sh); port 0 → printed on stdout
 python3 "$ROOT/tests/e2e/fake_api.py" 0 "$API_LOG" "$DEVICES_JSON" "$ACL" >"$T/api.port" &
 API_PID=$!
-i=0; while [ ! -s "$T/api.port" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+# up to 30s: a cold python start on a CI runner can take several seconds
+i=0; while [ ! -s "$T/api.port" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
 [ -s "$T/api.port" ] || { echo "fake api did not start"; exit 1; }
 API_PORT=$(cat "$T/api.port")
 export FLEET_TS_API="http://127.0.0.1:$API_PORT"

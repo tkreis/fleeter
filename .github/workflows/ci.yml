@@ -9,7 +9,7 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: shellcheck every shell file
         run: |
           docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable -s bash -x $(git ls-files '*.sh') fleet
@@ -22,7 +22,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: offline master tests
         run: bash tests/master_test.sh
 
@@ -30,7 +30,7 @@ jobs:
     name: master_test (debian:bookworm-slim)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: offline master tests in a clean Debian container
         run: |
           docker run --rm -v "$PWD:/src:ro" debian:bookworm-slim bash -c '
@@ -42,7 +42,7 @@ jobs:
     name: node_test (debian:bookworm-slim)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: node-side tests in a clean Debian container
         run: docker run --rm -v "$PWD:/src:ro" debian:bookworm-slim bash /src/tests/node_test.sh
 
@@ -50,6 +50,6 @@ jobs:
     name: e2e (docker master + two nodes)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: end-to-end with fake Tailscale and GitHub
         run: bash tests/e2e.sh

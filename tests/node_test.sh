@@ -10,6 +10,10 @@
 # aliases; all three are honoured by lib/node.sh for exactly this purpose), and
 # tool plug-ins are stubs in an isolated FLEET_ROOT that contains only the
 # node-side files.
+# The repo under test is mounted from the host and usually owned by another uid
+# (CI runner vs container root); git would refuse it as "dubious ownership".
+# Test-only: real nodes own their checkouts.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
 set -u
 
 SRC=${FLEET_TEST_SRC:-/src}

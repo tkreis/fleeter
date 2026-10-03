@@ -187,7 +187,8 @@ node that predates pinning on their next contact.
    `mkdir -p` + `mv -f` each file to its path under `$HOME` (same filesystem:
    an atomic rename), `rm -rf` the staging dir. With `--refresh-proxy-auth`
    also `touch ~/.cli-proxy-api/.force`.
-4b. T3 client key (only when `vault/ssh/t3_client` exists): the desired
+4b. T3 client key (only when `vault/ssh/t3_client` exists, i.e. after
+   `fleet init master` with `FLEET_T3_REMOTE=1` or after `fleet t3 setup`): the desired
    `authorized_keys` line — `T3_CLIENT_KEY_OPTIONS <type> <key> fleet-t3-client`
    (`lib/common.sh`), or an empty line when the registry says `t3_access: false`
    — is piped into `ssh … "sh -c '<T3_AUTHKEY_SCRIPT>'"`, which drops every line
@@ -227,7 +228,9 @@ Host fleet-<name>
 
 `Include ~/.ssh/config.d/fleet` is inserted once as the first line of
 `~/.ssh/config` (`backup_once` → `config.pre-fleet`; created 0600 when missing;
-an existing file keeps its mode).
+an existing file keeps its mode). Neither file is created while there is no
+block to write (no node with T3 access yet): a fleet that never uses T3 leaves
+`~/.ssh` on the master untouched.
 
 Node side, over the master key, as POSIX scripts on stdin to `sh -s`
 (`T3_NODE_LIST_SH`, `T3_NODE_REVOKE_SH`) or over the T3 client key exactly as

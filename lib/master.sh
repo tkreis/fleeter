@@ -771,7 +771,10 @@ cmd_init_master() {
     ok "generated master ssh key $(master_key)"
   fi
   chmod 0600 "$(master_key)"; chmod 0644 "$(master_key).pub"
-  t3_client_key_ensure      # the key T3 Code uses towards nodes; never the master key (lib/t3.sh)
+  # The key T3 Code uses towards nodes (never the master key; lib/t3.sh): only
+  # with FLEET_T3_REMOTE=1, or later through `fleet t3 setup`. Without it no
+  # node gets the extra authorized_keys line and ~/.ssh/config is never touched.
+  if [ "${FLEET_T3_REMOTE:-0}" = 1 ]; then t3_client_key_ensure; fi
 
   if [ ! -f "$FLEET_VAULT/tailscale.json" ] || [ "$reconfigure" = 1 ]; then
     with_bootstrap_token ts_bootstrap
@@ -1738,9 +1741,11 @@ cmd_doctor() {
       warn "config dir $FLEET_CONFIG_DIR has uncommitted changes; nodes only get what is pushed (fleet config publish)"
     else ok "config dir $FLEET_CONFIG_DIR"; fi
   else warn "config dir missing: $FLEET_CONFIG_DIR (fleet init master --config-dir DIR)"; fails=$((fails + 1)); fi
-  for f in FLEET_CODE_REPO FLEET_CONFIG_REPO FLEET_MEMORY_REPO; do
+  for f in FLEET_CODE_REPO FLEET_CONFIG_REPO; do
     eval "m=\${$f:-}"; [ -n "$m" ] || { warn "$f is empty (set it in $FLEET_CONFIG_DIR/fleet.conf)"; fails=$((fails + 1)); }
   done
+  [ -n "${FLEET_MEMORY_REPO:-}" ] || log "FLEET_MEMORY_REPO is empty: shared memory is off"
+  if [ -f "$(t3_client_key)" ]; then ok "t3 remote access: client key present (fleet t3 status)"; else log "t3 remote access: off (FLEET_T3_REMOTE=1 or fleet t3 setup enables it)"; fi
 
   if [ -f "$FLEET_VAULT/tailscale.json" ]; then
     if api ts check >/dev/null 2>&1; then ok "tailscale oauth: token exchange works"; else warn "tailscale oauth: token exchange FAILED"; fails=$((fails + 1)); fi

@@ -42,7 +42,9 @@ account, or physical access to an unencrypted master disk.
 
 `fleet t3 setup` lets the T3 Code desktop app on the master use a node's T3
 server through T3's own SSH environment type (verified against pingdotgg/t3code
-0.0.45, `packages/ssh/src/tunnel.ts` and `command.ts`). What T3 needs from the
+0.0.45, `packages/ssh/src/tunnel.ts` and `command.ts`). It is opt-in: nothing
+below exists until `fleet t3 setup` runs, or `FLEET_T3_REMOTE=1` makes
+`fleet init master` prepare the key up front. What T3 needs from the
 node's sshd is small and fixed: remote commands without a pty (`ssh <alias>
 sh -l -s -- <key>` and `sh -s`, each with a script on stdin), and one local
 forward to the server on the node's loopback (`ssh -n -N -L

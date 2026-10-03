@@ -121,13 +121,16 @@ t3_ssh_config_render() {
 # t3_ssh_config_write — regenerate ~/.ssh/config.d/fleet (0600) when it differs,
 # and put `Include ~/.ssh/config.d/fleet` at the top of ~/.ssh/config once
 # (original backed up as config.pre-fleet; created 0600 when missing). A no-op
-# until the T3 client key exists.
+# until the T3 client key exists, and ~/.ssh is left alone entirely while
+# there is no node to write a block for and no include file from before.
 t3_ssh_config_write() {
-  local inc cfg want cur mode=0600
+  local inc cfg want cur mode=0600 n
   [ -f "$(t3_client_key)" ] || return 0
   inc=$(t3_ssh_include); cfg="$HOME/.ssh/config"
-  mkdir -p "$HOME/.ssh" "$(dirname "$inc")"; chmod 700 "$HOME/.ssh" "$(dirname "$inc")"
   want=$(t3_ssh_config_render)
+  n=$(printf '%s\n' "$want" | grep -c '^Host ' || true)
+  [ "$n" -gt 0 ] || [ -f "$inc" ] || return 0
+  mkdir -p "$HOME/.ssh" "$(dirname "$inc")"; chmod 700 "$HOME/.ssh" "$(dirname "$inc")"
   cur=$(cat "$inc" 2>/dev/null || true)
   if [ "$want" != "$cur" ]; then
     printf '%s\n' "$want" | atomic_write "$inc" 0600

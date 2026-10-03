@@ -327,13 +327,19 @@ node_rc_ensure() {
   ok "shell rc block: $f"
 }
 
+# Every shell that might start an agent must see env.sh, not only interactive
+# zsh: T3 Code's SSH mode starts its server through `sh -l -s` (reads
+# ~/.profile), `ssh host cmd` runs a non-interactive zsh (reads ~/.zshenv),
+# bash login shells read ~/.bash_profile instead of ~/.profile when it exists.
+# env.sh is POSIX sh and idempotent, so loading it twice is harmless.
 node_shell_rc() {
-  local files="" f any=0
-  for f in "$HOME/.zshrc" "$HOME/.bashrc"; do [ -f "$f" ] && { files="$files $f"; any=1; }; done
-  if [ "$(fleet_os)" = linux ] && [ -f "$HOME/.profile" ]; then files="$files $HOME/.profile"; any=1; fi
-  if [ "$any" -eq 0 ]; then
-    if [ "$(fleet_os)" = macos ]; then files="$HOME/.zshrc"; else files="$HOME/.bashrc $HOME/.profile"; fi
-  fi
+  local files="$HOME/.profile" f
+  case "$(fleet_os)" in
+    macos) files="$files $HOME/.zshrc $HOME/.zshenv" ;;
+    *)     files="$files $HOME/.bashrc"; [ -f "$HOME/.zshrc" ] && files="$files $HOME/.zshrc $HOME/.zshenv" ;;
+  esac
+  [ "$(fleet_os)" = macos ] && [ -f "$HOME/.bashrc" ] && files="$files $HOME/.bashrc"
+  [ -f "$HOME/.bash_profile" ] && files="$files $HOME/.bash_profile"
   for f in $files; do node_rc_ensure "$f"; done
 }
 

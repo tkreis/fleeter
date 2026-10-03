@@ -263,6 +263,28 @@ case_t3_authkey() {
   end
 }
 
+# The dispatcher: -h/--help prints a synopsis and runs nothing; unknown flags
+# exit 2 before anything happens (a `fleet leave --help` must not log out).
+case_help() {
+  begin "dispatcher: --help runs nothing, unknown flags exit 2"
+  local h out rc
+  h=$(mk_home help "")
+  echo "fleet-help" >"$TS_STATE"; : >"$TS_LOG"
+  out=$(fleet_as "$h" leave --help 2>&1); rc=$?
+  assert "fleet leave --help: exit 0, synopsis, no tailscale logout" bash -c "[ '$rc' -eq 0 ] && [ '$out' = 'fleet leave' ] && [ ! -s '$TS_LOG' ] && [ -f '$TS_STATE' ]"
+  out=$(fleet_as "$h" daemon -h 2>&1); rc=$?
+  assert "fleet daemon -h: exit 0, no daemon.pid" bash -c "[ '$rc' -eq 0 ] && [ ! -f '$h/.config/fleet/daemon.pid' ]"
+  out=$(fleet_as "$h" apply --help 2>&1); rc=$?
+  assert "fleet apply --help: exit 0, nothing applied" bash -c "[ '$rc' -eq 0 ] && [ ! -f '$h/.config/fleet/env.sh' ]"
+  for c in "leave --bogus" "daemon --bogus" "status --bogus" "memory sync --bogus" "update extra" "pull --bogus" "join --bogus" "apply --from-master"; do
+    # shellcheck disable=SC2086
+    out=$(fleet_as "$h" $c 2>&1); rc=$?
+    assert "fleet $c: exit 2 with usage" bash -c "[ '$rc' -eq 2 ] && printf '%s' '$out' | grep -q 'usage:'"
+  done
+  assert "no daemon.pid, no env.sh, no logout after the rejected runs" bash -c "[ ! -f '$h/.config/fleet/daemon.pid' ] && [ ! -f '$h/.config/fleet/env.sh' ] && [ ! -s '$TS_LOG' ]"
+  end
+}
+
 case_apply() {
   begin "apply: env.sh 0600, rc block once after two runs, status.json, memory clone"
   local h rc
@@ -1025,6 +1047,7 @@ setup_code_config_remotes
 export SRC_EP="$SRC/docker/entrypoint.sh"
 echo "==> work dir: $WORK"
 case_syntax
+case_help
 case_join
 case_t3_authkey
 case_apply

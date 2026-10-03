@@ -25,6 +25,8 @@ usage() {
   cat <<'EOF'
 fleet — personal agent fleet
 
+Usage: fleet COMMAND [ARGS]   (fleet COMMAND --help shows one command)
+
 Master:
   init master [--config-dir DIR] [--reconfigure]   set up this machine as the master
   secrets set NAME [--profile P]    store a secret (hidden prompt or stdin); P = minimal|full
@@ -41,7 +43,7 @@ Master:
   t3 status [NODE]                  check the T3 path as T3 would use it; list the node's T3 sessions
   t3 revoke NODE                    revoke NODE's T3 sessions, pairing tokens and the client key
   config publish [--yes] [--no-capture]   capture this machine's harness config into the config repo, commit, push
-  policy check|apply                verify / replace the tailnet policy (templates/tailscale-policy.hujson)
+  policy check|apply                verify the tailnet policy / merge the fleet rules into it (templates/tailscale-policy.hujson)
   doctor                            vault modes, policy, tokens, isolation probes, schedules
 
 Node:
@@ -55,40 +57,162 @@ Node:
   leave                             stop timers and harness processes, tailscale logout
   daemon                            foreground scheduler (containers)
 
-Global: --version, --help
+Global: --version, --help; every command accepts -h/--help and then does nothing else.
 EOF
+}
+
+# usage_for CMD — the synopsis of one command ("t3 setup", "memory sync", ...).
+usage_for() {
+  case "$1" in
+    init|"init master") echo "fleet init master [--config-dir DIR] [--reconfigure]" ;;
+    secrets)            echo "fleet secrets set NAME [--profile minimal|full] | fleet secrets list" ;;
+    "secrets set")      echo "fleet secrets set NAME [--profile minimal|full]" ;;
+    "secrets list")     echo "fleet secrets list" ;;
+    files|"files add")  echo "fleet files add PATH [--profile minimal|full]" ;;
+    proxy|"proxy import") echo "fleet proxy import [DIR]" ;;
+    invite)             echo "fleet invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]" ;;
+    nodes)              echo "fleet nodes [--live]" ;;
+    ssh)                echo "fleet ssh NODE [COMMAND...]" ;;
+    provision)          echo "fleet provision NODE [--refresh-proxy-auth]" ;;
+    reconcile)          echo "fleet reconcile" ;;
+    kick)               echo "fleet kick NODE [--yes]" ;;
+    t3)                 echo "fleet t3 setup [NODE] | fleet t3 status [NODE] | fleet t3 revoke NODE" ;;
+    "t3 setup")         echo "fleet t3 setup [NODE]" ;;
+    "t3 status")        echo "fleet t3 status [NODE]" ;;
+    "t3 revoke")        echo "fleet t3 revoke NODE" ;;
+    config|"config publish") echo "fleet config publish [--yes] [--no-capture]" ;;
+    policy)             echo "fleet policy check | fleet policy apply" ;;
+    "policy check")     echo "fleet policy check" ;;
+    "policy apply")     echo "fleet policy apply" ;;
+    doctor)             echo "fleet doctor" ;;
+    join)               echo "fleet join    (invite code from the prompt, FLEET_INVITE_CODE or FLEET_INVITE_FILE)" ;;
+    apply)              echo "fleet apply [--from-master DIGEST]" ;;
+    pull)               echo "fleet pull [--no-apply]" ;;
+    update)             echo "fleet update" ;;
+    memory|"memory sync") echo "fleet memory sync [--reset]" ;;
+    login)              echo "fleet login [TOOL]" ;;
+    status)             echo "fleet status [--json]" ;;
+    leave)              echo "fleet leave" ;;
+    daemon)             echo "fleet daemon" ;;
+    *)                  echo "fleet $1" ;;
+  esac
+}
+
+# help_wanted ARGS... — true when any argument is -h or --help.
+help_wanted() {
+  local a
+  for a in "$@"; do case "$a" in -h|--help) return 0 ;; esac; done
+  return 1
+}
+
+# usage_fail CMD MESSAGE — bad invocation: the synopsis on stderr, exit 2 (nothing ran).
+usage_fail() {
+  printf 'error %s\n  usage: %s\n' "$2" "$(usage_for "$1")" >&2
+  exit 2
+}
+
+# arg_check CMD MAXPOS FLAGS ARGS... — reject what CMD does not take: an
+# unknown flag, or more than MAXPOS positional arguments. FLAGS is space
+# separated; a flag written with a trailing ':' consumes the next argument.
+# Runs before the command, so a typo never executes anything.
+arg_check() {
+  local cmd=$1 maxpos=$2 flags=$3 npos=0 a f hit
+  shift 3
+  while [ $# -gt 0 ]; do
+    a=$1; shift
+    case "$a" in
+      -*)
+        hit=""
+        for f in $flags; do
+          case "$f" in
+            "$a:") hit=value ;;
+            "$a")  hit=flag ;;
+          esac
+        done
+        case "$hit" in
+          value) [ $# -gt 0 ] || usage_fail "$cmd" "$a needs a value"; shift ;;
+          flag)  ;;
+          *)     usage_fail "$cmd" "unknown flag: $a" ;;
+        esac ;;
+      *)
+        npos=$((npos + 1))
+        [ "$npos" -le "$maxpos" ] || usage_fail "$cmd" "unexpected argument: $a" ;;
+    esac
+  done
+}
+
+# subcommand GROUP ALLOWED SUB ARGS... — validate the second word of a grouped
+# command (init master, secrets set, t3 status, ...). Prints nothing; exits on error.
+subcommand() {
+  local group=$1 allowed=$2 sub=$3 s
+  for s in $allowed; do [ "$s" = "$sub" ] && return 0; done
+  [ -n "$sub" ] || usage_fail "$group" "missing subcommand"
+  usage_fail "$group" "unknown subcommand: $sub"
 }
 
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case "$cmd" in
-  ""|-h|--help|help) usage ;;
-  --version|version) echo "fleet $FLEET_VERSION" ;;
-  init)       [ "${1:-}" = master ] || die "usage: fleet init master [--config-dir DIR] [--reconfigure]"; shift; cmd_init_master "$@" ;;
-  secrets)    sub=${1:-}; [ $# -gt 0 ] && shift
-              case "$sub" in set) cmd_secrets_set "$@" ;; list) cmd_secrets_list "$@" ;;
-                *) die "usage: fleet secrets set|list" ;; esac ;;
-  files)      [ "${1:-}" = add ] || die "usage: fleet files add PATH"; shift; cmd_files_add "$@" ;;
-  proxy)      [ "${1:-}" = import ] || die "usage: fleet proxy import [DIR]"; shift; cmd_proxy_import "$@" ;;
-  invite)     cmd_invite "$@" ;;
-  ssh)        cmd_ssh "$@" ;;
-  nodes)      cmd_nodes "$@" ;;
-  provision)  cmd_provision "$@" ;;
-  reconcile)  cmd_reconcile "$@" ;;
-  kick)       cmd_kick "$@" ;;
-  t3)         cmd_t3 "$@" ;;
-  config)     [ "${1:-}" = publish ] || die "usage: fleet config publish [--yes] [--no-capture]"; shift; cmd_config_publish "$@" ;;
-  doctor)     cmd_doctor "$@" ;;
-  policy)     cmd_policy "$@" ;;
-  panel)      die "the control panel is not part of this version" "use fleet nodes --live, fleet kick, and the Tailscale admin console" ;;
-  join)       cmd_join "$@" ;;
-  apply)      cmd_apply "$@" ;;
-  pull)       cmd_pull "$@" ;;
-  update)     cmd_update "$@" ;;
-  memory)     [ "${1:-}" = sync ] || die "usage: fleet memory sync [--reset]"; shift; cmd_memory_sync "$@" ;;
-  login)      cmd_login "$@" ;;
-  status)     cmd_status "$@" ;;
-  leave)      cmd_leave "$@" ;;
-  daemon)     cmd_daemon "$@" ;;
-  *) usage >&2; die "unknown command: $cmd" ;;
+  ""|-h|--help|help) usage; exit 0 ;;
+  --version|version) echo "fleet $FLEET_VERSION"; exit 0 ;;
+esac
+
+# Grouped commands: resolve the subcommand first so `fleet t3 --help` and
+# `fleet t3 status --help` both print the right line.
+sub=""
+case "$cmd" in
+  init|secrets|files|proxy|t3|config|policy|memory)
+    sub=${1:-}
+    if help_wanted "$sub"; then usage_for "$cmd"; exit 0; fi
+    [ $# -gt 0 ] && shift
+    case "$cmd" in
+      init)    subcommand init "master" "$sub" ;;
+      secrets) subcommand secrets "set list" "$sub" ;;
+      files)   subcommand files "add" "$sub" ;;
+      proxy)   subcommand proxy "import" "$sub" ;;
+      t3)      subcommand t3 "setup status revoke" "$sub" ;;
+      config)  subcommand config "publish" "$sub" ;;
+      policy)  subcommand policy "check apply" "$sub" ;;
+      memory)  subcommand memory "sync" "$sub" ;;
+    esac
+    cmd="$cmd $sub" ;;
+esac
+
+# -h/--help anywhere: print the synopsis and stop. `fleet ssh NODE CMD --help`
+# is a remote command, so for ssh only a help flag in place of NODE, or as the
+# sole word after it, counts.
+case "$cmd" in
+  ssh) if help_wanted "${1:-}" || { [ $# -eq 2 ] && help_wanted "$2"; }; then usage_for ssh; exit 0; fi ;;
+  *)   if help_wanted "$@"; then usage_for "$cmd"; exit 0; fi ;;
+esac
+
+case "$cmd" in
+  "init master")     arg_check "$cmd" 0 "--config-dir: --reconfigure" "$@"; cmd_init_master "$@" ;;
+  "secrets set")     arg_check "$cmd" 1 "--profile:" "$@"; cmd_secrets_set "$@" ;;
+  "secrets list")    arg_check "$cmd" 0 "" "$@"; cmd_secrets_list "$@" ;;
+  "files add")       arg_check "$cmd" 1 "--profile:" "$@"; cmd_files_add "$@" ;;
+  "proxy import")    arg_check "$cmd" 1 "" "$@"; cmd_proxy_import "$@" ;;
+  invite)            arg_check "$cmd" 0 "--ephemeral --profile: --name: --user: --code-only" "$@"; cmd_invite "$@" ;;
+  ssh)               cmd_ssh "$@" ;;
+  nodes)             arg_check "$cmd" 0 "--live" "$@"; cmd_nodes "$@" ;;
+  provision)         arg_check "$cmd" 1 "--refresh-proxy-auth" "$@"; cmd_provision "$@" ;;
+  reconcile)         arg_check "$cmd" 0 "" "$@"; cmd_reconcile "$@" ;;
+  kick)              arg_check "$cmd" 1 "--yes -y" "$@"; cmd_kick "$@" ;;
+  "t3 setup")        arg_check "$cmd" 1 "" "$@"; cmd_t3_setup "$@" ;;
+  "t3 status")       arg_check "$cmd" 1 "" "$@"; cmd_t3_status "$@" ;;
+  "t3 revoke")       arg_check "$cmd" 1 "" "$@"; cmd_t3_revoke "$@" ;;
+  "config publish")  arg_check "$cmd" 0 "--yes -y --no-capture" "$@"; cmd_config_publish "$@" ;;
+  "policy check"|"policy apply") arg_check "$cmd" 0 "" "$@"; cmd_policy "$sub" ;;
+  doctor)            arg_check "$cmd" 0 "" "$@"; cmd_doctor "$@" ;;
+  panel)             die "the control panel is not part of this version" "use fleet nodes --live, fleet kick, and the Tailscale admin console" ;;
+  join)              arg_check "$cmd" 0 "" "$@"; cmd_join "$@" ;;
+  apply)             arg_check "$cmd" 0 "--from-master:" "$@"; cmd_apply "$@" ;;
+  pull)              arg_check "$cmd" 0 "--no-apply" "$@"; cmd_pull "$@" ;;
+  update)            arg_check "$cmd" 0 "" "$@"; cmd_update "$@" ;;
+  "memory sync")     arg_check "$cmd" 0 "--reset" "$@"; cmd_memory_sync "$@" ;;
+  login)             arg_check "$cmd" 1 "" "$@"; cmd_login "$@" ;;
+  status)            arg_check "$cmd" 0 "--json" "$@"; cmd_status "$@" ;;
+  leave)             arg_check "$cmd" 0 "" "$@"; cmd_leave "$@" ;;
+  daemon)            arg_check "$cmd" 0 "" "$@"; cmd_daemon "$@" ;;
+  *) usage >&2; printf 'error unknown command: %s\n' "$cmd" >&2; exit 2 ;;
 esac

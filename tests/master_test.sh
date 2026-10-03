@@ -210,6 +210,46 @@ assert "accepted clone: init exits 0 and the config dir is a checkout of the rep
 grep -v '^FLEET_CONFIG_REPO=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
 bash "$FLEET" init master --config-dir "$CFG" </dev/null >/dev/null 2>&1
 assert "config dir switched back" grep -qx "FLEET_CONFIG_DIR='$CFG'" "$FLEET_HOME/fleet.conf"
+# reconcile with the T3 key but no registered node leaves ~/.ssh alone
+bash "$FLEET" reconcile >/dev/null 2>&1
+refute "reconcile without nodes does not create ~/.ssh/config" [ -e "$HOME/.ssh/config" ]
+refute "reconcile without nodes does not create ~/.ssh/config.d/fleet" [ -e "$HOME/.ssh/config.d/fleet" ]
+
+# ======================================================================
+echo "== -h/--help prints the synopsis and runs nothing; unknown flags and extra arguments exit 2"
+# a fake tailscale that logs every call: `leave` would log out through it
+mkdir -p "$T/tsbin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"\nexit 0\n' "$T/ts.log" >"$T/tsbin/tailscale"; chmod +x "$T/tsbin/tailscale"
+: >"$T/ts.log"; : >"$SSH_LOG"
+vault_snap() { (cd "$FLEET_VAULT" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$f" "$(cat "$f" | sha256)"; done); }
+sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
+export -f vault_snap sha256
+snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
+HELP_OK=1; HELP_BAD=""
+for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite nodes "ssh alpha" "provision alpha" reconcile "kick alpha" \
+         "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" doctor join apply pull update "memory sync" login status leave daemon \
+         init secrets files proxy t3 config policy memory; do
+  for h in --help -h; do
+    # shellcheck disable=SC2086  # $c is meant to split into words
+    out=$(printf 'tskey-api-FAKE\n' | PATH="$T/tsbin:$PATH" bash "$FLEET" $c $h 2>&1); rc=$?
+    if [ "$rc" != 0 ] || ! printf '%s' "$out" | grep -q '^fleet '; then HELP_OK=0; HELP_BAD="$HELP_BAD [$c $h -> rc $rc]"; fi
+  done
+done
+assert "every command with -h/--help exits 0 and prints its synopsis${HELP_BAD}" [ "$HELP_OK" = 1 ]
+assert "--help ran nothing: vault unchanged, no API call, no ssh, no tailscale logout, no daemon.pid" bash -c "[ \"\$(vault_snap)\" = \"\$0\" ] && [ \"\$(grep -c '' '$API_LOG')\" = $api0 ] && [ ! -s '$SSH_LOG' ] && [ ! -s '$T/ts.log' ] && [ ! -f '$FLEET_HOME/daemon.pid' ]" "$snap0"
+assert "fleet secrets set --help did not consume stdin into the vault" bash -c "! grep -q 'tskey-api-FAKE' '$FLEET_VAULT'/secrets/*.env 2>/dev/null"
+BAD_OK=1; BAD_BAD=""
+for c in "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
+         "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
+         "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" nosuch; do
+  # shellcheck disable=SC2086
+  out=$(PATH="$T/tsbin:$PATH" bash "$FLEET" $c </dev/null 2>&1); rc=$?
+  if [ "$rc" != 2 ] || ! printf '%s' "$out" | grep -qi 'usage'; then BAD_OK=0; BAD_BAD="$BAD_BAD [$c -> rc $rc]"; fi
+done
+assert "unknown flags, extra arguments, bad subcommands and unknown commands exit 2 with the usage${BAD_BAD}" [ "$BAD_OK" = 1 ]
+assert "rejected invocations ran nothing: vault unchanged, no API call, no ssh, no tailscale call, no daemon.pid" bash -c "[ \"\$(vault_snap)\" = \"\$0\" ] && [ \"\$(grep -c '' '$API_LOG')\" = $api0 ] && [ ! -s '$SSH_LOG' ] && [ ! -s '$T/ts.log' ] && [ ! -f '$FLEET_HOME/daemon.pid' ]" "$snap0"
+assert "fleet ssh NODE CMD --help is a remote command, not help" bash -c "out=\$(bash '$FLEET' ssh alpha fleet status --help 2>&1); ! printf '%s' \"\$out\" | grep -q '^fleet ssh NODE'"
+assert "fleet --version prints the version" bash -c "bash '$FLEET' --version | grep -qx 'fleet [0-9][0-9.]*'"
 
 # ======================================================================
 echo "== secrets"

@@ -934,13 +934,14 @@ cmd_invite() {
     nonce "$nonce" name "$name" profile "$profile" ephemeral "json:$ephemeral" \
     created "$created" expires "$expires" ts_key_id "$key_id" user "$user"
 
-  # The auth key goes to python on stdin, never argv.
+  # The auth key goes to python on stdin, never argv. `tools` lets join skip
+  # privileged installs (browser, docker) the fleet does not use.
   code=$(printf '%s' "$key" | python3 -c 'import base64,json,sys
 d={"v":1,"ts_auth_key":sys.stdin.read(),"nonce":sys.argv[1],"name":sys.argv[2],
    "master_pubkey":sys.argv[3],"master_user":sys.argv[4],"tag":sys.argv[5],
-   "hostname_prefix":sys.argv[6]}
+   "hostname_prefix":sys.argv[6],"tools":" ".join(sys.argv[7].split())}
 print(base64.b64encode(json.dumps(d,separators=(",",":")).encode()).decode())' \
-    "$nonce" "$name" "$pub" "$user" "$FLEET_NODE_TAG" "$FLEET_HOSTNAME_PREFIX")
+    "$nonce" "$name" "$pub" "$user" "$FLEET_NODE_TAG" "$FLEET_HOSTNAME_PREFIX" "${FLEET_TOOLS:-}")
   key=""
 
   audit "invite" "$name" "ok profile=$profile ephemeral=$ephemeral"

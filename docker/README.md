@@ -30,11 +30,14 @@ docker build -f docker/Dockerfile -t fleet-node:local .                        #
 docker build -f docker/Dockerfile --build-arg FLEET_PREINSTALL=1 -t fleet-node:pre .   # + base, devtools, chrome MCP servers, claude, codex, cursor, grok
 ```
 
-The image always contains `chromium` and fonts (apt needs root, and the node
-user has none). `FLEET_PREINSTALL=1` additionally runs the `lib/tools/*.sh`
-installers at build time so a container is useful seconds after it joins.
-Default off: `fleet apply` installs the harness CLIs on first provision
-instead. Build args: `FLEET_USER` (default `fleet`), `FLEET_UID` (1000).
+The image contains `chromium` and fonts by default (apt needs root, and the
+node user has none); a fleet without `chrome` in `FLEET_TOOLS` builds a slimmer
+image with `--build-arg FLEET_BROWSER=0`. `netcat-openbsd` is always included:
+`fleet doctor` probes isolation with `nc`. `FLEET_PREINSTALL=1` additionally
+runs the `lib/tools/*.sh` installers at build time so a container is useful
+seconds after it joins. Default off: `fleet apply` installs the harness CLIs on
+first provision instead. Build args: `FLEET_USER` (default `fleet`), `FLEET_UID`
+(1000), `FLEET_BROWSER` (1), `FLEET_PREINSTALL` (0).
 
 ## Real mode
 

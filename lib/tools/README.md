@@ -28,9 +28,12 @@ plus the two browser MCP servers behind `~/.local/bin/fleet-*-mcp` wrappers),
 `claude`, `codex`, `cursor`, `grok` (the harness CLIs), `cliproxy` (CLIProxyAPI
 in Docker), `t3code` (desktop app, GUI only).
 
-Privileged steps (docker-ce on Linux, Homebrew on macOS) are done by `fleet
-join`, which records `~/.config/fleet/privileged_done`; a plug-in that finds the
-marker but not the tool must `warn` and point back to `fleet join`, never `sudo`.
+Privileged steps (base packages, the browser and docker-ce on Linux, Homebrew
+on macOS) are done by `fleet join`, which records
+`~/.config/fleet/privileged_done`; join skips the browser and docker when the
+fleet's `FLEET_TOOLS` (carried in the invite code) does not need them
+(`join_wants`). A plug-in that finds the marker but not the tool must `warn`
+and point back to `fleet join`, never `sudo`.
 
 Rules: bash 3.2 (no associative arrays, `mapfile`, `${v,,}`), no GNU-only
 flags, no `sed -i`; secrets come from env and never appear in argv or output;

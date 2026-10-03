@@ -58,6 +58,15 @@ join_in_container() {
   [ -f /.dockerenv ] || [ -f /run/.containerenv ] || [ -n "${FLEET_CONTAINER:-}" ]
 }
 
+# join_wants TOOL — true when the fleet converges TOOL on its nodes (the
+# master's FLEET_TOOLS travels in the invite code, JOIN_TOOLS below); an invite
+# from an older master carries no list, and then every privileged step runs.
+join_wants() {
+  [ -n "$JOIN_TOOLS" ] || return 0
+  case " $JOIN_TOOLS " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
 # Run as root: directly when root, via sudo otherwise (join is interactive).
 j_root() {
   if [ "$(id -u)" -eq 0 ]; then "$@"; else
@@ -82,6 +91,7 @@ JOIN_OS=""; JOIN_ARCH=""; JOIN_CONTAINER=0
 JOIN_KEYFILE=""                     # tmp file holding the tailscale auth key (0600)
 JOIN_NONCE=""; JOIN_NAME=""; JOIN_MASTER_PUBKEY=""; JOIN_MASTER_USER=""; JOIN_TAG=""
 JOIN_PREFIX="fleet-"                # tailscale hostname = prefix + name (FLEET_HOSTNAME_PREFIX on the master)
+JOIN_TOOLS=""                       # the master's FLEET_TOOLS (optional in the code; empty = install everything)
 JOIN_TS=""; JOIN_TS_SUDO=0          # tailscale CLI path and whether it needs root
 
 join_cleanup() {
@@ -327,12 +337,18 @@ prefix = d.get("hostname_prefix", "fleet-")
 if not isinstance(prefix, str) or not re.match(r"^[a-z0-9-]{0,24}$", prefix):
     sys.stderr.write("invite code: invalid hostname_prefix\n")
     sys.exit(2)
+# optional (older masters omit it): the master's FLEET_TOOLS, so join can skip
+# privileged installs the fleet does not use; anything odd is ignored, not fatal
+tools = d.get("tools", "")
+if not isinstance(tools, str) or not re.match(r"^[a-z0-9 _-]{0,200}$", tools):
+    tools = ""
 fd = os.open(sys.argv[1], os.O_WRONLY | os.O_TRUNC | os.O_CREAT, 0o600)
 os.write(fd, d["ts_auth_key"].strip().encode("utf-8"))
 os.close(fd)
 for k in ("nonce", "name", "master_pubkey", "master_user", "tag"):
     print(d[k].strip())
 print(prefix)
+print(" ".join(tools.split()))
 PY
   ) || j_die "could not decode the invite code" "ask the master for a fresh 'fleet invite'"
   {
@@ -341,13 +357,14 @@ PY
     IFS= read -r JOIN_MASTER_PUBKEY
     IFS= read -r JOIN_MASTER_USER
     IFS= read -r JOIN_TAG
-    IFS= read -r JOIN_PREFIX || JOIN_PREFIX=""     # an empty prefix is the last (stripped) line
+    IFS= read -r JOIN_PREFIX || JOIN_PREFIX=""     # the heredoc strips trailing empty lines:
+    IFS= read -r JOIN_TOOLS || JOIN_TOOLS=""       # an empty prefix or tool list reads as end of input
   } <<EOF
 $_fields
 EOF
   unset JOIN_CODE
   [ -n "$JOIN_NAME" ] && [ -n "$JOIN_TAG" ] || j_die "invite code is incomplete"
-  j_ok "invite for node '$JOIN_NAME' ($JOIN_TAG, hostname $JOIN_PREFIX$JOIN_NAME)"
+  j_ok "invite for node '$JOIN_NAME' ($JOIN_TAG, hostname $JOIN_PREFIX$JOIN_NAME${JOIN_TOOLS:+, tools: $JOIN_TOOLS})"
 }
 
 # ---------- 6. ssh server (key-only, verified) ----------
@@ -587,8 +604,12 @@ join_privileged() {
     if join_brew_ensure; then _done="$_done brew"; else _fail="$_fail brew"; fi
   else
     if join_linux_base_packages; then _done="$_done base"; else _fail="$_fail base"; fi
-    if join_linux_browser; then _done="$_done browser"; else _fail="$_fail browser"; fi
-    if j_have docker; then
+    if ! join_wants chrome; then
+      j_ok "browser: skipped (chrome is not in the fleet's FLEET_TOOLS)"
+    elif join_linux_browser; then _done="$_done browser"; else _fail="$_fail browser"; fi
+    if ! join_wants devtools && ! join_wants cliproxy; then
+      j_ok "docker: skipped (neither devtools nor cliproxy is in the fleet's FLEET_TOOLS)"
+    elif j_have docker; then
       _done="$_done docker"
     else
       j_log "installing docker-ce (get.docker.com)"
@@ -746,7 +767,7 @@ except Exception:
   printf '\n' >&2
   j_ok "node '$JOIN_NAME' joined the tailnet as $_dns"
   j_log "waiting for master: it starts setup on its next reconcile (about 2 minutes while it is on)"
-  j_log "first setup installs every tool (Java, Node, Chrome, agents, ...) and takes 10-20 minutes."
+  j_log "first setup installs every tool in the fleet's FLEET_TOOLS (runtimes, agents, browser, ...) and can take 10-20 minutes."
   j_log "watch it on the master: fleet nodes (state 'provisioning') and tail -f ~/.config/fleet/reconcile.log"
   j_log "done when this machine has ~/.local/bin/fleet and 'fleet nodes' on the master says 'provisioned'."
   printf '%s\n' "  nothing else to do here; rerunning this command is safe." >&2

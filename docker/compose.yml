@@ -27,6 +27,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         FLEET_PREINSTALL: ${FLEET_PREINSTALL:-0}
+        FLEET_BROWSER: ${FLEET_BROWSER:-1}      # 0 = no chromium in the image (fleets without `chrome`)
         FLEET_USER: fleet
     image: fleet-node:local
     secrets:

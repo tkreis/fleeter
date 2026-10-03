@@ -228,6 +228,21 @@ print(base64.b64encode(json.dumps({"v":1,"ts_auth_key":"tskey-auth-test-FAKE","n
   "master_pubkey":os.environ["MPUB"],"master_user":"root","tag":"tag:fleet-node","hostname_prefix":"Bad Prefix"}).encode()).decode())')
   HOME="$h" TMPDIR="$WORK/tmp" FLEET_INVITE_CODE="$code" bash "$ROOT/lib/join.sh" >"$WORK/join5.log" 2>&1; rc=$?
   assert "an invalid hostname_prefix is rejected" bash -c "[ '$rc' -ne 0 ] && grep -q 'invalid hostname_prefix' '$WORK/join5.log'"
+  # the master's FLEET_TOOLS travels in the code: join reports it and join_wants
+  # steers the privileged steps (browser only with chrome, docker with devtools/cliproxy)
+  h="$WORK/homes/alpha4"; mkdir -p "$h"
+  code=$(MPUB="$pub" python3 -c 'import base64,json,os
+print(base64.b64encode(json.dumps({"v":1,"ts_auth_key":"tskey-auth-test-FAKE","nonce":"nonce-alpha4","name":"alpha4",
+  "master_pubkey":os.environ["MPUB"],"master_user":"root","tag":"tag:fleet-node","tools":"base claude"}).encode()).decode())')
+  HOME="$h" TMPDIR="$WORK/tmp" FLEET_INVITE_CODE="$code" bash "$ROOT/lib/join.sh" >"$WORK/join6.log" 2>&1; rc=$?
+  assert "join with a tool list exits 0 and names it" bash -c "[ '$rc' -eq 0 ] && grep -q 'tools: base claude' '$WORK/join6.log'"
+  # shellcheck disable=SC2329  # invoked through assert/refute
+  jw() { FLEET_ROOT="$ROOT" bash -c '. "$FLEET_ROOT/lib/join.sh"; JOIN_TOOLS=$1; join_wants "$2"' bash "$1" "$2"; }
+  refute "join_wants: chrome absent from 'base claude'" jw 'base claude' chrome
+  assert "join_wants: devtools present in 'base devtools claude'" jw 'base devtools claude' devtools
+  assert "join_wants: an invite without a tool list wants chrome (older master)" jw '' chrome
+  assert "join_wants: an invite without a tool list wants devtools" jw '' devtools
+  unset -f jw
   end
 }
 

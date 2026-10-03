@@ -47,8 +47,11 @@ step when the directory is missing.
    master's own login; `docker/spawn.sh` passes `--user fleet`) and prints one
    command line that contains the gzip+base64 of `lib/join.sh`. The join script
    then asks for the **invite code**: base64 of JSON
-   `{"v":1,"ts_auth_key","nonce","name","master_pubkey","master_user","tag","hostname_prefix"}`
-   (`hostname_prefix` = `FLEET_HOSTNAME_PREFIX`; a code without it means `fleet-`).
+   `{"v":1,"ts_auth_key","nonce","name","master_pubkey","master_user","tag","hostname_prefix","tools"}`
+   (`hostname_prefix` = `FLEET_HOSTNAME_PREFIX`, a code without it means `fleet-`;
+   `tools` = the master's `FLEET_TOOLS`, so `join_privileged` can skip the
+   browser without `chrome` and docker-ce without `devtools`/`cliproxy`; a code
+   without it, or with an unparsable value, means "install everything").
    `FLEET_INVITE_CODE` env or `FLEET_INVITE_FILE` path skip the prompt (Docker).
 2. `lib/join.sh` (node, standalone — sources nothing) installs Tailscale if
    missing, runs `tailscale up --auth-key=file:<tmp> --advertise-tags=<tag>

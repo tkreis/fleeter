@@ -346,6 +346,7 @@ assert "code carries the ts key" printf '%s' "$decoded" | grep -q '"ts_auth_key"
 assert "code carries the nonce" printf '%s' "$decoded" | grep -q "\"nonce\":\"$nonce\""
 assert "code carries master pubkey + user + tag" printf '%s' "$decoded" | grep -q '"master_pubkey":"ssh-ed25519 .*"master_user":"fleetuser","tag":"tag:fleet-node"'
 assert "code carries the hostname prefix (FLEET_HOSTNAME_PREFIX)" printf '%s' "$decoded" | grep -q '"hostname_prefix":"fleet-"'
+assert "code carries the fleet's tool list (join skips privileged installs it does not need)" printf '%s' "$decoded" | grep -q '"tools":"base devtools claude"'
 assert "invite says single-use + expiry" printf '%s' "$out" | grep -q 'single use, expires'
 # shellcheck disable=SC2016  # literal match of the one-liner's prefix
 line=$(printf '%s\n' "$out" | grep -F '( d=$(mktemp -d)' | head -1)

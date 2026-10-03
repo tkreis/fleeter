@@ -84,7 +84,9 @@ by the Tailscale stable node id:
    `FLEET_INVITE_FILE` (never argv), writes the auth key straight into a 0600
    temp file from python, runs `tailscale up --auth-key=file:… --advertise-tags
    --hostname=fleet-<name>`, sets up SSH, runs the privileged OS steps once
-   (Linux: base packages, browser, docker-ce, linger; macOS: Homebrew),
+   (Linux: base packages, then the browser only when the fleet's `FLEET_TOOLS`
+   — carried in the code — has `chrome`, docker-ce only with `devtools` or
+   `cliproxy`, linger; macOS: Homebrew),
    generates three ed25519 deploy keys (`fleet_code`, `fleet_config`,
    `fleet_memory`) with `~/.ssh/config` aliases `github-fleet-{code,config,memory}`,
    and writes `~/.config/fleet/enrol.json` with the nonce. It sends nothing to

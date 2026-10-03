@@ -18,20 +18,26 @@ FROM debian:bookworm-slim
 ARG FLEET_USER=fleet
 ARG FLEET_UID=1000
 ARG FLEET_PREINSTALL=0
+ARG FLEET_BROWSER=1
 
 ENV DEBIAN_FRONTEND=noninteractive \
     FLEET_USER=${FLEET_USER} \
     TS_STATE_DIR=/var/lib/tailscale \
     TS_SOCKET=/var/run/tailscale/tailscaled.sock
 
-# procps: pkill for `fleet leave`. gnupg is not needed: the keyring is binary.
+# procps: pkill for `fleet leave`. netcat-openbsd: `fleet doctor` probes
+# isolation with nc. gnupg is not needed: the keyring is binary.
 # chromium + fonts: the agents' browser (lib/tools/chrome.sh); apt can only
-# install it as root, so it is always part of the image, never left to
-# `fleet apply` (which runs as the sudo-less node user). Headless, --no-sandbox.
+# install it as root, so it is part of the image, never left to `fleet apply`
+# (which runs as the sudo-less node user). Headless, --no-sandbox. Fleets
+# without `chrome` in FLEET_TOOLS build a slimmer image with
+# --build-arg FLEET_BROWSER=0.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl bash git openssh-server openssh-client python3 procps gzip tar \
-      chromium fonts-liberation fonts-noto-color-emoji \
+      ca-certificates curl bash git openssh-server openssh-client python3 procps gzip tar netcat-openbsd \
+ && if [ "${FLEET_BROWSER}" = 1 ]; then \
+      apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji; \
+    fi \
  && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
       -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
  && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list \

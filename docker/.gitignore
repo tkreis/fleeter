@@ -1,0 +1,3 @@
+# invite code for compose.yml (fleet invite --ephemeral --code-only > invite); never commit
+invite
+.env

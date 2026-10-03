@@ -1,0 +1,10 @@
+# never commit local state or test leftovers
+.DS_Store
+tests/.e2e-work/
+docker/invite
+docker/.env
+*.pre-fleet
+*.bak-*
+.fleet.*
+__pycache__/
+*.pyc

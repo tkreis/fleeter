@@ -1,0 +1,45 @@
+# fleet Docker node — real mode (docs/ARCHITECTURE.md "Docker nodes").
+#
+#   cd docker
+#   (umask 077; fleet invite --ephemeral --code-only > invite)   # on the master
+#   docker compose up -d --build && rm -f invite
+#
+# The invite is a compose *secret* (a file mounted at /run/secrets/fleet-invite),
+# not an environment variable, so it never shows in `docker inspect`. The file
+# `docker/invite` is git-ignored; delete it once the container has joined.
+#
+# ONE INVITE = ONE CONTAINER. The invite's Tailscale key is single use and the
+# nonce is consumed by the first node the master enrols, so
+#   docker compose up --scale node=N          with N > 1
+# only ever yields one working node; the others fail at `tailscale up`.
+# For N nodes use docker/spawn.sh N (mints one `fleet invite --ephemeral` per
+# container). A reusable auth key would make --scale work but is deliberately
+# not supported: it removes per-node revocation and lets anyone holding the key
+# add nodes until it expires (less safe; see docs/ARCHITECTURE.md "Node identity").
+#
+# No NET_ADMIN / /dev/net/tun: tailscaled runs with --tun=userspace-networking.
+# Nothing secret is in the image; the invite comes from docker/.env at run time.
+name: fleet
+services:
+  node:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        FLEET_PREINSTALL: ${FLEET_PREINSTALL:-0}
+        FLEET_USER: fleet
+    image: fleet-node:local
+    secrets:
+      - fleet-invite
+    environment:
+      FLEET_INVITE_FILE: /run/secrets/fleet-invite
+      TS_STATE_DIR: /var/lib/tailscale
+      # optional local overrides written to ~/.config/fleet/fleet.conf, e.g.
+      # FLEET_TOOLS: "base devtools claude"
+    # tailscaled state lives in the container; ephemeral nodes should not survive it
+    stop_grace_period: 20s
+    restart: "no"
+
+secrets:
+  fleet-invite:
+    file: ./invite

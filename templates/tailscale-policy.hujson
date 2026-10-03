@@ -1,0 +1,71 @@
+// Fleet tailnet policy template.
+//
+// `fleet init master` and `fleet policy check` fetch the live policy through the
+// API and verify it contains these tagOwners and grants and no rule with a
+// wildcard or tag:fleet-node src; `fleet policy apply` shows the diff and
+// replaces the live policy with this file (If-Match on the ETag). Or merge by
+// hand at https://login.tailscale.com/admin/acls/file.
+//
+// Intent, in one sentence: the owner's own devices may reach fleet nodes on
+// SSH, and fleet nodes may reach NOTHING inside the tailnet.
+//
+// A node tagged tag:fleet-node may only talk to the public internet (GitHub,
+// vendor APIs, package mirrors). Tailnet policy only governs tailnet traffic;
+// it never restricts a node's internet access, and it does not govern LAN or
+// Docker-bridge traffic either (the master listens on loopback only, so that
+// is fine).
+//
+// IMPORTANT: the default policy ships with a rule like
+//   {"src": ["autogroup:member"], "dst": ["*"], "ip": ["*"]}
+// or the legacy `"acls": [{"action":"accept","src":["*"],"dst":["*:*"]}]`.
+// A `src: ["*"]` rule includes tagged devices and would let a node reach the
+// master. Remove or narrow such rules so that no grant has tag:fleet-node
+// (or "*") as src. `fleet doctor` tests this from a node and fails if the
+// node can reach the master.
+{
+  // Only tailnet admins may apply tag:fleet-node. The OAuth client that
+  // `fleet invite` uses must itself carry tag:fleet-node (scopes: auth_keys,
+  // devices:core), so keys minted through it can only create tagged nodes.
+  "tagOwners": {
+    "tag:fleet-node": ["autogroup:admin"],
+  },
+
+  "grants": [
+    // Owner's (user-owned) devices -> fleet nodes: OpenSSH and ping. Nothing else.
+    {
+      "src": ["autogroup:member"],
+      "dst": ["tag:fleet-node"],
+      "ip":  ["tcp:22", "icmp:*"],
+    },
+
+    // Owner's devices may still talk to each other (keep if you had it).
+    {
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:member"],
+      "ip":  ["*"],
+    },
+
+    // There is deliberately NO grant with "src": ["tag:fleet-node"].
+    // Nodes cannot reach the master, each other, or any other tailnet device.
+  ],
+
+  // Optional: Tailscale SSH for Linux/Docker nodes (`fleet join --tailscale-ssh`).
+  // Not needed for the default OpenSSH transport. macOS App Store / standalone
+  // GUI builds cannot act as a Tailscale SSH server, so this never replaces
+  // OpenSSH on Mac nodes.
+  // "ssh": [
+  //   {
+  //     "action": "check",
+  //     "src":    ["autogroup:member"],
+  //     "dst":    ["tag:fleet-node"],
+  //     "users":  ["autogroup:nonroot"],
+  //   },
+  // ],
+
+  // `fleet doctor` and `tailscale ping` from a node must FAIL against the
+  // master. Example tests (run from the master):
+  // "tests": [
+  //   {"src": "tag:fleet-node", "deny": ["autogroup:member:22", "autogroup:member:8080"]},
+  //   {"src": "autogroup:member", "accept": ["tag:fleet-node:22"]},
+  // ],
+}

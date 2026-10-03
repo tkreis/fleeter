@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# fleet — provision and control a personal fleet of agent machines.
+# See README.md and docs/ARCHITECTURE.md. Runs on macOS (bash 3.2) and Linux.
+set -eu
+
+# Resolve the repo root even when invoked through a symlink in ~/.local/bin.
+_self=$0
+while [ -L "$_self" ]; do
+  _link=$(readlink "$_self")
+  case "$_link" in /*) _self=$_link ;; *) _self=$(dirname "$_self")/$_link ;; esac
+done
+FLEET_ROOT=$(cd "$(dirname "$_self")" && pwd -P)
+export FLEET_ROOT
+
+# shellcheck source=lib/common.sh
+. "$FLEET_ROOT/lib/common.sh"
+fleet_load_config     # config/defaults.conf -> ~/.config/fleet/fleet.conf -> $FLEET_CONFIG_DIR/fleet.conf -> local again
+for _f in "$FLEET_ROOT"/lib/[a-z]*.sh; do
+  [ "$_f" = "$FLEET_ROOT/lib/common.sh" ] && continue
+  # shellcheck source=/dev/null
+  . "$_f"
+done
+
+usage() {
+  cat <<'EOF'
+fleet — personal agent fleet
+
+Master:
+  init master [--config-dir DIR] [--reconfigure]   set up this machine as the master
+  secrets set NAME [--profile P]    store a secret (hidden prompt or stdin); P = minimal|full
+  secrets list                      names and profiles only
+  files add PATH [--profile P]      mirror a file under $HOME (e.g. a .env) to nodes
+  proxy import [DIR]                copy CLIProxyAPI config + logins into the vault (default ~/cli-proxy-api)
+  invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]   print a one-line join command
+  nodes [--live]                    list registered nodes (--live: ask each node for its status)
+  provision NODE [--refresh-proxy-auth]   push secrets + files (+ code/config once), run apply on NODE
+  reconcile                         enrol new nodes, provision every online node that is behind
+  kick NODE [--yes]                 revoke NODE (stop, tailnet delete, deploy keys)
+  config publish [--yes] [--no-capture]   capture this machine's harness config into the config repo, commit, push
+  policy check|apply                verify / replace the tailnet policy (templates/tailscale-policy.hujson)
+  doctor                            vault modes, policy, tokens, isolation probes, schedules
+
+Node:
+  join                              join the tailnet and enrol with the master
+  apply                             converge tools, instructions, harness config, skills, env, timers
+  pull                              fetch the code and config repos, apply if either changed
+  update                            run vendor updaters
+  memory sync [--reset]             commit, pull --rebase, push the memory vault (--reset clears a conflict)
+  login [TOOL]                      open login page or start device-code flow
+  status [--json]                   versions, logins, digest, memory state
+  leave                             stop timers and harness processes, tailscale logout
+  daemon                            foreground scheduler (containers)
+
+Global: --version, --help
+EOF
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  ""|-h|--help|help) usage ;;
+  --version|version) echo "fleet $FLEET_VERSION" ;;
+  init)       [ "${1:-}" = master ] || die "usage: fleet init master [--config-dir DIR] [--reconfigure]"; shift; cmd_init_master "$@" ;;
+  secrets)    sub=${1:-}; [ $# -gt 0 ] && shift
+              case "$sub" in set) cmd_secrets_set "$@" ;; list) cmd_secrets_list "$@" ;;
+                *) die "usage: fleet secrets set|list" ;; esac ;;
+  files)      [ "${1:-}" = add ] || die "usage: fleet files add PATH"; shift; cmd_files_add "$@" ;;
+  proxy)      [ "${1:-}" = import ] || die "usage: fleet proxy import [DIR]"; shift; cmd_proxy_import "$@" ;;
+  invite)     cmd_invite "$@" ;;
+  nodes)      cmd_nodes "$@" ;;
+  provision)  cmd_provision "$@" ;;
+  reconcile)  cmd_reconcile "$@" ;;
+  kick)       cmd_kick "$@" ;;
+  config)     [ "${1:-}" = publish ] || die "usage: fleet config publish [--yes] [--no-capture]"; shift; cmd_config_publish "$@" ;;
+  doctor)     cmd_doctor "$@" ;;
+  policy)     cmd_policy "$@" ;;
+  panel)      die "the control panel is not part of this version" "use fleet nodes --live, fleet kick, and the Tailscale admin console" ;;
+  join)       cmd_join "$@" ;;
+  apply)      cmd_apply "$@" ;;
+  pull)       cmd_pull "$@" ;;
+  update)     cmd_update "$@" ;;
+  memory)     [ "${1:-}" = sync ] || die "usage: fleet memory sync [--reset]"; shift; cmd_memory_sync "$@" ;;
+  login)      cmd_login "$@" ;;
+  status)     cmd_status "$@" ;;
+  leave)      cmd_leave "$@" ;;
+  daemon)     cmd_daemon "$@" ;;
+  *) usage >&2; die "unknown command: $cmd" ;;
+esac

@@ -1,0 +1,27 @@
+# CLIProxyAPI on a fleet node. Rendered by lib/tools/cliproxy.sh into
+# ~/cli-proxy-api/compose.yaml; @FLEET_PROXY_IMAGE@ comes from config/fleet.conf.
+services:
+  cli-proxy-api:
+    image: @FLEET_PROXY_IMAGE@
+    container_name: cli-proxy-api
+    # Comes back after the daemon restarts; stays down if you stop it by hand.
+    restart: unless-stopped
+    environment:
+      # Image defaults to +08:00; log timestamps otherwise disagree with the host.
+      TZ: Europe/Berlin
+    ports:
+      # localhost only — /management.html is served without auth.
+      - "127.0.0.1:8317:8317"
+    # Mount the config's *directory*, not the file. A single-file bind mount
+    # pins an inode, so any editor that writes atomically (write temp + rename)
+    # leaves the container looking at a deleted file until it is recreated.
+    command: ["./CLIProxyAPI", "-config", "/config/config.yaml"]
+    volumes:
+      - ./conf:/config
+      - ./auth:/root/.cli-proxy-api
+      - ./plugins:/CLIProxyAPI/plugins
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

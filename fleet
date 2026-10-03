@@ -36,7 +36,10 @@ Master:
   ssh NODE [COMMAND...]             shell on NODE, or run COMMAND there (e.g. fleet ssh mac2 fleet status)
   provision NODE [--refresh-proxy-auth]   push secrets + files (+ code/config once), run apply on NODE
   reconcile                         enrol new nodes, provision every online node that is behind
-  kick NODE [--yes]                 revoke NODE (stop, tailnet delete, deploy keys)
+  kick NODE [--yes]                 revoke NODE (stop, tailnet delete, deploy keys, T3 access)
+  t3 setup [NODE]                   let T3 Code on this machine use NODE (SSH environment fleet-<name>)
+  t3 status [NODE]                  check the T3 path as T3 would use it; list the node's T3 sessions
+  t3 revoke NODE                    revoke NODE's T3 sessions, pairing tokens and the client key
   config publish [--yes] [--no-capture]   capture this machine's harness config into the config repo, commit, push
   policy check|apply                verify / replace the tailnet policy (templates/tailscale-policy.hujson)
   doctor                            vault modes, policy, tokens, isolation probes, schedules
@@ -73,6 +76,7 @@ case "$cmd" in
   provision)  cmd_provision "$@" ;;
   reconcile)  cmd_reconcile "$@" ;;
   kick)       cmd_kick "$@" ;;
+  t3)         cmd_t3 "$@" ;;
   config)     [ "${1:-}" = publish ] || die "usage: fleet config publish [--yes] [--no-capture]"; shift; cmd_config_publish "$@" ;;
   doctor)     cmd_doctor "$@" ;;
   policy)     cmd_policy "$@" ;;

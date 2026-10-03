@@ -338,6 +338,42 @@ read_secret() {
   eval "$_var=\$_val"
 }
 
+# ---------- T3 Code client key (shared by master and node side) ----------
+#
+# T3 Code's SSH environment type (pingdotgg/t3code packages/ssh/src/tunnel.ts)
+# needs exactly three things from the node's sshd: non-pty remote commands
+# (`sh -l -s` / `sh -s` with a script on stdin), a local forward to the T3
+# server on 127.0.0.1 (`ssh -N -L <local>:127.0.0.1:<port>`), and nothing
+# else. The key the master's desktop app uses is therefore authorised with
+# `restrict` (no pty, no agent/X11 forwarding, no user rc) plus only what the
+# flow needs back: port forwarding, limited to loopback destinations, and only
+# from the tailnet. The comment is the handle every add/remove matches on.
+T3_CLIENT_KEY_COMMENT="fleet-t3-client"
+T3_CLIENT_KEY_OPTIONS='restrict,port-forwarding,permitopen="127.0.0.1:*",from="100.64.0.0/10,fd7a:115c:a1e0::/48"'
+
+# t3_authorized_line PUBKEY_FILE — the authorized_keys line for the T3 client
+# key: options, key type, key, fixed comment.
+t3_authorized_line() {
+  local type key
+  read -r type key _ <"$1" || return 1
+  [ -n "$type" ] && [ -n "$key" ] || return 1
+  printf '%s %s %s %s\n' "$T3_CLIENT_KEY_OPTIONS" "$type" "$key" "$T3_CLIENT_KEY_COMMENT"
+}
+
+# T3_AUTHKEY_SCRIPT — POSIX sh, run on the node as `sh -c '<script>'` with the
+# desired line on stdin (an empty line removes the key). Every line whose
+# comment is fleet-t3-client is dropped, the new line appended once, the file
+# rewritten (0600, tmp + mv) only when it changes. No single quotes inside: the
+# master passes it through the node's login shell in single quotes.
+# shellcheck disable=SC2016,SC2034  # expanded by the node's shell; used by lib/t3.sh and the tests
+T3_AUTHKEY_SCRIPT='umask 077; mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" || exit 1
+ak="$HOME/.ssh/authorized_keys"; IFS= read -r line || line=""
+[ -f "$ak" ] || [ -n "$line" ] || exit 0
+tmp=$(mktemp "$HOME/.ssh/.fleet.XXXXXX") || exit 1
+{ [ -f "$ak" ] && grep -v " fleet-t3-client\$" "$ak"; [ -n "$line" ] && printf "%s\n" "$line"; } >"$tmp"
+if [ -f "$ak" ] && cmp -s "$tmp" "$ak"; then rm -f "$tmp"; exit 0; fi
+chmod 600 "$tmp" && mv -f "$tmp" "$ak"'
+
 # ---------- tool plug-ins ----------
 
 # Every lib/tools/<name>.sh defines tool_<name>_{install,update,status}.

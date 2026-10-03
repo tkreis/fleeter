@@ -373,9 +373,12 @@ except Exception: pass')
 # ---------- ssh ----------
 
 # ssh_to USER HOST CMD — raw ssh with the master key. stdin passes through.
+# Host keys live in vault/ssh/known_hosts (lib/t3.sh): strict once the node is
+# pinned, accept-new only for the very first contact with a node.
 ssh_to() {
   local user=$1 host=$2; shift 2
-  ssh -i "$(master_key)" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+  ssh -i "$(master_key)" -o BatchMode=yes -o "StrictHostKeyChecking=$(ssh_strict_mode "$host")" \
+      -o "UserKnownHostsFile=$(known_hosts_file)" -o HashKnownHosts=no -o HostKeyAlgorithms=ssh-ed25519 \
       -o ConnectTimeout=10 -o LogLevel=ERROR "$user@$host" "$@"
 }
 
@@ -398,13 +401,15 @@ cmd_ssh() {
   user=$(registry_get "$id" user); host=$(registry_get "$id" dnsname)
   [ -n "$user" ] && [ -n "$host" ] || die "registry entry for $q has no user/host" "fleet reconcile"
   if [ $# -eq 0 ]; then
-    exec ssh -t -i "$FLEET_VAULT/ssh/fleet_master" -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR "$user@$host"
+    exec ssh -t -i "$(master_key)" -o "StrictHostKeyChecking=$(ssh_strict_mode "$host")" -o "UserKnownHostsFile=$(known_hosts_file)" \
+      -o HashKnownHosts=no -o HostKeyAlgorithms=ssh-ed25519 -o LogLevel=ERROR "$user@$host"
   fi
   # quote every argument for the remote shell, then load env.sh before running
   remote=""
   for a in "$@"; do remote="$remote $(printf '%q' "$a")"; done
   # shellcheck disable=SC2016  # expanded by the node's shell
-  exec ssh -t -i "$FLEET_VAULT/ssh/fleet_master" -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR "$user@$host" \
+  exec ssh -t -i "$(master_key)" -o "StrictHostKeyChecking=$(ssh_strict_mode "$host")" -o "UserKnownHostsFile=$(known_hosts_file)" \
+    -o HashKnownHosts=no -o HostKeyAlgorithms=ssh-ed25519 -o LogLevel=ERROR "$user@$host" \
     'PATH="$HOME/.local/bin:$PATH"; [ -f "$HOME/.config/fleet/env.sh" ] && . "$HOME/.config/fleet/env.sh";'"$remote"
 }
 
@@ -725,6 +730,7 @@ cmd_init_master() {
     ok "generated master ssh key $(master_key)"
   fi
   chmod 0600 "$(master_key)"; chmod 0644 "$(master_key).pub"
+  t3_client_key_ensure      # the key T3 Code uses towards nodes; never the master key (lib/t3.sh)
 
   if [ ! -f "$FLEET_VAULT/tailscale.json" ] || [ "$reconfigure" = 1 ]; then
     with_bootstrap_token ts_bootstrap
@@ -982,6 +988,8 @@ provision_node() {
   name=$(registry_get "$id" name); profile=$(registry_get "$id" profile)
   digest=$(desired_digest "$profile")
   log "provision $name ($id, profile $profile)"
+  # 0. a node enrolled before host keys were pinned gets pinned on its next provision
+  known_hosts_has "$(registry_get "$id" dnsname)" || host_key_pin "$(registry_get "$id" user)" "$(registry_get "$id" dnsname)" || true
 
   # 1. code and config: shipped when the node has no git checkout of them yet
   #    (afterwards `fleet pull` on the node tracks the repos), and on every
@@ -1014,6 +1022,17 @@ provision_node() {
   if [ "${FLEET_REFRESH_PROXY_AUTH:-0}" = 1 ]; then
     node_ssh "$id" 'umask 077; mkdir -p ~/.cli-proxy-api && touch ~/.cli-proxy-api/.force' </dev/null \
       || warn "could not request proxy auth refresh on $name"
+  fi
+
+  # 3c. the T3 Code client key in the node's authorized_keys (restricted line,
+  #     lib/common.sh), present unless `fleet t3 revoke` switched it off
+  provision_abort_if_revoked "$id" t3 && return 3
+  if [ -f "$(t3_client_key)" ]; then
+    if [ "$(registry_get "$id" t3_access)" != false ]; then
+      t3_authorize_node "$id" </dev/null || warn "$name: could not authorise the T3 client key"
+    else
+      t3_deauthorize_node "$id" </dev/null || warn "$name: could not remove the T3 client key"
+    fi
   fi
 
   # 4. bring the node's code and config checkouts to origin/main first (the
@@ -1175,6 +1194,9 @@ except Exception: pass')
   mv "$pf" "$cf" 2>/dev/null || { [ -n "${FLEET_VERBOSE:-}" ] && warn "peer $host: invite already claimed"; return 0; }
   name=$(json_get "$cf" name); profile=$(json_get "$cf" profile); ephemeral=$(json_get "$cf" ephemeral)
   log "enrol $name ($id, $dns)"
+  # The first contact above ran with accept-new; from here on every ssh to this
+  # node is strict against the key read from inside that session.
+  host_key_pin "$user" "$dns" || true
 
   pub_c=$(ssh_to "$user" "$dns" 'cat ~/.ssh/fleet_config.pub' </dev/null) || { warn "$name: no ~/.ssh/fleet_config.pub"; claim_release "$cf"; return 0; }
   pub_m=$(ssh_to "$user" "$dns" 'cat ~/.ssh/fleet_memory.pub' </dev/null) || { warn "$name: no ~/.ssh/fleet_memory.pub"; claim_release "$cf"; return 0; }
@@ -1302,6 +1324,7 @@ cmd_reconcile() {
     fi
     state=$(registry_get "$pid" state)
     [ "$state" = revoked ] && continue
+    known_hosts_has "$dns" || host_key_pin "$(registry_get "$pid" user)" "$dns" || true
     profile=$(registry_get "$pid" profile)
     digest=$(desired_digest "$profile")
     if [ "$state" = provisioned ] && [ "$(registry_get "$pid" provisioned_digest)" = "$digest" ]; then
@@ -1312,6 +1335,8 @@ cmd_reconcile() {
     provision_locked "$pid" || true
     lock_release "$lock" $$
   done
+  # the master's ssh config follows the registry (lib/t3.sh; no-op without the T3 key)
+  t3_ssh_config_write
 
   # 3. revoked nodes: retry pending cleanup. Runs before, and regardless of,
   #    the device list call below: a failing API must not postpone deletes.
@@ -1338,13 +1363,13 @@ cmd_reconcile() {
       [ -n "$(registry_get "$id" missing_since)" ] && registry_set "$id" missing_since ""
       continue
     fi
-    # a pending remote stop needs the node on the tailnet; the device is gone, drop it
-    stops=$(json_list "$(registry_path "$id")" pending_cleanup | grep '^stop:' || true)
+    # a pending remote stop or T3 revoke needs the node on the tailnet; the device is gone, drop it
+    stops=$(json_list "$(registry_path "$id")" pending_cleanup | grep '^stop:\|^t3:' || true)
     if [ -n "$stops" ]; then
       lock="$FLEET_VAULT/locks/$id"
       if lock_acquire "$lock"; then
         # shellcheck disable=SC2046  # the list is space-separated by construction
-        registry_set "$id" pending_cleanup "json:$(words_json $(json_list "$(registry_path "$id")" pending_cleanup | grep -v '^stop:' || true))"
+        registry_set "$id" pending_cleanup "json:$(words_json $(json_list "$(registry_path "$id")" pending_cleanup | grep -v '^stop:\|^t3:' || true))"
         audit cleanup "$(registry_get "$id" name)" "$(echo "$stops" | tr '\n' ' ')dropped (device gone)"
         lock_release "$lock" $$
       fi
@@ -1404,6 +1429,7 @@ cleanup_label() {
     gh:config:*) echo "github deploy key (config) delete" ;;
     gh:memory:*) echo "github deploy key (memory) delete" ;;
     stop:*)      echo "remote stop (fleet leave)" ;;
+    t3:*)        echo "T3 access revoke on the node" ;;
     *) echo "$1" ;;
   esac
 }
@@ -1438,6 +1464,9 @@ cleanup_item() {
                  peer_online "$(ts_peers)" "$val" || return 1
                  # shellcheck disable=SC2088  # remote shell expands ~
                  with_timeout 60 node_ssh "$val" '~/.local/bin/fleet leave' ;;
+    t3:*)        val=${1#t3:}
+                 peer_online "$(ts_peers)" "$val" || return 1
+                 with_timeout 300 t3_node_revoke "$val" ;;
     *) warn "unknown cleanup item $1 (dropped)"; return 0 ;;
   esac
 }
@@ -1463,7 +1492,7 @@ cleanup_pending() {
 # ---------- kick ----------
 
 cmd_kick() {
-  local yes=0 q="" id name lock i=0 results="" n left stop_failed=0
+  local yes=0 q="" id name lock i=0 results="" n left stop_failed=0 t3_failed=0
   while [ $# -gt 0 ]; do
     case "$1" in --yes|-y) yes=1 ;; -*) die "unknown flag: $1" ;; *) q=$1 ;; esac; shift
   done
@@ -1492,8 +1521,17 @@ cmd_kick() {
   ok "registry: $name marked revoked"
 
   # 3. each step independent, each reported. A failed remote stop is queued
-  #    as stop:<id>: reconcile retries it while the node is still on the
-  #    tailnet and drops it once the device is gone.
+  #    as stop:<id>, a failed T3 revoke as t3:<id>: reconcile retries them
+  #    while the node is still on the tailnet and drops them once the device
+  #    is gone.
+  if [ -f "$(t3_client_key)" ]; then
+    # one `t3 auth session revoke` per session: a node with many stale sessions takes a while
+    if with_timeout 300 t3_node_revoke "$id" >/dev/null 2>&1; then
+      ok "t3 access: revoked (sessions, pairing tokens, client key)"
+    else
+      warn "t3 access: FAILED (node offline or already gone); kept in pending_cleanup"; t3_failed=1
+    fi
+  fi
   # shellcheck disable=SC2088  # remote shell expands ~
   if with_timeout 60 node_ssh "$id" '~/.local/bin/fleet leave' >/dev/null 2>&1; then
     ok "remote stop: ok"; results="$results stop=ok"
@@ -1501,13 +1539,19 @@ cmd_kick() {
     warn "remote stop: FAILED (node offline or already gone); kept in pending_cleanup"; results="$results stop=fail"; stop_failed=1
   fi
   cleanup_pending "$id" || true
-  if [ "$stop_failed" = 1 ]; then
+  if [ "$t3_failed" = 1 ]; then
     # shellcheck disable=SC2046  # the list is space-separated by construction
+    registry_set "$id" pending_cleanup "json:$(words_json t3:"$id" $(json_list "$(registry_path "$id")" pending_cleanup))"
+  fi
+  if [ "$stop_failed" = 1 ]; then
+    # shellcheck disable=SC2046
     registry_set "$id" pending_cleanup "json:$(words_json stop:"$id" $(json_list "$(registry_path "$id")" pending_cleanup))"
   fi
+  t3_ssh_config_write
   left=$(json_list "$(registry_path "$id")" pending_cleanup | tr '\n' ' ')
   case "$left" in *ts:device:*) results="$results ts=fail" ;; *) results="$results ts=ok" ;; esac
   case "$left" in *gh:*) results="$results gh=fail" ;; *) results="$results gh=ok" ;; esac
+  if [ -f "$(t3_client_key)" ]; then case "$left" in *t3:*) results="$results t3=fail" ;; *) results="$results t3=ok" ;; esac; fi
   [ -n "$left" ] && warn "pending cleanup (retried by every reconcile): $left"
   lock_release "$lock" $$
 
@@ -1640,7 +1684,8 @@ cmd_doctor() {
     m=$(mode_of "$f")
     if [ "$m" = 700 ]; then ok "dir $f $m"; else warn "dir $f is $m, want 700"; fails=$((fails + 1)); fi
   done
-  for f in "$FLEET_VAULT"/secrets/*.env "$FLEET_VAULT/tailscale.json" "$FLEET_VAULT/github.json" "$FLEET_VAULT/digest.key" "$FLEET_VAULT/ssh/fleet_master" "$FLEET_VAULT"/nodes/*.json; do
+  for f in "$FLEET_VAULT"/secrets/*.env "$FLEET_VAULT/tailscale.json" "$FLEET_VAULT/github.json" "$FLEET_VAULT/digest.key" \
+           "$FLEET_VAULT/ssh/fleet_master" "$FLEET_VAULT/ssh/t3_client" "$FLEET_VAULT/ssh/known_hosts" "$(t3_ssh_include)" "$FLEET_VAULT"/nodes/*.json; do
     [ -f "$f" ] || continue
     m=$(mode_of "$f")
     if [ "$m" = 600 ]; then :; else warn "file $f is $m, want 600"; fails=$((fails + 1)); fi

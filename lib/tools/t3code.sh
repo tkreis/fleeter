@@ -3,6 +3,21 @@
 # itself (electron-updater), so install only converges presence.
 #   macOS: <tag>/T3-Code-<ver>-{arm64,x64}.dmg → /Applications (or ~/Applications)
 #   Linux: <tag>/T3-Code-<ver>-{arm64,x86_64}.AppImage → ~/.local/bin/t3code, GUI only
+#
+# Remote use from the master (fleet t3 setup, lib/t3.sh) needs none of this:
+# T3's SSH flow installs its own `t3` CLI archive under ~/.t3/runtime/versions/
+# with curl|wget + tar (darwin-arm64, linux-arm64, linux-x64; there is no
+# darwin-x64 archive) and reuses the desktop app's server when it is running.
+# The status line reports which runtimes are present.
+
+# _t3_runtimes — versions of the t3 CLI archive T3 installed, oldest first.
+_t3_runtimes() {
+  local d r=""
+  for d in "$HOME"/.t3/runtime/versions/*/; do
+    [ -x "$d/t3" ] && [ -s "$d/.install-complete" ] && r="$r $(basename "$d")"
+  done
+  printf '%s' "${r# }"
+}
 
 _t3_app() {
   local a
@@ -75,17 +90,18 @@ tool_t3code_install() {
 tool_t3code_update() { :; }
 
 tool_t3code_status() {
-  local app ver
+  local app ver rt
   if fleet_in_container; then echo "skipped container"; return 0; fi
+  rt=$(_t3_runtimes); rt=${rt:+ runtime:$(printf '%s' "$rt" | tr ' ' ',')}
   case "$(fleet_os)" in
     macos)
       app=$(_t3_app) || { echo "missing run: fleet apply"; return 0; }
       ver=$(defaults read "$app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null)
-      echo "ok ${ver:-?} self-updates" ;;
+      echo "ok ${ver:-?} self-updates$rt" ;;
     linux)
-      _t3_has_display || { echo "skipped no display"; return 0; }
+      _t3_has_display || { echo "skipped no display$rt"; return 0; }
       [ -x "$FLEET_BIN/t3code" ] || { echo "missing run: fleet apply"; return 0; }
-      echo "ok $(cat "$(_t3_version_file)" 2>/dev/null || echo '?') self-updates" ;;
+      echo "ok $(cat "$(_t3_version_file)" 2>/dev/null || echo '?') self-updates$rt" ;;
     *) echo "skipped unsupported os" ;;
   esac
 }

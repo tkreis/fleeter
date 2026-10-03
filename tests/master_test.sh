@@ -45,6 +45,11 @@ fi
 # ---------- environment: everything under $T ----------
 export T
 export HOME="$T/master-home"
+# git: an identity of our own (init master and config publish require one) and
+# no dependence on the host's ~/.gitconfig; every `git init` below also pins the
+# default branch, so a clean Debian without init.defaultBranch behaves like macOS.
+export GIT_CONFIG_GLOBAL="$T/gitconfig"
+printf '[user]\n\tname = fleet tester\n\temail = tester@example.invalid\n' >"$GIT_CONFIG_GLOBAL"
 export FLEET_HOME="$HOME/.config/fleet"
 export FLEET_VAULT="$FLEET_HOME/vault"
 export FLEET_NO_SCHEDULER=1
@@ -134,7 +139,7 @@ ALLOW_ALL='// default
 # fake tailnet: alpha + beta online + tagged, gamma untagged
 write_status() {   # write_status EXTRA_PEERS [FILE]
   cat >"${2:-$FLEET_TS_STATUS_JSON}" <<EOF
-{"Self":{"ID":"nSELF","HostName":"mac","TailscaleIPs":["100.64.0.1"]},"Peer":{
+{"BackendState":"Running","Self":{"ID":"nSELF","HostName":"mac","TailscaleIPs":["100.64.0.1"]},"Peer":{
  "k1":{"ID":"nAAAACNTRL","HostName":"fleet-alpha","DNSName":"fleet-alpha.tail1.ts.net.","TailscaleIPs":["100.64.0.11"],"Online":true,"Tags":["tag:fleet-node"]},
  "k2":{"ID":"nBBBBCNTRL","HostName":"fleet-beta","DNSName":"fleet-beta.tail1.ts.net.","TailscaleIPs":["100.64.0.12"],"Online":true,"Tags":["tag:fleet-node"]},
  "k3":{"ID":"nCCCCCNTRL","HostName":"laptop","DNSName":"laptop.tail1.ts.net.","Online":true}
@@ -157,17 +162,36 @@ mk_node() {  # mk_node DNSNAME NONCE
 # digest_of PROFILE — desired_digest as the master computes it.
 digest_of() { FLEET_ROOT=$ROOT bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/master.sh"; desired_digest "$1"' _ "$1" 2>/dev/null; }
 
-# the master's config repo: the shipped example with example repo URLs, committed
+# the master's config repo: the shipped example with example repo URLs, committed.
+# This fleet opts in to T3 Code remote access (the default is off; tested below).
 CFG="$T/fleet-config"
 cp -R "$ROOT/examples/fleet-config" "$CFG"
 sed 's/YOU/example/g' "$ROOT/examples/fleet-config/fleet.conf" >"$CFG/fleet.conf"
-( cd "$CFG" && git init -q -b main && git config user.email t@example.invalid && git config user.name t && git add -A && git commit -q -m "config v1" )
+printf 'FLEET_T3_REMOTE=1\n' >>"$CFG/fleet.conf"
+( cd "$CFG" && git -c init.defaultBranch=main init -q && git config user.email t@example.invalid && git config user.name t && git add -A && git commit -q -m "config v1" )
+
+# ======================================================================
+echo "== init master preflight: nothing is written while Tailscale or git are not ready"
+PRE="$T/preflight-home"; mkdir -p "$PRE"
+pre_fleet() { HOME="$PRE" FLEET_HOME="$PRE/.config/fleet" FLEET_VAULT="$PRE/.config/fleet/vault" bash "$FLEET" "$@"; }
+echo '{"BackendState":"NeedsLogin","Self":{}}' >"$T/status-needslogin.json"
+# a token of its own on stdin: it must never be read (a read would revoke it at the fake API)
+out=$(printf 'tskey-api-kbootpre-FAKE\n' | FLEET_TS_STATUS_JSON="$T/status-needslogin.json" pre_fleet init master --config-dir "$CFG" 2>&1); rc=$?
+assert "tailscale not logged in: init dies before writing anything, names the next step" bash -c "[ $rc != 0 ] && [ ! -e '$PRE/.config' ] && printf '%s' \"\$0\" | grep -q 'Tailscale is not logged in' && printf '%s' \"\$0\" | grep -q 'next: log in'" "$out"
+: >"$T/gitconfig-empty"
+# run from inside a git checkout that has an identity: only the machine's own config counts
+out=$(cd "$CFG" && printf 'tskey-api-kbootpre-FAKE\n' | GIT_CONFIG_GLOBAL="$T/gitconfig-empty" pre_fleet init master --config-dir "$CFG" 2>&1); rc=$?
+assert "no git identity: init dies before writing anything, shows the git config commands" bash -c "[ $rc != 0 ] && [ ! -e '$PRE/.config' ] && printf '%s' \"\$0\" | grep -q 'git has no identity' && printf '%s' \"\$0\" | grep -q 'git config --global user.name'" "$out"
+refute "preflight never asked for the Tailscale token" printf '%s' "$out" | grep -q 'login.tailscale.com'
+refute "preflight never used the token" grep -q 'kbootpre' "$API_LOG"
+rm -rf "$PRE"
 
 # ======================================================================
 echo "== init master (config dir, bootstrap token -> policy apply -> OAuth client -> revoke; gh fallback token)"
 assert "init master without a config dir dies with a hint" bash -c "printf 'tskey-api-kboot-FAKE\n' | bash '$FLEET' init master 2>&1 | grep -q 'next: master: fleet init master --config-dir'"
 out=$(printf 'tskey-api-kboot-FAKE\napply\nghtok\n' | bash "$FLEET" init master --config-dir "$CFG" 2>&1); rc=$?
 assert "init master exits 0" [ "$rc" = 0 ]
+assert "init reported the preflight (tailscale, git identity)" printf '%s' "$out" | grep -q 'preflight: commands present, Tailscale logged in, git identity fleet tester'
 assert "config dir recorded in the local fleet.conf (0600)" bash -c "grep -qx \"FLEET_CONFIG_DIR='$CFG'\" '$FLEET_HOME/fleet.conf' && [ \"\$(mode_of '$FLEET_HOME/fleet.conf')\" = 600 ]"
 assert "init reports the config dir" printf '%s' "$out" | grep -q "config dir: $CFG"
 assert "vault dir 0700" [ "$(mode_of "$FLEET_VAULT")" = 700 ]
@@ -861,6 +885,7 @@ echo "== GitHub CLI path (gh on PATH, no FLEET_GH_API): login, repo check, deplo
 HOME2="$T/master2"; mkdir -p "$HOME2/.config/fleet"
 printf "FLEET_CODE_REPO='https://github.com/example/fleeter.git'\n" >"$HOME2/.config/fleet/fleet.conf"
 gh_fleet() { env PATH="$T/ghbin:$PATH" FLEET_GH_API= HOME="$HOME2" FLEET_HOME="$HOME2/.config/fleet" FLEET_VAULT="$HOME2/.config/fleet/vault" FLEET_TS_STATUS_JSON="$T/status2.json" bash "$FLEET" "$@"; }
+write_status '' "$T/status2.json"          # this master's tailscale view (the preflight wants it logged in)
 touch "$GH_STATE/missing-example_fleet-memory"
 out=$(printf 'tskey-api-kboot5-FAKE\ny\n' | gh_fleet init master --config-dir "$CFG" 2>&1); rc=$?
 assert "init master (gh path) exits 0" [ "$rc" = 0 ]
@@ -893,6 +918,13 @@ assert "reconcile retries gh deletes until clean" [ "$(jget "$HOME2/.config/flee
 echo "== config publish (commits + pushes the config repo, never the code checkout)"
 git -C "$CFG" remote add origin "$T/cfg-remote.git"; git -C "$CFG" push -q -u origin main 2>/dev/null
 code_head=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo none)
+out=$(GIT_CONFIG_GLOBAL="$T/gitconfig-empty" bash "$FLEET" config publish --no-capture --yes 2>&1); rc=$?
+# the config checkout carries its own identity (set above), so this run must succeed either way
+assert "publish works with an identity on the repo alone" [ "$rc" = 0 ]
+git -C "$CFG" config --unset user.name; git -C "$CFG" config --unset user.email
+out=$(GIT_CONFIG_GLOBAL="$T/gitconfig-empty" bash "$FLEET" config publish --no-capture --yes 2>&1); rc=$?
+assert "publish without any git identity dies first, with the git config commands" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'git has no identity' && printf '%s' \"\$0\" | grep -q 'git config --global user.name'" "$out"
+git -C "$CFG" config user.email t@example.invalid; git -C "$CFG" config user.name t
 out=$(bash "$FLEET" config publish --no-capture --yes 2>&1); rc=$?
 assert "nothing to publish: exits 0, says so" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'nothing to commit'" "$out"
 echo "x" >"$CFG/skills/extra.md"

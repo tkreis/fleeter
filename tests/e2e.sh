@@ -154,9 +154,12 @@ assert "memory + code + config bare repos seeded, master config dir cloned" bash
 
 # ======================================================================
 step "master init (non-interactive), secrets"
+# the preflight wants a logged-in tailscale: the status file says Running before any peer exists
+printf '{"BackendState":"Running","Self":{"ID":"nMASTERCNTRL","HostName":"master"},"Peer":{}}\n' | mexec_i sh -c "cat > $MHOME/ts-status.json"
 # bootstrap API token (fake: tskey-api-kboot-FAKE), "apply" the policy template, GitHub token fallback (no gh in the image)
 printf 'tskey-api-kboot-FAKE\napply\nghtok\n' | mexec_i fleet init master --config-dir $MHOME/fleet-config >"$WORK/init.log" 2>&1; rc=$?
-assert "fleet init master exits 0" [ "$rc" = 0 ]
+assert "fleet init master exits 0" [ "$rc" = 0 ] || tail -5 "$WORK/init.log"
+assert "init ran the preflight (tailscale, git identity)" grep -q 'preflight: commands present, Tailscale logged in, git identity e2e' "$WORK/init.log"
 assert "config dir recorded in the master's local fleet.conf" bash -c "mfile $MHOME/.config/fleet/fleet.conf | grep -q \"^FLEET_CONFIG_DIR='$MHOME/fleet-config'\""
 assert "vault 0700" [ "$(mexec stat -c %a $VAULT)" = 700 ]
 assert "master ssh key generated" mexec test -f $VAULT/ssh/fleet_master.pub
@@ -231,7 +234,7 @@ assert "node a: join log says waiting for master" bash -c "docker logs $NA 2>&1 
 ipa=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NA")
 ipb=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NB")
 write_status() {   # write_status ONLINE_A ONLINE_B
-  printf '{"Self":{"ID":"nMASTERCNTRL","HostName":"master"},"Peer":{
+  printf '{"BackendState":"Running","Self":{"ID":"nMASTERCNTRL","HostName":"master"},"Peer":{
  "p1":{"ID":"%s","HostName":"fleet-alpha","DNSName":"%s.","TailscaleIPs":["%s"],"Online":%s,"Tags":["tag:fleet-node"]},
  "p2":{"ID":"%s","HostName":"fleet-beta","DNSName":"%s.","TailscaleIPs":["%s"],"Online":%s,"Tags":["tag:fleet-node"]},
  "p3":{"ID":"nLAPTOPCNTRL","HostName":"laptop","DNSName":"laptop.","Online":true}}}\n' \

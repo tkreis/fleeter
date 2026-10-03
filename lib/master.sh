@@ -337,6 +337,15 @@ ts_status_json() {
   else "$(tailscale_bin)" status --json 2>/dev/null || { warn "tailscale status failed"; return 0; }; fi
 }
 
+# ts_backend_state — BackendState from `tailscale status` (Running = logged in), or empty.
+ts_backend_state() {
+  ts_status_json 2>/dev/null | python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin).get("BackendState", ""))
+except Exception:
+    print("")'
+}
+
 # ts_peers — one line per peer tagged FLEET_NODE_TAG:
 #   ID<TAB>HostName<TAB>DNSName<TAB>online(true|false)<TAB>first TailscaleIP
 ts_peers() {
@@ -709,6 +718,38 @@ config_dir_setup() {
   config_dir_require
 }
 
+# init_preflight — everything init needs from the machine, checked before a
+# single file is written: the commands, a logged-in Tailscale client, a git
+# identity (publish and the memory seed commit as you), and how GitHub will be
+# reached. Each failure names the next step.
+init_preflight() {
+  local c missing="" state name email
+  for c in ssh ssh-keygen python3 git tar gzip base64; do have "$c" || missing="$missing $c"; done
+  [ -z "$missing" ] || die "missing commands:$missing" \
+    "install them (macOS: xcode-select --install; Debian/Ubuntu: sudo apt install git python3 openssh-client), then rerun: fleet init master"
+  if [ -z "${FLEET_TS_STATUS_JSON:-}" ] && ! tailscale_bin >/dev/null; then
+    die "the Tailscale CLI is not installed on this machine" \
+      "install Tailscale (https://tailscale.com/download), log in to your tailnet, then rerun: fleet init master"
+  fi
+  state=$(ts_backend_state)
+  [ "$state" = Running ] || die "Tailscale is not logged in on this machine (state: ${state:-unknown})" \
+    "log in (tailscale up, or the Tailscale app), check that 'tailscale status' lists your devices, then rerun: fleet init master"
+  # from a neutral directory: the identity of a repo we happen to be in does not count
+  name=$(cd / && git config --get user.name 2>/dev/null || true); email=$(cd / && git config --get user.email 2>/dev/null || true)
+  [ -n "$name" ] && [ -n "$email" ] || die "git has no identity on this machine (user.name / user.email)" \
+    "git config --global user.name 'Your Name' && git config --global user.email you@example.com   (fleet config publish and the memory seed commit as you)"
+  if [ -n "${FLEET_GH_API:-}" ] || [ -f "$FLEET_VAULT/github.json" ] || gh_cli; then
+    :
+  elif have gh; then
+    log "GitHub: gh is installed but not logged in; init asks for one browser approval (gh auth login --web)"
+  elif [ "$(fleet_os)" = macos ] && have brew; then
+    log "GitHub: gh is not installed; init installs it (brew install gh) and asks for one browser approval"
+  else
+    log "GitHub: no gh CLI (https://github.com/cli/cli#installation); init asks for a fine-grained token with Administration read/write on your repos instead"
+  fi
+  ok "preflight: commands present, Tailscale logged in, git identity $name <$email>"
+}
+
 cmd_init_master() {
   local reconfigure=0 cdir=""
   while [ $# -gt 0 ]; do
@@ -718,7 +759,7 @@ cmd_init_master() {
       *) die "unknown flag: $1" "usage: fleet init master [--config-dir DIR] [--reconfigure]" ;;
     esac; shift
   done
-  need ssh-keygen; need python3; need git; need tar
+  init_preflight
   config_dir_setup "$cdir"
   [ -f "$FLEET_CONFIG_DIR/fleet.conf" ] || warn "no fleet.conf in $FLEET_CONFIG_DIR (see examples/fleet-config/fleet.conf)"
   vault_init

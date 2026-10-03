@@ -78,11 +78,15 @@ host=${target#*@}
 cmd="$*"
 printf '%s %s\n' "$target" "$cmd" >>"$SSH_LOG"
 nh="$NODES/$host"
-[ -d "$nh" ] || exit 255                      # unreachable host
+# `fleet-<name>` is the alias fleet writes into ~/.ssh/config.d/fleet (t3); the fake node home is named by dnsname
+[ -d "$nh" ] || nh=$(ls -d "$NODES/$host".* 2>/dev/null | head -1)
+[ -n "$nh" ] && [ -d "$nh" ] || exit 255      # unreachable host
+host=$(basename "$nh")
 [ "${SSH_FAIL:-}" = "$host" ] && exit 255
 case "$cmd" in *secrets.env.tmp*) [ -f "$T/slow-secrets" ] && sleep 30 ;; esac
 case "$cmd" in *enrol.json*) [ -f "$T/slow-enrol" ] && sleep 2 ;; esac
 case "$cmd" in
+  "cat /etc/ssh/ssh_host_ed25519_key.pub") cat "$nh/.hostkey.pub"; exit $? ;;   # the node's host key (pinning)
   "nc -z "*)                      [ -f "$T/nc-missing" ] && exit 127; [ -f "$T/nc-open" ] && exit 0; exit 1 ;;
   *"fleet pull --no-apply"*)      touch "$nh/.fleet-pulled"; exit 0 ;;
   *"fleet apply --from-master "*) mkdir -p "$nh/.config/fleet"; printf '%s' "${cmd##* }" >"$nh/.config/fleet/applied"; printf 'c0ffee+cafe\n' >"$nh/.config/fleet/applied_commit"; exit 0 ;;
@@ -148,6 +152,7 @@ mk_node() {  # mk_node DNSNAME NONCE
   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEcode$1 fleet_code" >"$nh/.ssh/fleet_code.pub"
   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEconfig$1 fleet_config" >"$nh/.ssh/fleet_config.pub"
   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEmemory$1 fleet_memory" >"$nh/.ssh/fleet_memory.pub"
+  echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEhost$(printf '%s' "$1" | tr -cd 'a-z0-9') root@$1" >"$nh/.hostkey.pub"
 }
 # digest_of PROFILE — desired_digest as the master computes it.
 digest_of() { FLEET_ROOT=$ROOT bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/master.sh"; desired_digest "$1"' _ "$1" 2>/dev/null; }
@@ -370,6 +375,69 @@ refute "lock released after provision" [ -e "$FLEET_VAULT/locks/nAAAACNTRL" ]
 out=$(bash "$FLEET" reconcile 2>&1)
 assert "second reconcile is quiet" [ -z "$out" ]
 refute "second reconcile does not re-provision" grep -q 'fleet apply' "$SSH_LOG"
+
+# ======================================================================
+echo "== t3: client key, pinned host key, ssh config include, restricted authorized_keys line, status, revoke, setup"
+T3KEY="$FLEET_VAULT/ssh/t3_client"; KH="$FLEET_VAULT/ssh/known_hosts"; INC="$HOME/.ssh/config.d/fleet"
+T3OPTS='restrict,port-forwarding,permitopen="127.0.0.1:*",from="100.64.0.0/10,fd7a:115c:a1e0::/48"'
+t3pub=$(cut -d' ' -f1,2 "$T3KEY.pub")
+assert "init master created a dedicated T3 client key (ed25519, 0600, comment fleet-t3-client)" bash -c "[ \"\$(mode_of '$T3KEY')\" = 600 ] && grep -q '^ssh-ed25519 .* fleet-t3-client$' '$T3KEY.pub'"
+assert "the T3 client key is not the master key" [ "$t3pub" != "$(cut -d' ' -f1,2 "$FLEET_VAULT/ssh/fleet_master.pub")" ]
+assert "enrol pinned alpha's host key into vault/ssh/known_hosts (0600, plain entry by dnsname)" bash -c "[ \"\$(mode_of '$KH')\" = 600 ] && grep -qx 'fleet-alpha.tail1.ts.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEhostfleetalphatail1tsnet' '$KH'"
+assert "provision put the T3 client key in the node's authorized_keys with the exact options" grep -qxF "$T3OPTS $t3pub fleet-t3-client" "$NH/.ssh/authorized_keys"
+assert "node authorized_keys 0600" [ "$(mode_of "$NH/.ssh/authorized_keys")" = 600 ]
+assert "reconcile wrote the ssh include (0600) with alpha's block: alias, user, dedicated key only, pinned hosts, strict, no agent" bash -c "[ \"\$(mode_of '$INC')\" = 600 ] && grep -qx 'Host fleet-alpha' '$INC' && grep -qx '  HostName fleet-alpha.tail1.ts.net' '$INC' && grep -qx '  User fleetuser' '$INC' && grep -qxF '  IdentityFile \"$T3KEY\"' '$INC' && grep -qx '  IdentitiesOnly yes' '$INC' && grep -qxF '  UserKnownHostsFile \"$KH\"' '$INC' && grep -qx '  StrictHostKeyChecking yes' '$INC' && grep -qx '  ForwardAgent no' '$INC'"
+assert "exactly one block per node" [ "$(grep -c '^Host ' "$INC")" = 1 ]
+# shellcheck disable=SC2088  # the literal Include line ssh reads (ssh expands the ~ itself)
+assert "~/.ssh/config was created 0600 with the Include as its first line" bash -c "[ \"\$(head -1 '$HOME/.ssh/config')\" = 'Include ~/.ssh/config.d/fleet' ] && [ \"\$(mode_of '$HOME/.ssh/config')\" = 600 ]"
+# an existing config of the user's: Include goes to the top once, the original is kept as config.pre-fleet
+printf 'Host example\n  User me\n' >"$HOME/.ssh/config"; rm -f "$HOME/.ssh/config.pre-fleet"
+bash "$FLEET" reconcile >/dev/null 2>&1
+assert "Include inserted at the top of an existing config, once, original backed up" bash -c "[ \"\$(head -1 '$HOME/.ssh/config')\" = 'Include ~/.ssh/config.d/fleet' ] && [ \"\$(grep -c 'Include ~/.ssh/config.d/fleet' '$HOME/.ssh/config')\" = 1 ] && grep -qx 'Host example' '$HOME/.ssh/config' && [ \"\$(cat '$HOME/.ssh/config.pre-fleet')\" = \"\$(printf 'Host example\n  User me')\" ]"
+inc1=$(cat "$INC"); cfg1=$(cat "$HOME/.ssh/config"); : >"$SSH_LOG"
+out=$(bash "$FLEET" reconcile 2>&1)
+assert "reconcile is idempotent and quiet: include, config and known_hosts unchanged, no re-pin" bash -c "[ -z \"\$2\" ] && [ \"\$(cat '$INC')\" = \"\$0\" ] && [ \"\$(cat '$HOME/.ssh/config')\" = \"\$1\" ] && ! grep -q 'ssh_host_ed25519_key.pub' '$SSH_LOG'" "$inc1" "$cfg1" "$out"
+# a fake t3 CLI on the node, where T3's SSH flow installs it; it logs argv and answers the list commands
+mkdir -p "$NH/.t3/runtime/versions/0.0.45"; echo 0.0.45 >"$NH/.t3/runtime/versions/0.0.45/.install-complete"
+cat >"$NH/.t3/runtime/versions/0.0.45/t3" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$HOME/.t3/t3.log"
+case "$*" in
+  *"auth session list"*) echo '[{"sessionId":"sess-ott","subject":"one-time-token","method":"bearer-access-token","client":{"label":"T3 Code","os":"macOS","deviceType":"desktop"},"issuedAt":"2026-10-03T10:00:00Z","expiresAt":"2026-11-02T10:00:00Z","connected":true},{"sessionId":"sess-desk","subject":"desktop-bootstrap","method":"bearer-access-token","client":{"deviceType":"desktop"},"issuedAt":"2026-10-01T10:00:00Z","expiresAt":"2026-10-31T10:00:00Z","connected":true}]' ;;
+  *"auth pairing list"*) echo '[{"id":"pair-1","scopes":["orchestration:read"],"subject":"one-time-token","createdAt":"2026-10-03T10:00:00Z","expiresAt":"2026-10-03T10:05:00Z"}]' ;;
+esac
+EOF
+chmod +x "$NH/.t3/runtime/versions/0.0.45/t3"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEmaster000000000000000000000000000000000 fleet-master@mac\n' >>"$NH/.ssh/authorized_keys"
+: >"$SSH_LOG"
+out=$(bash "$FLEET" t3 status alpha 2>&1); rc=$?
+assert "t3 status exits 0, probes over the alias with the client key as T3 does (sh -l -s, no pty)" bash -c "[ $rc = 0 ] && grep -q '^fleet-alpha sh -l -s$' '$SSH_LOG' && printf '%s' \"\$0\" | grep -q 'client key: ok' && printf '%s' \"\$0\" | grep -q 'host key: pinned' && printf '%s' \"\$0\" | grep -q 'runtime 0.0.45'" "$out"
+assert "t3 status lists sessions by subject and label, never a token" bash -c "printf '%s' \"\$0\" | grep -q 'sessions: 2 (1 from pairing tokens), pairing tokens: 1' && printf '%s' \"\$0\" | grep -q 'one-time-token .*T3 Code' && ! printf '%s' \"\$0\" | grep -qiE 'credential|access_token|AAAAC3'" "$out"
+: >"$SSH_LOG"; : >"$NH/.t3/t3.log"
+out=$(bash "$FLEET" t3 revoke alpha 2>&1); rc=$?
+assert "t3 revoke exits 0 and goes through the master key" bash -c "[ $rc = 0 ] && grep -q '^fleetuser@fleet-alpha.tail1.ts.net sh -s$' '$SSH_LOG'"
+assert "t3 revoke revokes the pairing-token session and the pairing token, not the node's own desktop session" bash -c "grep -q '^auth session revoke --base-dir .* sess-ott$' '$NH/.t3/t3.log' && ! grep -q 'sess-desk' '$NH/.t3/t3.log' && grep -q '^auth pairing revoke --base-dir .* pair-1$' '$NH/.t3/t3.log'"
+assert "t3 revoke removed the client key line and kept the master key" bash -c "! grep -q ' fleet-t3-client$' '$NH/.ssh/authorized_keys' && grep -q 'FAKEmaster' '$NH/.ssh/authorized_keys'"
+assert "t3 revoke removed the ssh config block and recorded t3_access=false" bash -c "! grep -q 'Host fleet-alpha' '$INC' && [ \"\$(jget '$FLEET_VAULT/nodes/nAAAACNTRL.json' t3_access)\" = false ]"
+assert "audit log records the revoke" grep -q ' t3.revoke alpha ok' "$FLEET_VAULT/audit.log"
+bash "$FLEET" provision alpha >/dev/null 2>&1
+refute "provision after revoke does not re-add the client key" grep -q ' fleet-t3-client$' "$NH/.ssh/authorized_keys"
+: >"$SSH_LOG"
+out=$(bash "$FLEET" t3 setup alpha 2>&1); rc=$?
+assert "t3 setup exits 0, re-pins over the authenticated session (no keyscan), key line back once, block back" bash -c "[ $rc = 0 ] && grep -q '^fleetuser@fleet-alpha.tail1.ts.net cat /etc/ssh/ssh_host_ed25519_key.pub$' '$SSH_LOG' && [ \"\$(grep -c ' fleet-t3-client$' '$NH/.ssh/authorized_keys')\" = 1 ] && grep -qxF '$T3OPTS $t3pub fleet-t3-client' '$NH/.ssh/authorized_keys' && grep -qx 'Host fleet-alpha' '$INC'"
+assert "t3 setup prints the click path and the alias" bash -c "printf '%s' \"\$0\" | grep -q 'Settings -> Connections -> Add environment -> SSH -> host: fleet-alpha'" "$out"
+refute "t3 setup output contains no key material" printf '%s' "$out" | grep -q 'AAAAC3'
+cp "$NH/.hostkey.pub" "$T/hostkey.bak"
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEhostEVIL000000000000000 root@evil" >"$NH/.hostkey.pub"
+out=$(bash "$FLEET" t3 setup alpha 2>&1); rc=$?
+assert "a host key that changed is refused: known_hosts untouched, setup fails loudly" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'HOST KEY MISMATCH' && grep -qx 'fleet-alpha.tail1.ts.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEhostfleetalphatail1tsnet' '$KH' && ! grep -q 'EVIL' '$KH'" "$out"
+cp "$T/hostkey.bak" "$NH/.hostkey.pub"
+refute "t3 revoke of an unknown node dies" bash "$FLEET" t3 revoke nosuch
+refute "t3 with a bad subcommand dies" bash "$FLEET" t3 frobnicate
+# back to the state the following checks expect: the ssh log of a quiet reconcile
+: >"$SSH_LOG"
+out=$(bash "$FLEET" reconcile 2>&1)
+assert "reconcile after t3 setup is quiet again" [ -z "$out" ]
 assert "second reconcile checks node applied digest" grep -q 'cat ~/.config/fleet/applied' "$SSH_LOG"
 printf 'stale' >"$NH/.config/fleet/applied"
 bash "$FLEET" reconcile >/dev/null 2>&1
@@ -717,7 +785,7 @@ wait "$W1" 2>/dev/null; wait "$W2" 2>/dev/null
 assert "after release: revoked survives the concurrent missing_since write" bash -c "[ \"\$(jget '$FLEET_VAULT/nodes/nM1CNTRL.json' state)\" = revoked ] && [ \"\$(jget '$FLEET_VAULT/nodes/nM1CNTRL.json' missing_since)\" = 2026-10-03T12:00:00Z ]"
 refute "registry lock released afterwards" [ -d "$RL" ]
 # legacy registry entry (plain int key ids, no repo slug): still revoked and deleted against the current repo URLs
-assert "legacy int github_keys: deletes went to the configured repos; only the unreachable node's stop stays pending" bash -c "grep -q '^DELETE /repos/example/fleet-config/keys/501' '$API_LOG' && grep -q '^DELETE /repos/example/fleet-memory/keys/502' '$API_LOG' && [ \"\$(jget '$FLEET_VAULT/nodes/nM1CNTRL.json' pending_cleanup)\" = '[\"stop:nM1CNTRL\"]' ]"
+assert "legacy int github_keys: deletes went to the configured repos; only the unreachable node's stop and t3 revoke stay pending" bash -c "grep -q '^DELETE /repos/example/fleet-config/keys/501' '$API_LOG' && grep -q '^DELETE /repos/example/fleet-memory/keys/502' '$API_LOG' && [ \"\$(jget '$FLEET_VAULT/nodes/nM1CNTRL.json' pending_cleanup)\" = '[\"stop:nM1CNTRL\", \"t3:nM1CNTRL\"]' ]"
 assert "legacy entry: audit shows the slug-less items" grep -q ' cleanup m1 gh:config:501 ok' "$FLEET_VAULT/audit.log"
 rm -f "$FLEET_VAULT/nodes/nM1CNTRL.json"
 

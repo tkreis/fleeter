@@ -239,6 +239,48 @@ Claude Code and Cursor are logged in through secrets (`CLAUDE_CODE_OAUTH_TOKEN`,
 `CURSOR_API_KEY`); Codex and Grok through `OPENAI_API_KEY`/`XAI_API_KEY` or a
 device code per node. GUI apps are opened for you but cannot be scripted.
 
+### Use a node from T3 Code on the master
+
+T3 Code's desktop app has an **SSH environment** type: you give it an ssh host
+alias once; it then runs `ssh <alias>` itself to find or start the T3 server on
+that machine, pairs with a one-time token it creates over the same connection,
+and tunnels the server to a local port. fleet prepares exactly what that flow
+needs, with a key that can do nothing else:
+
+```sh
+fleet t3 setup studio        # once per node (or `fleet t3 setup` for all); prints the alias and copies it (macOS)
+# then in T3 Code on the master: Settings -> Connections -> Add environment -> SSH -> host: fleet-studio
+fleet t3 status studio       # the alias as ssh resolves it, pinned host key, a BatchMode probe with the
+                             # restricted key running T3's discovery, the node's T3 sessions (no tokens)
+fleet t3 revoke studio       # revoke the node's pairing-token sessions and pairing tokens, stop the servers
+                             # T3 started over ssh, drop the key from the node and the block from ~/.ssh/config.d/fleet
+```
+
+What `setup` does: generates `vault/ssh/t3_client` (ed25519; never the fleet
+master key), reads the node's host key over the already-authenticated fleet
+session and pins it in `vault/ssh/known_hosts`, authorises the key on the node
+as `restrict,port-forwarding,permitopen="127.0.0.1:*",from="<tailnet ranges>"`
+(no pty, no agent or X11 forwarding, forwards only to the node's loopback, only
+from the tailnet; comment `fleet-t3-client`), and writes one `Host fleet-<name>`
+block per node into `~/.ssh/config.d/fleet`, included from the first line of
+`~/.ssh/config` (your original is kept as `config.pre-fleet`). Provision and
+reconcile keep the key line and the include file in step with the registry;
+`fleet kick` runs the revoke part. Adding the environment in the app stays a
+click: its connection catalogue is encrypted (Electron safeStorage) and has no
+CLI or deep link.
+
+On the node nothing is pre-installed for this: T3 downloads its own `t3` CLI
+archive into `~/.t3/runtime/versions/<app version>/` on first connect (needs
+`curl` or `wget` and `tar`; darwin-arm64, linux-arm64 and linux-x64 only — an
+Intel Mac cannot be a T3 node) and reuses the node's running desktop-app server
+when `~/.t3/userdata/server-runtime.json` points at one, else starts
+`t3 serve --host 127.0.0.1` itself. `fleet t3 status` shows all of that.
+Sessions last 30 days; every connect that has to pair again adds one, which is
+why `status` counts them and `revoke` clears them. Stopping a server T3 started
+(T3's own disconnect does it too) removes `server-runtime.json`, so the node's
+desktop app is only rediscovered after it restarts; until then T3 starts a
+managed server, which is fine.
+
 ### Kick a node
 
 ```sh
@@ -246,14 +288,16 @@ fleet kick studio                      # type the node name to confirm (or --yes
 ```
 
 Kick kills a running provision, marks the node revoked (nothing can
-re-provision it), runs `fleet leave` on it (stops timers, harness processes,
-the proxy; `tailscale logout`), deletes the device via the Tailscale API,
-deletes its three deploy keys (each on the repository it was registered on,
+re-provision it), revokes its T3 access (sessions, pairing tokens, servers T3
+started, the client key line), runs `fleet leave` on it (stops timers, harness
+processes, the proxy; `tailscale logout`), deletes the device via the Tailscale
+API, deletes its three deploy keys (each on the repository it was registered on,
 even if `fleet.conf` points elsewhere by now), and prints the secrets it held.
 Steps that fail stay in `pending_cleanup` and every reconcile retries them: the
-device and key deletes until they succeed, the remote stop (`stop:<id>`) while
-the node is still online on the tailnet — it is dropped once the device is
-gone, because the master cannot reach the node any more.
+device and key deletes until they succeed, the remote stop (`stop:<id>`) and the
+T3 revoke (`t3:<id>`) while the node is still online on the tailnet — they are
+dropped once the device is gone, because the master cannot reach the node any
+more.
 
 **Master off?** Delete the device in the Tailscale admin console from your
 phone. The node loses the tailnet immediately; the next time the master runs
@@ -310,6 +354,9 @@ node (the master runs them remotely during provision and kick).
 | `fleet provision NODE` | `--refresh-proxy-auth` | Takes the node lock, ships code and config (when the node has no git checkout of them, or no repo URL is set), secrets, files (via a staging dir), runs `fleet pull --no-apply` on the node (brings its checkouts to `origin/main`), then `fleet apply --from-master <digest>`; records the `<code>+<config>` the node reports it applied and warns when that differs from this checkout (unpushed commits). NODE = registered name or Tailscale id, never a guessed hostname. |
 | `fleet reconcile` | | Expires old invites, enrols new tagged peers (nonce check, claims the invite atomically, registers three deploy keys), provisions nodes whose digest differs, retries pending cleanups, tracks missing devices and revokes them after the grace period. Convergent; quiet when nothing to do. Runs every `FLEET_RECONCILE_EVERY` minutes. |
 | `fleet kick NODE` | `--yes` | Revoke: see "Kick a node". |
+| `fleet t3 setup [NODE]` | | Creates `vault/ssh/t3_client` if missing, pins the node's host key (read over the fleet session), puts the restricted key line into the node's `authorized_keys`, regenerates `~/.ssh/config.d/fleet` and the `Include` at the top of `~/.ssh/config`, prints what to click in T3 Code (alias on the clipboard on macOS). Without NODE: every registered node. Re-enables a node after `t3 revoke`. |
+| `fleet t3 status [NODE]` | | Per node: pinned host key, the alias as `ssh -G` resolves it, a BatchMode connection with the client key running T3's discovery (`sh -l -s`, no pty: arch, curl/tar, installed `t3` runtimes, the desktop server from `server-runtime.json`, servers T3 started), and the node's T3 sessions and pairing tokens (metadata only, via the master key). Warns on an Intel Mac (no T3 CLI archive). |
+| `fleet t3 revoke NODE` | | On the node (master key): revokes every session whose subject is `one-time-token` (pairing-token clients; the node's own desktop app session stays), every live pairing token, stops the managed servers under `~/.t3/ssh-launch/`, removes the `fleet-t3-client` line; records `t3_access: false` so provision keeps it off; drops the `Host fleet-<name>` block. Unreachable node → `t3:<id>` in `pending_cleanup`, retried by reconcile while it is online. |
 | `fleet config publish` | `--yes`, `--no-capture` | `harness_capture` into the config dir (skipped with `--no-capture`), secret scan over `harness/` and `skills/` (always), staged diff (stat + content), confirm, commit (`publish fleet config`), push to the checkout's `origin`. Never touches the fleeter checkout. |
 | `fleet policy check` | | Fetches the live policy with the OAuth client and checks it against the template. Exit 1 on findings. |
 | `fleet policy apply` | | Merges the fleet rules into the **live** policy (adds the `tagOwners` entry and the template grants; turns `*`/`autogroup:tagged` sources into `autogroup:member`; keeps every other rule), shows a unified diff, requires the typed word `apply`, backs up the previous policy to `vault/policy-backups/`, POSTs with `If-Match`. Comments in the policy are not kept. Rules with IP/host/other-tag sources are reported, not rewritten. Asks for a one-off API access token (revoked afterwards). |
@@ -380,7 +427,9 @@ Master, `~/.config/fleet/vault` (0700 dirs, 0600 files):
 ```
 secrets/minimal.env, secrets/full.env   KEY='value' lines; full = minimal + full
 files/<profile>/<path under $HOME>      mirrored files; files/full/.cli-proxy-api/{config.yaml,auth/}
-ssh/fleet_master(.pub)                  the key nodes authorize
+ssh/fleet_master(.pub)                  the key nodes authorize for provisioning
+ssh/t3_client(.pub)                     the key T3 Code uses towards nodes (restricted line on the node)
+ssh/known_hosts                         pinned node host keys (read over the fleet session); every ssh is strict once pinned
 digest.key                              HMAC key for the desired-state digest; never shipped
 tailscale.json                          OAuth client (auth_keys, devices:core, policy_file:read; tag-scoped)
 github.json                             fallback token (only without gh)
@@ -388,6 +437,8 @@ nodes/<ts-id>.json                      registry; nodes/pending/, nodes/claimed/
 locks/<ts-id>/{pid,token}, locks/.registry
 audit.log                               one line per action
 ~/.config/fleet/fleet.conf              FLEET_CONFIG_DIR + local overrides; reconcile.log
+~/.ssh/config.d/fleet                   `Host fleet-<name>` blocks for T3 Code, regenerated from the registry (0600);
+                                        `Include ~/.ssh/config.d/fleet` is the first line of ~/.ssh/config (original: config.pre-fleet)
 ```
 
 Node:
@@ -403,6 +454,8 @@ Node:
 ~/.config/fleet/privileged_done  join finished the root steps; locks/apply; logs/<job>.log; daemon.pid
 ~/.config/fleet/stage.XXXXXX     transient: mirrored files are unpacked here and renamed into place
 ~/.ssh/fleet_code, fleet_config, fleet_memory (+ .pub); ~/.ssh/config block `# >>> fleet >>>`
+~/.ssh/authorized_keys           the master key (join) and the restricted `fleet-t3-client` line (provision; removed by t3 revoke / kick)
+~/.t3/runtime/versions/<v>/t3    T3's own CLI archive, installed by T3's SSH flow on first connect; ~/.t3/ssh-launch/<key>/ its server state
 ~/fleet-memory/                  memory vault; ~/cli-proxy-api/ (cliproxy plug-in)
 ~/.zshrc / ~/.bashrc / ~/.profile   one marker block that sources env.sh
 ~/Library/LaunchAgents/dev.fleet.{pull,memory,update}.plist   or ~/.config/systemd/user/fleet-*.timer, or crontab lines

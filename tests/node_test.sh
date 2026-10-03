@@ -231,6 +231,38 @@ print(base64.b64encode(json.dumps({"v":1,"ts_auth_key":"tskey-auth-test-FAKE","n
   end
 }
 
+# The T3 client key line (lib/common.sh T3_AUTHKEY_SCRIPT): the master pipes
+# the desired line into `sh -c '<script>'` on the node; an empty line removes it.
+case_t3_authkey() {
+  begin "t3 client key: authorized_keys line added once, removed on an empty line, master key kept, 0600"
+  local h="$WORK/homes/t3" master line script i
+  mkdir -p "$h/.ssh"; chmod 700 "$h/.ssh"
+  master="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeMasterKeyForTests0000000000000000000000 fleet-master"
+  printf '%s\n' "$master" >"$h/.ssh/authorized_keys"; chmod 600 "$h/.ssh/authorized_keys"
+  ssh-keygen -q -t ed25519 -N '' -C fleet-t3-client -f "$WORK/t3_client" </dev/null
+  line=$(bash -c '. "$0/lib/common.sh"; t3_authorized_line "$1"' "$ROOT" "$WORK/t3_client.pub")
+  script=$(bash -c '. "$0/lib/common.sh"; printf "%s" "$T3_AUTHKEY_SCRIPT"' "$ROOT")
+  # shellcheck disable=SC2016  # $0 is the line, passed as the argument of bash -c
+  assert "line = exact restricted options + key + comment" bash -c 'case "$0" in "restrict,port-forwarding,permitopen=\"127.0.0.1:*\",from=\"100.64.0.0/10,fd7a:115c:a1e0::/48\" ssh-ed25519 AAAA"*" fleet-t3-client") exit 0 ;; esac; exit 1' "$line"
+  for i in 1 2; do printf '%s\n' "$line" | HOME="$h" sh -c "$script" || { CASE_FAIL=1; echo "   - failed: script run $i"; }; done
+  assert "t3 line present exactly once after two runs" [ "$(count_in ' fleet-t3-client' "$h/.ssh/authorized_keys")" = 1 ]
+  assert "the stored line is exactly the one produced" grep -qxF "$line" "$h/.ssh/authorized_keys"
+  assert "master key kept" [ "$(count_in "$master" "$h/.ssh/authorized_keys")" = 1 ]
+  assert "authorized_keys 0600" [ "$(file_mode "$h/.ssh/authorized_keys")" = 600 ]
+  refute "no temp file left" bash -c "ls '$h'/.ssh/.fleet.* 2>/dev/null | grep -q ."
+  printf '\n' | HOME="$h" sh -c "$script" || { CASE_FAIL=1; echo "   - failed: removal run"; }
+  assert "an empty line removes the t3 line" [ "$(count_in ' fleet-t3-client' "$h/.ssh/authorized_keys")" = 0 ]
+  assert "master key still there after removal" [ "$(count_in "$master" "$h/.ssh/authorized_keys")" = 1 ]
+  printf '\n' | HOME="$h" sh -c "$script"
+  assert "removal is idempotent" [ "$(count_in "$master" "$h/.ssh/authorized_keys")" = 1 ]
+  mkdir -p "$WORK/homes/t3empty"
+  printf '\n' | HOME="$WORK/homes/t3empty" sh -c "$script"
+  refute "nothing to add and no file: none created" [ -e "$WORK/homes/t3empty/.ssh/authorized_keys" ]
+  printf '%s\n' "$line" | HOME="$WORK/homes/t3empty" sh -c "$script"
+  assert "created from scratch: 0700 dir, 0600 file, the line" bash -c "[ \"\$(stat -c %a '$WORK/homes/t3empty/.ssh')\" = 700 ] && [ \"\$(stat -c %a '$WORK/homes/t3empty/.ssh/authorized_keys')\" = 600 ] && grep -qxF \"\$0\" '$WORK/homes/t3empty/.ssh/authorized_keys'" "$line"
+  end
+}
+
 case_apply() {
   begin "apply: env.sh 0600, rc block once after two runs, status.json, memory clone"
   local h rc
@@ -994,6 +1026,7 @@ export SRC_EP="$SRC/docker/entrypoint.sh"
 echo "==> work dir: $WORK"
 case_syntax
 case_join
+case_t3_authkey
 case_apply
 case_apply_proxy
 case_memory_sync

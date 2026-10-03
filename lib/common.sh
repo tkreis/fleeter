@@ -251,6 +251,20 @@ lock_break() {
   echo $$ >"$ldir/pid"
 }
 
+# with_timeout SECONDS CMD... — run CMD, kill it after SECONDS. No GNU timeout.
+with_timeout() {
+  local secs=$1 pid wpid rc=0 sp; shift
+  "$@" </dev/null &
+  pid=$!
+  # kill_tree, not kill: grandchildren holding stdout would keep a $(...) open
+  ( sleep "$secs" & sp=$!; trap 'kill $sp 2>/dev/null; exit 0' TERM; wait $sp; kill_tree "$pid" >/dev/null 2>&1 ) &
+  wpid=$!
+  wait "$pid" || rc=$?
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  return "$rc"
+}
+
 # ---------- json (python3 stdlib, so no jq dependency) ----------
 
 # json_get FILE KEY[.KEY...] — print a scalar, empty if missing.

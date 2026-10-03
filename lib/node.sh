@@ -118,10 +118,12 @@ node_tool_run() {
 }
 
 # node_tool_status NAME → "<state> <detail>" (never fails).
+# Capped: a vendor status command can block (keychain over ssh, network), and
+# status/login/write_status call this once per tool.
 node_tool_status() {
-  local line
-  line=$(node_tool_run "$1" status 2>/dev/null | head -n 1) || line=""
-  [ -n "$line" ] || line="error status failed"
+  local line secs=${FLEET_STATUS_SECS:-20}
+  line=$(with_timeout "$secs" node_tool_run "$1" status 2>/dev/null | head -n 1) || line=""
+  [ -n "$line" ] || line="error status check failed or took longer than ${secs}s"
   printf '%s\n' "$line"
 }
 
@@ -568,12 +570,20 @@ cmd_login() {
     node_write_status
     return 0
   fi
+  # Only tools with a login flow; each check is announced and capped, because a
+  # vendor status command can block (keychain over ssh, network).
   for t in $(node_tools); do
-    line=$(node_tool_status "$t"); state=${line%% *}
-    if [ "$state" = login ]; then
-      any=1; log "login: $t"
-      node_tool_run "$t" login || warn "$t login failed"
-    fi
+    grep -q "^tool_${t//-/_}_login()" "$FLEET_ROOT/lib/tools/$t.sh" 2>/dev/null || continue
+    log "checking $t login..."
+    line=$(node_tool_status "$t")
+    state=${line%% *}
+    case "$state" in
+      ok) ok "$t: ${line#* }" ;;
+      login)
+        any=1; log "login: $t (follow the prompts below; device codes can be approved on your phone)"
+        node_tool_run "$t" login || warn "$t login failed; retry: fleet login $t" ;;
+      *) warn "$t: $line; try: fleet login $t" ;;
+    esac
   done
   if [ "$(fleet_os)" = macos ]; then
     for app in Claude ChatGPT Cursor; do
@@ -584,6 +594,7 @@ cmd_login() {
     done
   fi
   [ "$any" -eq 1 ] || ok "no CLI tool needs a login"
+  log "updating node status..."
   node_write_status
 }
 

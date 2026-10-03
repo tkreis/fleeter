@@ -743,7 +743,10 @@ except Exception:
   [ -n "$_dns" ] || _dns="$JOIN_PREFIX$JOIN_NAME (DNS name appears once tailscale is up)"
   printf '\n' >&2
   j_ok "node '$JOIN_NAME' joined the tailnet as $_dns"
-  j_log "waiting for master: it will finish setup on its next reconcile (about 2 minutes while it is on)"
+  j_log "waiting for master: it starts setup on its next reconcile (about 2 minutes while it is on)"
+  j_log "first setup installs every tool (Java, Node, Chrome, agents, ...) and takes 10-20 minutes."
+  j_log "watch it on the master: fleet nodes (state 'provisioning') and tail -f ~/.config/fleet/reconcile.log"
+  j_log "done when this machine has ~/.local/bin/fleet and 'fleet nodes' on the master says 'provisioned'."
   printf '%s\n' "  nothing else to do here; rerunning this command is safe." >&2
 }
 

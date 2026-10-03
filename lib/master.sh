@@ -50,18 +50,6 @@ audit() {
   printf '%s %s %s %s %s\n' "$(now_iso)" "$(id -un)" "$1" "${2:--}" "${3:-ok}" >>"$FLEET_VAULT/audit.log"
 }
 
-# with_timeout SECONDS CMD... — run CMD, kill it after SECONDS. No GNU timeout.
-with_timeout() {
-  local secs=$1 pid wpid rc=0 sp; shift
-  "$@" </dev/null &
-  pid=$!
-  ( sleep "$secs" & sp=$!; trap 'kill $sp 2>/dev/null; exit 0' TERM; wait $sp; kill "$pid" 2>/dev/null ) &
-  wpid=$!
-  wait "$pid" || rc=$?
-  kill "$wpid" 2>/dev/null || true
-  wait "$wpid" 2>/dev/null || true
-  return "$rc"
-}
 
 # json_set FILE KEY VALUE [KEY VALUE...] — update (or create) a JSON object, 0600.
 # A VALUE starting with "json:" is parsed as JSON; everything else is a string.
@@ -922,6 +910,12 @@ except Exception: print("?"); sys.exit()
 print(" ".join("%s:%s"%(k,v.get("state","?")) for k,v in sorted((d.get("tools") or {}).items())) or "-")' "$tmpd/$id")
     elif [ -n "$tmpd" ]; then f="unreachable"; fi
     [ "$state" = revoked ] && [ -n "$(json_list "$(registry_path "$id")" pending_cleanup)" ] && f="${f:+$f }cleanup-pending"
+    # a live lock holder means a provision is running right now
+    pid=$(lock_pid "$FLEET_VAULT/locks/$id")
+    if [ "$state" != revoked ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      state=provisioning
+      f="${f:+$f }log: tail -f $FLEET_HOME/reconcile.log"
+    fi
     printf '%-18s %-14s %-7s %-12s %-8s %-6s %s\n' "$name" "$id" "$online" "$state" "$profile" "$prov" "$f"
   done
   # Tagged peers that are not registered: shown as unknown, never provisioned.

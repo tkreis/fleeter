@@ -439,6 +439,16 @@ Harness files fleet writes (and the ownership rules) are listed in
   contains a token or a home path. Add the offending skill to
   `FLEET_SKILL_EXCLUDE` or the server marker to `FLEET_CAPTURE_MACHINE_ONLY`;
   never commit the hit.
+- **Node joined, but `~/.local/bin/fleet` is missing on it** — the master is
+  still setting it up. The first provision installs every tool and takes
+  10–20 minutes. `fleet nodes` shows `provisioning`; follow it with
+  `tail -f ~/.config/fleet/reconcile.log` on the master. When it reads
+  `provisioned`, `fleet login` works on the node.
+- **Hostname got a `-1` suffix (`fleet-mac2-1`)** — Tailscale already had a
+  device with that name (for example the same Mac's earlier login). Fleet uses
+  the real name from the registry, so nothing breaks; delete the stale device
+  in the admin console if you want the plain name back. SSH to the name
+  `tailscale status` shows.
 - **`fleet doctor`: ISOLATION FAIL** — a node reached the master. Your policy
   has a grant whose `src` covers tagged devices (`*`, `autogroup:tagged`, a
   CIDR, a host alias). `fleet policy check` names the rule; `fleet policy apply`

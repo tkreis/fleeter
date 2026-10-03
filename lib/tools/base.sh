@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# base: git, git-lfs, curl, jq, ripgrep, tmux, python3, unzip, ca-certificates.
+# base: git, git-lfs, curl, jq, ripgrep, tmux, python3, unzip, nc (netcat;
+# `fleet doctor` probes isolation with it), ca-certificates.
 # Linux: apt needs root, so `fleet join` (join_linux_base_packages) installs
 # them and records ~/.config/fleet/privileged_done; here they are only
 # installed as root or with FLEET_INTERACTIVE=1, otherwise a warn points back
@@ -9,12 +10,14 @@
 # that marker is absent.
 # Functions declare their variables local (bash scoping is dynamic).
 
-# "<command> <package>" pairs for the current package manager.
+# "<command> <package>" pairs for the current package manager (kept in sync
+# with join_base_items in lib/join.sh). macOS ships nc with the system.
 _base_items() {
   case "$(fleet_pkg_mgr)" in
-    brew)   printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python" ;;
-    pacman) printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python" "unzip unzip" ;;
-    *)      printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python3" "unzip unzip" ;;
+    brew)    printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python" ;;
+    pacman)  printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python" "unzip unzip" "nc openbsd-netcat" ;;
+    dnf)     printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python3" "unzip unzip" "nc nmap-ncat" ;;
+    *)       printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python3" "unzip unzip" "nc netcat-openbsd" ;;
   esac
 }
 

@@ -856,9 +856,10 @@ case_base_status() {
   refute "unprivileged install never claims the packages are present" grep -q 'base packages present' "$WORK/base-install.log"
   # all commands present (stubs) -> none of them reported
   mkdir -p "$d"
-  for c in git git-lfs curl jq rg tmux python3 unzip; do printf '#!/bin/sh\nexit 0\n' >"$d/$c"; chmod +x "$d/$c"; done
+  assert "status names netcat (fleet doctor probes with nc)" bash -c "printf '%s' '$out' | grep -q 'netcat'"
+  for c in git git-lfs curl jq rg tmux python3 unzip nc; do printf '#!/bin/sh\nexit 0\n' >"$d/$c"; chmod +x "$d/$c"; done
   out=$(FLEET_ROOT="$SRC" PATH="$d:$PATH" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/tools/base.sh"; tool_base_status' 2>/dev/null)
-  refute "with every command present nothing but ca-certificates can be missing" bash -c "printf '%s' '$out' | grep -Eq 'jq|ripgrep|tmux|git-lfs|unzip'"
+  refute "with every command present nothing but ca-certificates can be missing" bash -c "printf '%s' '$out' | grep -Eq 'jq|ripgrep|tmux|git-lfs|unzip|netcat'"
   end
 }
 

@@ -500,11 +500,13 @@ join_ssh_enable() {
 # ---------- 6b. privileged prerequisites ----------
 
 # Base packages lib/tools/base.sh expects, as "<command> <package>" pairs for
-# the given package manager (kept in sync with _base_items there).
+# the given package manager (kept in sync with _base_items there). nc is what
+# `fleet doctor` probes isolation with.
 join_base_items() {
   case "$1" in
-    pacman) printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python" "unzip unzip" ;;
-    *)      printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python3" "unzip unzip" ;;
+    pacman) printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python" "unzip unzip" "nc openbsd-netcat" ;;
+    dnf)    printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python3" "unzip unzip" "nc nmap-ncat" ;;
+    *)      printf '%s\n' "git git" "git-lfs git-lfs" "curl curl" "jq jq" "rg ripgrep" "tmux tmux" "python3 python3" "unzip unzip" "nc netcat-openbsd" ;;
   esac
 }
 

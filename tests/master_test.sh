@@ -172,9 +172,11 @@ assert "digest.key created, 0600, 32 bytes hex" bash -c "[ \"\$(mode_of '$FLEET_
 assert "init asked for an API access token (keys page URL shown)" printf '%s' "$out" | grep -q 'login.tailscale.com/admin/settings/keys'
 assert "live policy fetched with the bootstrap token" grep -q '^GET /api/v2/tailnet/-/acl' "$API_LOG"
 assert "init reported the allow-all finding" printf '%s' "$out" | grep -q 'policy: grants rule lets \* reach the tailnet'
-assert "init showed a unified diff mentioning tag:fleet-node" bash -c "printf '%s' \"\$0\" | grep -q '^+++ templates/tailscale-policy.hujson' && printf '%s' \"\$0\" | grep -q 'tag:fleet-node'" "$out"
+assert "init showed a unified diff mentioning tag:fleet-node" bash -c "printf '%s' \"\$0\" | grep -q '^+++ new policy' && printf '%s' \"\$0\" | grep -q 'tag:fleet-node'" "$out"
 assert "policy POSTed with If-Match ETag" grep -Eq '^POST /api/v2/tailnet/-/acl .* If-Match="[0-9a-f]{12}"$' "$API_LOG"
-assert "live policy now equals the template" cmp -s "$ACL" "$ROOT/templates/tailscale-policy.hujson"
+assert "live policy now isolates the fleet tag (merged, not replaced)" python3 "$ROOT/lib/api.py" policy check "$ROOT/templates/tailscale-policy.hujson" "$ACL" tag:fleet-node
+assert "merge kept the owner's allow-all as autogroup:member -> *" python3 -c 'import json,sys; g=json.load(open(sys.argv[1]))["grants"]; assert {"src":["autogroup:member"],"dst":["*"],"ip":["*"]} in g' "$ACL"
+assert "previous policy backed up into the vault (0600)" bash -c "ls '$FLEET_VAULT'/policy-backups/*.hujson >/dev/null 2>&1 && [ \"\$(mode_of \$(ls '$FLEET_VAULT'/policy-backups/*.hujson | head -1))\" = 600 ]"
 assert "OAuth client created: keyType client, scopes, tag" grep -q '^POST /api/v2/tailnet/-/keys {"keyType": "client", "description": "fleet master", "scopes": \["auth_keys", "devices:core", "policy_file:read"\], "tags": \["tag:fleet-node"\]}' "$API_LOG"
 assert "tailscale.json 0600 with client id + secret" bash -c "[ \"\$(mode_of '$FLEET_VAULT/tailscale.json')\" = 600 ] && grep -q '\"oauth_client_id\": \"kclientCNTRL\"' '$FLEET_VAULT/tailscale.json' && grep -q '\"oauth_client_secret\": \"tskey-client-kclientCNTRL-FAKE\"' '$FLEET_VAULT/tailscale.json'"
 assert "bootstrap token revoked by its embedded id" grep -q '^DELETE /api/v2/tailnet/-/keys/kboot$' "$API_LOG"
@@ -458,7 +460,7 @@ assert "nodes --live shows tool states" printf '%s\n' "$out" | grep -q 'claude:o
 
 # ======================================================================
 echo "== policy check / apply"
-cp "$ACL" "$T/acl.template.bak"
+cp "$ROOT/templates/tailscale-policy.hujson" "$T/acl.template.bak"
 printf '%s\n' "$ALLOW_ALL" >"$ACL"
 out=$(bash "$FLEET" policy check 2>&1); rc=$?
 assert "policy check FAILs on the default allow-all policy" [ "$rc" != 0 ]
@@ -517,10 +519,10 @@ assert "policy apply revokes its bootstrap token even when skipped" grep -q '^DE
 out=$(printf 'tskey-api-kboot3-FAKE\napply\n' | bash "$FLEET" policy apply 2>&1); rc=$?
 assert "policy apply exits 0" [ "$rc" = 0 ]
 assert "policy apply showed the diff and POSTed with If-Match" bash -c "printf '%s' \"\$0\" | grep -q '^--- live policy' && [ \"\$(grep -c '^POST /api/v2/tailnet/-/acl .* If-Match=\"' '$API_LOG')\" = $((n_before + 1)) ]" "$out"
-assert "live policy equals the template after apply" cmp -s "$ACL" "$ROOT/templates/tailscale-policy.hujson"
+assert "live policy isolates the fleet tag after apply" python3 "$ROOT/lib/api.py" policy check "$ROOT/templates/tailscale-policy.hujson" "$ACL" tag:fleet-node
 assert "policy apply revoked bootstrap token kboot3" grep -q '^DELETE /api/v2/tailnet/-/keys/kboot3$' "$API_LOG"
 refute "policy apply never echoes the token" printf '%s' "$out" | grep -q 'kboot3-FAKE'
-assert "policy apply on an already-matching policy is a no-op" bash -c "printf 'tskey-api-kboot4-FAKE\n' | bash '$FLEET' policy apply 2>&1 | grep -q 'already matches'"
+assert "policy apply on an already-matching policy is a no-op" bash -c "printf 'tskey-api-kboot4-FAKE\n' | bash '$FLEET' policy apply 2>&1 | grep -q 'already isolates'"
 
 # ======================================================================
 echo "== doctor (isolation negative test from the online provisioned node)"

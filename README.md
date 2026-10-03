@@ -79,7 +79,7 @@ cp -R templates/memory ~/fleet-memory && (cd ~/fleet-memory && git init -b main 
 
 ./fleet init master --config-dir ~/fleet-config
 #   asks for: a Tailscale API access token (opens the keys page; 1-day expiry is enough — it is
-#   revoked at the end), the typed word `apply` to replace the tailnet policy with the template,
+#   revoked at the end), the typed word `apply` to merge the fleet rules into your tailnet policy,
 #   one `gh auth login --web` approval (or a GitHub token as fallback). Mints a scoped OAuth client
 #   for later, generates the master SSH key and the digest key, installs the reconcile timer.
 ln -s ~/fleeter/fleet ~/.local/bin/fleet
@@ -265,7 +265,7 @@ secrets to rotate. Rotate them; fleeter does not wipe a node.
 
 ```sh
 fleet policy check          # live tailnet policy has the template's tagOwners/grants and no rule that lets a node reach the tailnet
-fleet policy apply          # diff + typed `apply` + POST with If-Match (needs a one-off API token)
+fleet policy apply          # merge fleet rules into the live policy, diff, typed `apply`, backup, POST with If-Match (needs a one-off API token)
 fleet doctor                # vault modes, OAuth token, policy, GitHub access, schedules, config dir, and an
                             # `nc -z` from every online node to the master (22, 443) and another node (22): any success fails
 ```
@@ -300,7 +300,7 @@ node (the master runs them remotely during provision and kick).
 
 | Command | Flags | What it does |
 |---|---|---|
-| `fleet init master` | `--config-dir DIR`, `--reconfigure` | Records the config dir in `~/.config/fleet/fleet.conf` (offers to clone `FLEET_CONFIG_REPO` into it when missing), creates the vault, master SSH key, digest key; Tailscale: bootstrap token → policy check/apply → scoped OAuth client (token revoked); GitHub: `gh auth login --web` or token; installs the reconcile timer. `--reconfigure` redoes the Tailscale/GitHub steps. Idempotent. |
+| `fleet init master` | `--config-dir DIR`, `--reconfigure` | Records the config dir in `~/.config/fleet/fleet.conf` (offers to clone `FLEET_CONFIG_REPO` into it when missing), creates the vault, master SSH key, digest key; Tailscale: bootstrap token → policy check/merge-apply → scoped OAuth client (token revoked; init stops if the policy step is skipped, because the client needs the fleet tag); GitHub: `gh auth login --web` or token; installs the reconcile timer. `--reconfigure` redoes the Tailscale/GitHub steps. Idempotent. |
 | `fleet secrets set NAME` | `--profile minimal\|full` (default full) | Stores one secret from a hidden prompt or stdin into `vault/secrets/<profile>.env`. |
 | `fleet secrets list` | | Names and profiles only. |
 | `fleet files add PATH` | `--profile minimal\|full` | Mirrors a file under `$HOME` into the vault; recreated at the same relative path on nodes. |
@@ -312,7 +312,7 @@ node (the master runs them remotely during provision and kick).
 | `fleet kick NODE` | `--yes` | Revoke: see "Kick a node". |
 | `fleet config publish` | `--yes`, `--no-capture` | `harness_capture` into the config dir (skipped with `--no-capture`), secret scan over `harness/` and `skills/` (always), staged diff (stat + content), confirm, commit (`publish fleet config`), push to the checkout's `origin`. Never touches the fleeter checkout. |
 | `fleet policy check` | | Fetches the live policy with the OAuth client and checks it against the template. Exit 1 on findings. |
-| `fleet policy apply` | | Shows a unified diff, requires the typed word `apply`, POSTs the template with `If-Match`. Asks for a one-off API access token (revoked afterwards). |
+| `fleet policy apply` | | Merges the fleet rules into the **live** policy (adds the `tagOwners` entry and the template grants; turns `*`/`autogroup:tagged` sources into `autogroup:member`; keeps every other rule), shows a unified diff, requires the typed word `apply`, backs up the previous policy to `vault/policy-backups/`, POSTs with `If-Match`. Comments in the policy are not kept. Rules with IP/host/other-tag sources are reported, not rewritten. Asks for a one-off API access token (revoked afterwards). |
 | `fleet doctor` | | See "Check isolation". Exit 1 on any problem. |
 | `fleet join` | env `FLEET_INVITE_CODE` or `FLEET_INVITE_FILE` | Node bootstrap (also embedded in the invite one-liner). Interactive, uses sudo once. |
 | `fleet apply` | `--from-master DIGEST` | Converges tools, instructions, harness templates, skills, `env.sh`, shell rc block, memory clone, timers. Records the digest and `applied_commit` only on success. Takes `~/.config/fleet/locks/apply`. |
@@ -442,7 +442,8 @@ Harness files fleet writes (and the ownership rules) are listed in
 - **`fleet doctor`: ISOLATION FAIL** — a node reached the master. Your policy
   has a grant whose `src` covers tagged devices (`*`, `autogroup:tagged`, a
   CIDR, a host alias). `fleet policy check` names the rule; `fleet policy apply`
-  replaces the policy with the template.
+  merges the fleet rules into your policy (wildcard sources become
+  `autogroup:member`; IP/host/tag sources it reports for you to fix by hand).
 - **Docker node exits right away** — `docker logs <name>`: usually the invite
   file was already consumed or expired (one invite = one container), or the
   image lacks `tailscale` (`FLEET_FAKE_TAILSCALE` is for tests only).

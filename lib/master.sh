@@ -566,7 +566,10 @@ with_bootstrap_token() {
 
 # ts_bootstrap — runs under with_bootstrap_token: policy, then the OAuth client.
 ts_bootstrap() {
-  policy_ensure || true
+  # The OAuth client must carry the fleet tag, which only exists once the
+  # policy owns it; without the policy step there is nothing useful to create.
+  policy_ensure || die "stopped: the tailnet policy is not set up, so the fleet OAuth client cannot be created" \
+    "rerun: fleet init master --reconfigure (create a new 1-day API token; the old one was revoked)"
   api ts client-create "fleet master" "$FLEET_NODE_TAG" auth_keys devices:core policy_file:read >/dev/null \
     || die "could not create the Tailscale OAuth client" "tagOwners must contain $FLEET_NODE_TAG first: fleet policy apply"
   ok "wrote vault/tailscale.json: OAuth client 'fleet master' (scopes auth_keys, devices:core, policy_file:read; tag $FLEET_NODE_TAG)"
@@ -592,25 +595,38 @@ policy_check_live() {
   return "$rc"
 }
 
-# policy_apply_interactive — diff live -> template, require the word "apply",
-# POST the template with If-Match. Needs policy_file write scope (bootstrap token).
+# policy_apply_interactive — merge the fleet rules into the LIVE policy (your
+# other rules stay), show the diff, require the word "apply", back up the live
+# policy into the vault, POST with If-Match. Needs policy_file write scope
+# (bootstrap token).
 policy_apply_interactive() {
-  local tmpd etag rc=0
+  local tmpd etag rc=0 bak
   tmpd=$(mktemp -d "${TMPDIR:-/tmp}/fleet-policy.XXXXXX"); chmod 0700 "$tmpd"
   etag=$(policy_fetch "$tmpd/live.hujson") || { rm -rf "$tmpd"; return 2; }
   if api policy check "$(policy_template)" "$tmpd/live.hujson" "$FLEET_NODE_TAG" 2>/dev/null; then
-    ok "policy: live tailnet policy already matches the template"; rm -rf "$tmpd"; return 0
+    ok "policy: live tailnet policy already isolates $FLEET_NODE_TAG"; rm -rf "$tmpd"; return 0
   fi
-  api policy diff "$(policy_template)" "$tmpd/live.hujson" >&2
-  printf '\nThis REPLACES the live tailnet policy with templates/tailscale-policy.hujson (ETag %s).\n' "${etag:-none}" >&2
-  if typed_confirm 'Type apply to continue, anything else to skip: ' apply; then
-    if api ts acl-set "$etag" <"$(policy_template)" >/dev/null; then
-      ok "policy: applied templates/tailscale-policy.hujson"; audit "policy.apply" "-" ok
+  api policy merge "$(policy_template)" "$tmpd/live.hujson" "$FLEET_NODE_TAG" "$tmpd/merged.json" \
+    || { warn "policy: could not merge the live policy"; rm -rf "$tmpd"; return 1; }
+  if ! api policy check "$(policy_template)" "$tmpd/merged.json" "$FLEET_NODE_TAG"; then
+    warn "policy: the rules above still let other sources reach the tailnet; fleet will not guess."
+    warn "edit them at https://login.tailscale.com/admin/acls/file, then rerun: fleet policy apply"
+    rm -rf "$tmpd"; return 1
+  fi
+  api policy diff "$tmpd/merged.json" "$tmpd/live.hujson" >&2
+  printf '\nThis updates your live tailnet policy as shown above (your other rules stay; comments are\n' >&2
+  printf 'not kept). The current policy is backed up into the vault first. ETag %s.\n' "${etag:-none}" >&2
+  if typed_confirm 'Type the word apply and press Enter (anything else skips): ' apply; then
+    bak="$FLEET_VAULT/policy-backups/$(date -u +%Y%m%dT%H%M%SZ).hujson"
+    mkdir -p "$(dirname "$bak")"; chmod 0700 "$(dirname "$bak")"
+    atomic_write "$bak" 0600 <"$tmpd/live.hujson"
+    if api ts acl-set "$etag" <"$tmpd/merged.json" >/dev/null; then
+      ok "policy: applied (backup of the previous policy: $bak)"; audit "policy.apply" "-" ok
     else
       warn "policy: apply FAILED (ETag changed, validation error, or missing policy_file scope)"; audit "policy.apply" "-" fail; rc=1
     fi
   else
-    warn "policy: not applied; merge by hand at https://login.tailscale.com/admin/acls/file or rerun: fleet policy apply"; rc=1
+    warn "policy: not applied. Rerun later with: fleet policy apply"; rc=1
   fi
   rm -rf "$tmpd"
   return "$rc"

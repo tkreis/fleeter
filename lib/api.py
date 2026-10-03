@@ -52,7 +52,8 @@ Usage:
                                         client and writes vault/tailscale.json
   api.py ts bootstrap-revoke            deletes the token in FLEET_TS_BOOTSTRAP_FILE
   api.py policy check TEMPLATE LIVE TAG offline; exit 1 with findings on stderr
-  api.py policy diff TEMPLATE LIVE      offline unified diff (live -> template)
+  api.py policy merge TEMPLATE LIVE TAG OUT  live policy + fleet additions (wildcard src -> autogroup:member) into OUT
+  api.py policy diff NEW LIVE           offline unified diff (live -> new)
   api.py gh user                        prints the token owner's login
   api.py gh key-create OWNER/REPO TITLE READONLY   (public key on stdin) prints id
   api.py gh key-delete OWNER/REPO KEY_ID   404 counts as deleted
@@ -357,6 +358,50 @@ def policy_check(template_path, live_path, tag):
     return problems
 
 
+def policy_merge(template_path, live_path, tag):
+    """Live policy + the fleet's additions, keeping everything else.
+
+    - tagOwners: the template's tag entries are set.
+    - grants/acls/ssh: a src that covers tagged devices ("*", autogroup:tagged,
+      autogroup:danger-all) becomes autogroup:member, so the owner's devices keep
+      their access but fleet nodes get none; the fleet tag itself is dropped
+      from every src.
+    - the template's grants are appended when missing.
+    Rules with other non-person sources (IPs, hosts, other tags) are left as
+    they are; policy_check reports them for a manual decision.
+    Returns (merged_dict, notes)."""
+    tpl = hujson_loads(open(template_path).read())
+    live = hujson_loads(open(live_path).read())
+    notes = []
+    owners = live.setdefault("tagOwners", {})
+    for t, o in (tpl.get("tagOwners") or {}).items():
+        if sorted(owners.get(t) or []) != sorted(o):
+            owners[t] = o
+            notes.append("tagOwners[%s] = %s" % (t, json.dumps(o)))
+    for where in ("grants", "acls", "ssh"):
+        for r in live.get(where) or []:
+            srcs = r.get("src")
+            if not isinstance(srcs, list):
+                continue
+            new = []
+            for x in srcs:
+                if x in WILDCARD_SRC:
+                    x = "autogroup:member"
+                if x == tag or x in new:
+                    continue
+                new.append(x)
+            if new != srcs:
+                notes.append("%s rule src %s -> %s" % (where, json.dumps(srcs), json.dumps(new)))
+                r["src"] = new
+    grants = live.setdefault("grants", [])
+    have = [norm_rule(g) for g in grants]
+    for g in tpl.get("grants") or []:
+        if norm_rule(g) not in have:
+            grants.append(g)
+            notes.append("grant added: %s" % json.dumps(g, sort_keys=True))
+    return live, notes
+
+
 def policy_cmd(args):
     sub = args[0] if args else ""
     if sub == "check":
@@ -366,12 +411,22 @@ def policy_cmd(args):
         for p in problems:
             sys.stderr.write("policy: %s\n" % p)
         sys.exit(1 if problems else 0)
+    elif sub == "merge":
+        if len(args) < 5:
+            fail("usage: policy merge TEMPLATE LIVE TAG OUTFILE")
+        try:
+            merged, notes = policy_merge(args[1], args[2], args[3])
+        except ValueError as e:
+            fail("live policy is not valid HuJSON: %s" % e)
+        write_private(args[4], json.dumps(merged, indent=2) + "\n")
+        for n in notes:
+            sys.stderr.write("policy merge: %s\n" % n)
     elif sub == "diff":
         if len(args) < 3:
-            fail("usage: policy diff TEMPLATE LIVE")
+            fail("usage: policy diff NEW LIVE")
         a = open(args[2]).read().splitlines(True)
         b = open(args[1]).read().splitlines(True)
-        sys.stdout.writelines(difflib.unified_diff(a, b, "live policy", "templates/tailscale-policy.hujson"))
+        sys.stdout.writelines(difflib.unified_diff(a, b, "live policy", "new policy"))
     else:
         fail("unknown policy subcommand: %s" % sub)
 

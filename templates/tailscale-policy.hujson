@@ -2,9 +2,10 @@
 //
 // `fleet init master` and `fleet policy check` fetch the live policy through the
 // API and verify it contains these tagOwners and grants and no rule with a
-// wildcard or tag:fleet-node src; `fleet policy apply` shows the diff and
-// replaces the live policy with this file (If-Match on the ETag). Or merge by
-// hand at https://login.tailscale.com/admin/acls/file.
+// wildcard or tag:fleet-node src; `fleet policy apply` merges these entries
+// into the live policy (wildcard sources become autogroup:member, other rules
+// stay), shows the diff and POSTs it (If-Match on the ETag). Or merge by hand
+// at https://login.tailscale.com/admin/acls/file.
 //
 // Intent, in one sentence: the owner's own devices may reach fleet nodes on
 // SSH, and fleet nodes may reach NOTHING inside the tailnet.

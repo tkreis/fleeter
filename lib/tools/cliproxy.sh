@@ -190,7 +190,7 @@ tool_cliproxy_install() {
     log "cliproxy: remote mode, using ${FLEET_PROXY_URL:-http://127.0.0.1:8317}"
     return 0
   fi
-  have docker || { warn "docker missing; cliproxy not installed (see devtools)"; return 0; }
+  have docker || { warn "docker CLI not found (PATH: $PATH); cliproxy not installed (see devtools)"; return 0; }
   dir=$(_cliproxy_dir)
   mkdir -p "$dir/conf" "$dir/auth" "$dir/plugins"
   chmod 0700 "$dir/conf" "$dir/auth"
@@ -206,7 +206,7 @@ tool_cliproxy_install() {
     return 0
   fi
 
-  if docker info >/dev/null 2>&1; then
+  if docker_ready; then
     (cd "$dir" && docker compose up -d >/dev/null 2>&1) || warn "docker compose up failed in $dir"
   else
     warn "docker daemon not reachable; boot.sh will start the proxy at next login"

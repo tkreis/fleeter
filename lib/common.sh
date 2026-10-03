@@ -21,6 +21,38 @@ FLEET_CONFIG_DIR_DEFAULT="$HOME/.local/share/fleet-config"   # where provision d
 # again so it always wins. A FLEET_CONFIG_DIR that is already set when this
 # runs (environment, or `--config-dir` in the same process) is kept: it beats
 # the value recorded in the local file. Safe to call more than once.
+# fleet_path_setup — put the user-level tool dirs on PATH. ssh sessions,
+# launchd and systemd start with a bare PATH, so without this a tool installed
+# into ~/.local/bin (claude, mise, cursor-agent) or Docker Desktop's CLI looks
+# "missing" to the next step. Idempotent; only adds dirs that exist.
+fleet_path_setup() {
+  local d
+  for d in /usr/local/bin /opt/homebrew/bin "$HOME/.docker/bin" \
+           /Applications/Docker.app/Contents/Resources/bin \
+           "$HOME/.local/share/mise/shims" "${FLEET_BIN:-$HOME/.local/bin}"; do
+    [ -d "$d" ] || continue
+    case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
+  done
+  export PATH
+}
+
+# docker_ready [WAIT_SECONDS] — true when the docker daemon answers. On macOS
+# with Docker Desktop installed but not running, start it (no window) and wait.
+docker_ready() {
+  local wait=${1:-120} i=0
+  have docker || return 1
+  docker info >/dev/null 2>&1 && return 0
+  if [ "$(fleet_os)" = macos ] && [ -d /Applications/Docker.app ]; then
+    log "starting Docker Desktop (waiting up to ${wait}s for the daemon)"
+    open -g -a Docker >/dev/null 2>&1 || return 1
+    while [ "$i" -lt "$wait" ]; do
+      docker info >/dev/null 2>&1 && return 0
+      sleep 3; i=$((i + 3))
+    done
+  fi
+  return 1
+}
+
 fleet_load_config() {
   local env_cfg=${FLEET_CONFIG_DIR:-}
   # shellcheck source=config/defaults.conf
@@ -35,6 +67,7 @@ fleet_load_config() {
   [ -f "$FLEET_HOME/fleet.conf" ] && . "$FLEET_HOME/fleet.conf"
   [ -n "$env_cfg" ] && FLEET_CONFIG_DIR=$env_cfg
   export FLEET_CONFIG_DIR
+  fleet_path_setup
   return 0
 }
 

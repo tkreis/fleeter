@@ -216,7 +216,7 @@ _dev_docker_logins() {
     if [ -z "$(_dev_var "$tvar")" ]; then log "docker login $host: $tvar not set, skipped"; continue; fi
     user=$(_dev_var "$uvar") || { warn "FLEET_DOCKER_LOGINS: bad variable name '$uvar'"; continue; }
     [ -n "$user" ] || { warn "$uvar unset; skipping docker login $host"; continue; }
-    docker info >/dev/null 2>&1 || { warn "docker daemon not reachable; registry login deferred"; return 0; }
+    docker_ready || { warn "docker daemon not reachable; registry login deferred"; return 0; }
     if _dev_var "$tvar" | docker login "$host" -u "$user" --password-stdin >/dev/null 2>&1; then
       ok "docker login $host"
     else

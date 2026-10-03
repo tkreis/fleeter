@@ -31,9 +31,12 @@ fleet init master --config-dir ~/fleet-config
 fleet config publish
 ```
 
-You also need a private **memory** repo. Create it from fleeter's
-`templates/memory` the same way (`cp -R /path/to/fleeter/templates/memory
-~/fleet-memory`, init, push) and point `FLEET_MEMORY_REPO` at it.
+A private **memory** repo (the shared Markdown vault) is optional. To use one,
+create an empty private repo and point `FLEET_MEMORY_REPO` at it: the master
+seeds the scaffold from fleeter's `templates/memory` on its next reconcile (or
+create it from that directory yourself: `cp -R /path/to/fleeter/templates/memory
+~/fleet-memory`, init, push). Leave `FLEET_MEMORY_REPO=""` and nothing
+memory-related exists on master or nodes.
 
 ## What goes where
 

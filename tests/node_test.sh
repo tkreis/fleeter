@@ -374,6 +374,34 @@ case_apply_proxy() {
   end
 }
 
+# No memory repo at all (FLEET_MEMORY_REPO empty, no FLEET_MEMORY_REMOTE): apply
+# and sync succeed, nothing is cloned, no memory timer exists, status says off.
+case_memory_off() {
+  begin "memory off: apply/sync/status/daemon without a memory repo"
+  local h rc out
+  h=$(mk_home nomem "base")
+  env -u FLEET_MEMORY_REMOTE HOME="$h" "$ROOT/fleet" apply >"$WORK/apply-nomem.log" 2>&1; rc=$?
+  assert "apply exits 0 without a memory repo (see $WORK/apply-nomem.log)" [ "$rc" -eq 0 ] || sed 's/^/     | /' "$WORK/apply-nomem.log"
+  assert "apply says shared memory is off" grep -q 'shared memory is off' "$WORK/apply-nomem.log"
+  refute "nothing cloned" [ -e "$h/fleet-memory" ]
+  assert "memory.state off" [ "$(grep '^state=' "$h/.config/fleet/memory.state")" = state=off ]
+  out=$(env -u FLEET_MEMORY_REMOTE HOME="$h" "$ROOT/fleet" memory sync 2>&1); rc=$?
+  assert "memory sync exits 0 and is quiet" bash -c "[ '$rc' -eq 0 ] && [ -z '$out' ]"
+  env -u FLEET_MEMORY_REMOTE HOME="$h" "$ROOT/fleet" status --json >"$WORK/status-nomem.json" 2>/dev/null
+  assert "status: memory.state off, no memory timer listed, pull timer still there" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["memory"]["state"]=="off" and "memory" not in d["timers"] and "pull" in d["timers"]' "$WORK/status-nomem.json"
+  assert "status table prints memory off" bash -c "env -u FLEET_MEMORY_REMOTE HOME='$h' '$ROOT/fleet' status 2>/dev/null | grep -q '^memory *off'"
+  # the daemon schedules only pull and update
+  echo "fleet-nomem" >"$TS_STATE"
+  env -u FLEET_MEMORY_REMOTE HOME="$h" "$ROOT/fleet" daemon >"$WORK/daemon-nomem.log" 2>&1 & local pid=$!
+  sleep 2
+  kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  assert "daemon job list has no memory job" bash -c "grep -q 'jobs: pull update' '$WORK/daemon-nomem.log' && ! grep -q '^memory=' '$h/.config/fleet/daemon.state'"
+  # the same node with a memory remote again: the job comes back
+  fleet_as "$h" apply >"$WORK/apply-nomem2.log" 2>&1; rc=$?
+  assert "apply with a memory remote again clones and reports ok" bash -c "[ '$rc' -eq 0 ] && [ -d '$h/fleet-memory/.git' ] && [ \"\$(grep '^state=' '$h/.config/fleet/memory.state')\" = state=ok ]"
+  end
+}
+
 case_memory_sync() {
   begin "memory sync: commits only nodes/<name>, leaves other paths unstaged"
   local h="$WORK/homes/beta" m rc
@@ -1052,6 +1080,7 @@ case_join
 case_t3_authkey
 case_apply
 case_apply_proxy
+case_memory_off
 case_memory_sync
 case_memory_concurrent
 case_memory_conflict

@@ -43,7 +43,7 @@ file again. The same loader runs in every plug-in subprocess.
 |---|---|---|
 | Harness updates | no | node timer runs the vendor updaters daily |
 | Code, skills, instructions, harness config | no | node pulls the code and config repos every 15 min with read-only deploy keys |
-| Memory sync | no | node ↔ GitHub directly, every 5 min |
+| Memory sync (optional; off without `FLEET_MEMORY_REPO`) | no | node ↔ GitHub directly, every 5 min |
 | Secrets, mirrored files, new tokens | **yes** | pushed by `reconcile` the next time the master is awake; the node keeps its last set |
 | Join / enrol | **yes** | the invite is minted on the master; the joined node waits for the next reconcile |
 | `kick`, `provision` | **yes** | fallback: delete the device in the Tailscale admin console; the master revokes deploy keys when next awake |

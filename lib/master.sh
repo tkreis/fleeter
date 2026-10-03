@@ -508,19 +508,22 @@ gh_try_install() {
   have gh
 }
 
-# key_repos — the repos that get a per-node deploy key: config and memory
-# always, code only when it is a non-https URL.
+# key_repos — the repos that get a per-node deploy key: config always, memory
+# when a memory repo is configured, code only when it is a non-https URL.
 key_repos() {
   repo_needs_key "$FLEET_CODE_REPO" && printf '%s\n' "$FLEET_CODE_REPO"
-  printf '%s\n%s\n' "$FLEET_CONFIG_REPO" "$FLEET_MEMORY_REPO"
+  printf '%s\n' "$FLEET_CONFIG_REPO"
+  [ -n "$FLEET_MEMORY_REPO" ] && printf '%s\n' "$FLEET_MEMORY_REPO"
+  return 0
 }
 
 # github_setup — logged-in gh (one browser approval) or, as a fallback, a token
 # in vault/github.json. Checks access to the repos; offers to create them.
 github_setup() {
   local reconfigure=$1 tok slug repo ans
-  repo_require FLEET_CONFIG_REPO; repo_require FLEET_MEMORY_REPO
+  repo_require FLEET_CONFIG_REPO
   [ -n "$FLEET_CODE_REPO" ] || warn "FLEET_CODE_REPO is empty: nodes cannot pull code updates; provision re-ships the code each time"
+  [ -n "$FLEET_MEMORY_REPO" ] || log "FLEET_MEMORY_REPO is empty: shared memory is off (no memory deploy keys, no memory timer on nodes)"
   if [ -z "${FLEET_GH_API:-}" ] && gh_try_install; then
     if ! gh auth status -h github.com >/dev/null 2>&1; then
       log "GitHub: one browser approval (gh auth login --web)"
@@ -1243,7 +1246,10 @@ except Exception: pass')
   host_key_pin "$user" "$dns" || true
 
   pub_c=$(ssh_to "$user" "$dns" 'cat ~/.ssh/fleet_config.pub' </dev/null) || { warn "$name: no ~/.ssh/fleet_config.pub"; claim_release "$cf"; return 0; }
-  pub_m=$(ssh_to "$user" "$dns" 'cat ~/.ssh/fleet_memory.pub' </dev/null) || { warn "$name: no ~/.ssh/fleet_memory.pub"; claim_release "$cf"; return 0; }
+  pub_m=""
+  if [ -n "$FLEET_MEMORY_REPO" ]; then
+    pub_m=$(ssh_to "$user" "$dns" 'cat ~/.ssh/fleet_memory.pub' </dev/null) || { warn "$name: no ~/.ssh/fleet_memory.pub"; claim_release "$cf"; return 0; }
+  fi
   # Each key id lands in the claimed file the moment it exists, together with
   # the repo it was created on: claim_release (failure) and the expiry sweep
   # (crash) roll back from there, against that repo even if the URL changed.
@@ -1255,13 +1261,16 @@ except Exception: pass')
       || { warn "$name: GitHub deploy key (code) failed"; audit enrol "$name" "fail gh-code"; claim_release "$cf"; return 0; }
     json_set "$cf" gh_code_key "$kd" gh_code_repo "$sd"
   fi
-  sc=$(repo_slug "$FLEET_CONFIG_REPO"); sm=$(repo_slug "$FLEET_MEMORY_REPO")
+  sc=$(repo_slug "$FLEET_CONFIG_REPO"); sm=""; km=""
   kc=$(printf '%s\n' "$pub_c" | gh_key_create "$sc" "fleet-$name-$id" true) \
     || { warn "$name: GitHub deploy key (config) failed"; audit enrol "$name" "fail gh-config"; claim_release "$cf"; return 0; }
   json_set "$cf" gh_config_key "$kc" gh_config_repo "$sc"
-  km=$(printf '%s\n' "$pub_m" | gh_key_create "$sm" "fleet-$name-$id" false) \
-    || { warn "$name: GitHub deploy key (memory) failed"; audit enrol "$name" "fail gh-memory"; claim_release "$cf"; return 0; }
-  json_set "$cf" gh_memory_key "$km" gh_memory_repo "$sm"
+  if [ -n "$FLEET_MEMORY_REPO" ]; then
+    sm=$(repo_slug "$FLEET_MEMORY_REPO")
+    km=$(printf '%s\n' "$pub_m" | gh_key_create "$sm" "fleet-$name-$id" false) \
+      || { warn "$name: GitHub deploy key (memory) failed"; audit enrol "$name" "fail gh-memory"; claim_release "$cf"; return 0; }
+    json_set "$cf" gh_memory_key "$km" gh_memory_repo "$sm"
+  fi
 
   printf '%s' "$enrol" | python3 -c 'import json, sys
 try: e = json.load(sys.stdin)

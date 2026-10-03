@@ -7,7 +7,9 @@ Change it only together with every side that uses it.
 ## Repos and directories
 
 Three repos, configured in `fleet.conf` (`FLEET_CODE_REPO`, `FLEET_CONFIG_REPO`,
-`FLEET_MEMORY_REPO`; defaults empty, commands that need them die with a hint):
+`FLEET_MEMORY_REPO`; defaults empty). Only the config repo is required: an
+empty code repo means provision re-ships the code each time, an empty memory
+repo switches shared memory off everywhere (no key, clone, timer, seed):
 
 | | On the master | On a node | Deploy key | Remote alias on nodes |
 |---|---|---|---|---|
@@ -66,7 +68,9 @@ step when the directory is missing.
      nodes/claimed/<nonce>.<ts-id>.json` before any key is created;
    - registers the deploy keys — `code` (read-only; only when
      `repo_needs_key "$FLEET_CODE_REPO"`), `config` (read-only), `memory`
-     (read-write) — via `gh api` when the GitHub CLI is logged in, else with the
+     (read-write; only when `FLEET_MEMORY_REPO` is set, otherwise the node's
+     `fleet_memory.pub` is never read and `github_keys.memory` is `null`) —
+     via `gh api` when the GitHub CLI is logged in, else with the
      token in `vault/github.json`. Each key id is written into the claimed file
      (`gh_code_key`, `gh_config_key`, `gh_memory_key`) the moment it exists,
      with the `owner/repo` it was created on (`gh_code_repo`, `gh_config_repo`,
@@ -262,7 +266,7 @@ same, then `fleet leave`.
 ~/.config/fleet/privileged_done  join finished the privileged OS steps; plug-ins skip them
 ~/.config/fleet/manifest         files fleet owns (one path per line), for cleanup; harness.manifest, harness.claude-mcp
 ~/.config/fleet/status.json      written by apply/status
-~/.config/fleet/memory.state     state=ok|conflict|missing, last_sync, detail
+~/.config/fleet/memory.state     state=ok|conflict|missing|off (off: no memory remote configured), last_sync, detail
 ~/.config/fleet/fleet.conf       local overrides (optional)
 ~/.config/fleet/locks/apply      apply/pull lock; logs/<job>.log; daemon.pid, daemon.state
 ~/.ssh/authorized_keys           master key line (join) + one `… fleet-t3-client` line (provision step 4b; absent after t3 revoke/kick)
@@ -295,8 +299,8 @@ exists and `exec`s itself from there after a pull changed the code checkout.
   "applied": "<digest>", "applied_at": "…",
   "code_commit": "<sha>", "config_commit": "<sha>", "applied_commit": "<sha>+<sha>",
   "tools": {"claude": {"state": "ok", "detail": "2.1.0 env-token"}, "codex": {"state": "login", "detail": "run: fleet login codex"}},
-  "memory": {"state": "ok|conflict|missing", "last_sync": "…", "detail": "…"},
-  "timers": {"pull": true, "memory": true, "update": true},
+  "memory": {"state": "ok|conflict|missing|off", "last_sync": "…", "detail": "…"},
+  "timers": {"pull": true, "memory": true, "update": true},   // no "memory" key while the memory job is off
   "token_age_days": {"CLAUDE_CODE_OAUTH_TOKEN": 12},
   "updated": "…"
 }
@@ -336,5 +340,7 @@ and the secrets of `secrets.env`; only `${UPPER_CASE}` is substituted. Capture
 macOS `~/Library/LaunchAgents/dev.fleet.<job>.plist` (`StartInterval`); Linux
 with a systemd user session `~/.config/systemd/user/fleet-<job>.{service,timer}`,
 otherwise crontab lines tagged `# fleet:<job>`; containers none (`fleet daemon`).
-Jobs: `pull` (FLEET_PULL_EVERY), `memory` (FLEET_MEMORY_EVERY), `update`
-(FLEET_UPDATE_EVERY). Master additionally: `reconcile` (FLEET_RECONCILE_EVERY).
+Jobs: `pull` (FLEET_PULL_EVERY), `memory` (FLEET_MEMORY_EVERY; only while a
+memory remote is configured — `node_job_enabled`, and a job switched off since
+the last apply loses its unit/plist), `update` (FLEET_UPDATE_EVERY). Master
+additionally: `reconcile` (FLEET_RECONCILE_EVERY).

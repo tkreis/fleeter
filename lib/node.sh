@@ -8,8 +8,24 @@
 # flock, no timeout. Nothing here calls sudo.
 
 NODE_REQUIRED_TOOLS="base devtools claude"
-NODE_JOBS="pull memory update"
+NODE_JOBS="pull memory update"          # every job fleet knows (removal covers all of them)
 NODE_HARNESS_PROCS="claude codex cursor-agent grok"
+
+# node_job_enabled JOB — the memory job only exists while a memory remote is
+# configured (FLEET_MEMORY_REPO or FLEET_MEMORY_REMOTE); the others always.
+node_job_enabled() {
+  case "$1" in
+    memory) [ -n "$(node_memory_remote)" ] ;;
+    *) return 0 ;;
+  esac
+}
+
+# node_jobs — the jobs this node schedules, one per line.
+node_jobs() {
+  local j
+  for j in $NODE_JOBS; do node_job_enabled "$j" && printf '%s\n' "$j"; done
+  return 0
+}
 
 # ---------- small helpers ----------
 
@@ -355,6 +371,11 @@ node_bin_link() {
 node_memory_setup() {
   local name=$1 remote
   remote=$(node_memory_remote)
+  if [ -z "$remote" ]; then
+    node_kv_set "$FLEET_HOME/memory.state" state off
+    log "memory: no FLEET_MEMORY_REPO configured; shared memory is off on this node"
+    return 0
+  fi
   if [ ! -d "$FLEET_MEMORY_DIR/.git" ]; then
     log "cloning fleet-memory into $FLEET_MEMORY_DIR"
     if node_git clone --quiet "$remote" "$FLEET_MEMORY_DIR" 2>"$FLEET_HOME/logs/memory-clone.err"; then
@@ -371,7 +392,7 @@ node_memory_setup() {
   node_git -C "$FLEET_MEMORY_DIR" config pull.rebase true
   mkdir -p "$FLEET_MEMORY_DIR/nodes/$name"
   case "$(node_kv_get "$FLEET_HOME/memory.state" state)" in
-    ""|missing) node_kv_set "$FLEET_HOME/memory.state" state ok ;;
+    ""|missing|off) node_kv_set "$FLEET_HOME/memory.state" state ok ;;
   esac
   ok "memory vault ready (nodes/$name)"
 }
@@ -388,6 +409,11 @@ cmd_memory_sync() {
   local reset=0 name dir sf branch attempt delay others ahead
   [ "${1:-}" = --reset ] && reset=1
   name=$(node_name); dir=$FLEET_MEMORY_DIR; sf="$FLEET_HOME/memory.state"
+  if [ -z "$(node_memory_remote)" ]; then
+    node_kv_set "$sf" state off
+    [ -z "${FLEET_VERBOSE:-}" ] || log "memory: no FLEET_MEMORY_REPO configured; nothing to sync"
+    return 0
+  fi
   if [ ! -d "$dir/.git" ]; then
     node_kv_set "$sf" state missing
     warn "memory vault not cloned at $dir (run fleet apply)"
@@ -672,11 +698,12 @@ node_write_status() {
     line=$(node_tool_status "$t")
     printf 'tool\t%s\t%s\t%s\n' "$t" "${line%% *}" "${line#* }" >>"$tmp"
   done
-  for job in $NODE_JOBS; do
+  for job in $(node_jobs); do
     if node_timer_active "$job"; then printf 'timer\t%s\ttrue\n' "$job" >>"$tmp"; else printf 'timer\t%s\tfalse\n' "$job" >>"$tmp"; fi
   done
   cc=$(node_config_commit)
   FLEET_ST_VERSION="$FLEET_VERSION" FLEET_ST_NAME="$name" FLEET_ST_OS="$(fleet_os)" \
+  FLEET_ST_MEM_REMOTE="$(node_memory_remote)" \
   FLEET_ST_CONTAINER="$(fleet_in_container && echo true || echo false)" \
   FLEET_ST_APPLIED="$(cat "$FLEET_HOME/applied" 2>/dev/null || true)" \
   FLEET_ST_APPLIED_AT="$(cat "$FLEET_HOME/applied_at" 2>/dev/null || true)" \
@@ -698,7 +725,10 @@ with open(sys.argv[1]) as fh:
             tools[parts[1]] = {"state": parts[2], "detail": parts[3]}
         elif parts[0] == "timer" and len(parts) >= 3:
             timers[parts[1]] = parts[2] == "true"
-mem_state = e("FLEET_ST_MEM_STATE") or ("missing" if not os.path.isdir(os.path.join(e("FLEET_ST_MEM_DIR", ""), ".git")) else "ok")
+if not e("FLEET_ST_MEM_REMOTE"):
+    mem_state = "off"       # no memory repo configured: nothing is cloned or synced
+else:
+    mem_state = e("FLEET_ST_MEM_STATE") or ("missing" if not os.path.isdir(os.path.join(e("FLEET_ST_MEM_DIR", ""), ".git")) else "ok")
 memory = {"state": mem_state, "last_sync": e("FLEET_ST_MEM_SYNC") or None}
 if e("FLEET_ST_MEM_DETAIL"):
     memory["detail"] = e("FLEET_ST_MEM_DETAIL")
@@ -900,10 +930,10 @@ cmd_daemon() {
   echo $$ | atomic_write "$FLEET_HOME/daemon.pid" 0600
   trap node_daemon_term TERM INT
   rev0=$(node_daemon_code_rev)
-  log "fleet daemon started (pid $$, $FLEET_ROOT${rev0:+ at ${rev0}}); jobs: $NODE_JOBS"
+  log "fleet daemon started (pid $$, $FLEET_ROOT${rev0:+ at ${rev0}}); jobs: $(node_jobs | tr '\n' ' ')"
   while [ "$NODE_DAEMON_STOP" -eq 0 ]; do
     now=$(date +%s)
-    for job in $NODE_JOBS; do
+    for job in $(node_jobs); do
       [ "$NODE_DAEMON_STOP" -eq 0 ] || break
       last=$(node_kv_get "$FLEET_HOME/daemon.state" "$job"); : "${last:=0}"
       every=$(node_job_minutes "$job")
@@ -990,8 +1020,14 @@ node_schedule_install_macos() {
   uid=$(id -u)
   mkdir -p "$HOME/Library/LaunchAgents" "$FLEET_HOME/logs"
   for job in $NODE_JOBS; do
-    secs=$(( $(node_job_minutes "$job") * 60 ))
     label="dev.fleet.$job"; plist="$HOME/Library/LaunchAgents/$label.plist"
+    if ! node_job_enabled "$job"; then      # a job switched off since the last apply loses its agent
+      [ -f "$plist" ] || continue
+      launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+      rm -f "$plist"; ok "schedule $label removed (job disabled)"
+      continue
+    fi
+    secs=$(( $(node_job_minutes "$job") * 60 ))
     tmp=$(mktemp "$HOME/Library/LaunchAgents/.fleet.XXXXXX")
     node_launchagent_plist "$job" "$secs" >"$tmp"
     if [ -f "$plist" ] && cmp -s "$tmp" "$plist" && launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
@@ -1025,6 +1061,12 @@ node_schedule_install_systemd() {
   udir="$HOME/.config/systemd/user"
   mkdir -p "$udir" "$FLEET_HOME/logs"
   for job in $NODE_JOBS; do
+    if ! node_job_enabled "$job"; then      # a job switched off since the last apply loses its timer
+      [ -f "$udir/fleet-$job.timer" ] || continue
+      [ -n "${FLEET_NO_SCHEDULER:-}" ] || systemctl --user disable --now "fleet-$job.timer" >/dev/null 2>&1 || true
+      rm -f "$udir/fleet-$job.service" "$udir/fleet-$job.timer"; ok "schedule fleet-$job.timer removed (job disabled)"
+      continue
+    fi
     mins=$(node_job_minutes "$job"); args=$(node_job_args "$job")
     printf '%s\n' "[Unit]" "Description=fleet $job" "" "[Service]" "Type=oneshot" \
       "Environment=PATH=%h/.local/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin" \
@@ -1035,7 +1077,7 @@ node_schedule_install_systemd() {
   done
   if [ -n "${FLEET_NO_SCHEDULER:-}" ]; then ok "schedules written to $udir, not enabled (FLEET_NO_SCHEDULER)"; return 0; fi
   systemctl --user daemon-reload >/dev/null 2>&1 || true
-  for job in $NODE_JOBS; do
+  for job in $(node_jobs); do
     if systemctl --user enable --now "fleet-$job.timer" >/dev/null 2>&1; then ok "schedule fleet-$job.timer"; else warn "could not enable fleet-$job.timer"; fi
   done
 }
@@ -1052,7 +1094,7 @@ node_schedule_remove_systemd() {
 
 node_schedule_install_cron() {
   local job expr args lines=""
-  for job in $NODE_JOBS; do
+  for job in $(node_jobs); do
     expr=$(node_cron_expr "$(node_job_minutes "$job")"); args=$(node_job_args "$job")
     lines="$lines$expr $FLEET_BIN/fleet $args >>$FLEET_HOME/logs/$job.log 2>&1 # fleet:$job
 "

@@ -915,6 +915,40 @@ gh_fleet reconcile >/dev/null 2>&1
 assert "reconcile retries gh deletes until clean" [ "$(jget "$HOME2/.config/fleet/vault/nodes/nGHCNTRL.json" pending_cleanup)" = '[]' ]
 
 # ======================================================================
+echo "== optional memory repo + T3 remote access off (defaults): init, enrol, provision, kick, doctor without either"
+HOME3="$T/master3"; mkdir -p "$HOME3/.config/fleet"
+printf "FLEET_MEMORY_REPO=''\nFLEET_T3_REMOTE=0\n" >"$HOME3/.config/fleet/fleet.conf"
+m3() { HOME="$HOME3" FLEET_HOME="$HOME3/.config/fleet" FLEET_VAULT="$HOME3/.config/fleet/vault" FLEET_TS_STATUS_JSON="$T/status3.json" bash "$FLEET" "$@"; }
+V3="$HOME3/.config/fleet/vault"
+write_status '' "$T/status3.json"
+cp "$T/acl.template.bak" "$ACL"          # live policy already isolates the tag: init asks for no `apply`
+out=$(printf 'tskey-api-kboot7-FAKE\nghtok\n' | m3 init master --config-dir "$CFG" 2>&1); rc=$?
+assert "init master without a memory repo exits 0 and says shared memory is off" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'FLEET_MEMORY_REPO is empty: shared memory is off'" "$out"
+refute "FLEET_T3_REMOTE=0 (default): init creates no T3 client key" [ -f "$V3/ssh/t3_client" ]
+m3 reconcile >/dev/null 2>&1
+refute "reconcile without the T3 key never touches ~/.ssh" [ -e "$HOME3/.ssh" ]
+m3 invite --name nomem >/dev/null 2>&1
+nm_pending=$(grep -l '"name": "nomem"' "$V3"/nodes/pending/*.json)
+mk_node fleet-nomem.tail1.ts.net "$(jget "$nm_pending" nonce)"
+rm -f "$NODES/fleet-nomem.tail1.ts.net/.ssh/fleet_memory.pub"      # never read without a memory repo
+write_status ',"k9":{"ID":"nNOMEMCNTRL","HostName":"fleet-nomem","DNSName":"fleet-nomem.tail1.ts.net.","TailscaleIPs":["100.64.0.21"],"Online":true,"Tags":["tag:fleet-node"]}' "$T/status3.json"
+n_mem_post=$(grep -c '^POST /repos/example/fleet-memory/keys' "$API_LOG")
+: >"$SSH_LOG"
+out=$(m3 reconcile 2>&1); rc=$?
+assert "enrol + provision without a memory repo: exits 0, node provisioned" bash -c "[ $rc = 0 ] && [ \"\$(jget '$V3/nodes/nNOMEMCNTRL.json' state)\" = provisioned ]"
+assert "registry: config key registered, memory key null" bash -c "[ -n \"\$(jget '$V3/nodes/nNOMEMCNTRL.json' github_keys.config.id)\" ] && [ \"\$(jget '$V3/nodes/nNOMEMCNTRL.json' github_keys.memory)\" = null ]"
+assert "no memory deploy key requested, fleet_memory.pub never read" bash -c "[ \"\$(grep -c '^POST /repos/example/fleet-memory/keys' '$API_LOG')\" = $n_mem_post ] && ! grep -q 'fleet_memory.pub' '$SSH_LOG'"
+refute "provision without the T3 key adds no fleet-t3-client line" grep -q 'fleet-t3-client' "$NODES/fleet-nomem.tail1.ts.net/.ssh/authorized_keys"
+refute "still nothing under ~/.ssh on the master" [ -e "$HOME3/.ssh" ]
+out=$(m3 doctor 2>&1)
+assert "doctor: no memory repo and no T3 key are reported, not failures" bash -c "printf '%s' \"\$0\" | grep -q 'FLEET_MEMORY_REPO is empty: shared memory is off' && printf '%s' \"\$0\" | grep -q 't3 remote access: off' && ! printf '%s' \"\$0\" | grep -q 'warn.*FLEET_MEMORY_REPO'" "$out"
+n_mem_del=$(grep -c '^DELETE /repos/example/fleet-memory/keys/' "$API_LOG"); n_cfg_del=$(grep -c '^DELETE /repos/example/fleet-config/keys/' "$API_LOG")
+out=$(m3 kick nomem --yes </dev/null 2>&1); rc=$?
+assert "kick without a memory repo: exits 0, deletes device + config key only, nothing pending, no t3 step" bash -c "[ $rc = 0 ] && grep -q '^DELETE /api/v2/device/nNOMEMCNTRL' '$API_LOG' && [ \"\$(jget '$V3/nodes/nNOMEMCNTRL.json' pending_cleanup)\" = '[]' ] && ! grep -q ' kick nomem .*t3=' '$V3/audit.log'"
+assert "kick deleted one config key and no memory key" bash -c "[ \"\$(grep -c '^DELETE /repos/example/fleet-config/keys/' '$API_LOG')\" = $((n_cfg_del + 1)) ] && [ \"\$(grep -c '^DELETE /repos/example/fleet-memory/keys/' '$API_LOG')\" = $n_mem_del ]"
+rm -rf "$NODES/fleet-nomem.tail1.ts.net"
+
+# ======================================================================
 echo "== config publish (commits + pushes the config repo, never the code checkout)"
 git -C "$CFG" remote add origin "$T/cfg-remote.git"; git -C "$CFG" push -q -u origin main 2>/dev/null
 code_head=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo none)

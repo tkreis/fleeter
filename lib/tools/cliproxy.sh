@@ -78,12 +78,15 @@ sys.exit(1)
 PY
 }
 
-# _cliproxy_render SRC DEST MODE — copy a template, substituting the image pin,
-# only when the content changed.
+# _cliproxy_render SRC DEST MODE — copy a template, substituting the knobs from
+# fleet.conf (image, timezone, container name, port), only when the content changed.
 _cliproxy_render() {
   local tmp
   tmp=$(mktemp) || die "mktemp failed"
-  sed "s|@FLEET_PROXY_IMAGE@|${FLEET_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}|g" "$1" >"$tmp"
+  sed -e "s|@FLEET_PROXY_IMAGE@|${FLEET_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}|g" \
+      -e "s|@FLEET_PROXY_TZ@|${FLEET_PROXY_TZ:-UTC}|g" \
+      -e "s|@FLEET_PROXY_CONTAINER@|${FLEET_PROXY_CONTAINER:-cli-proxy-api}|g" \
+      -e "s|@FLEET_PROXY_PORT@|${FLEET_PROXY_PORT:-8317}|g" "$1" >"$tmp"
   if [ -f "$2" ] && cmp -s "$tmp" "$2"; then rm -f "$tmp"; return 0; fi
   atomic_write "$2" "$3" <"$tmp"
   rm -f "$tmp"

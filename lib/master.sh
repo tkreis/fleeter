@@ -256,7 +256,7 @@ cmd_files_add() {
 # vault (full profile). Nodes stage them in ~/.cli-proxy-api and adopt them
 # (lib/tools/cliproxy.sh), so a node's refreshed tokens are not overwritten.
 cmd_proxy_import() {
-  local src=${1:-$HOME/cli-proxy-api} dest f b n=0
+  local src=${1:-${FLEET_CLIPROXY_DIR:-$HOME/cli-proxy-api}} dest f b n=0
   [ -f "$src/conf/config.yaml" ] || die "no $src/conf/config.yaml" "pass the CLIProxyAPI dir: fleet proxy import DIR"
   vault_init
   dest="$FLEET_VAULT/files/full/.cli-proxy-api"

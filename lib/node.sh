@@ -794,7 +794,7 @@ node_cliproxy_stop() {
   local dir="${FLEET_CLIPROXY_DIR:-$HOME/cli-proxy-api}" uid
   [ -f "$dir/compose.yaml" ] || return 0
   if have docker && docker info >/dev/null 2>&1; then
-    if (cd "$dir" && docker compose down >/dev/null 2>&1) || docker stop cli-proxy-api >/dev/null 2>&1; then
+    if (cd "$dir" && docker compose down >/dev/null 2>&1) || docker stop "${FLEET_PROXY_CONTAINER:-cli-proxy-api}" >/dev/null 2>&1; then
       ok "cliproxy stopped"
     else
       warn "could not stop cliproxy; run: docker compose -f $dir/compose.yaml down"

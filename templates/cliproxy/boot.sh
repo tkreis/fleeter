@@ -54,8 +54,8 @@ log "compose up"
 docker compose up -d 2>&1
 
 for i in $(seq 1 30); do
-  if curl -sf -m 2 -o /dev/null http://127.0.0.1:8317/management.html; then
-    log "proxy answering on 8317 after ${i}s"
+  if curl -sf -m 2 -o /dev/null "http://127.0.0.1:@FLEET_PROXY_PORT@/management.html"; then
+    log "proxy answering on @FLEET_PROXY_PORT@ after ${i}s"
     break
   fi
   sleep 1

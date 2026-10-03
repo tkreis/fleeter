@@ -60,10 +60,13 @@ setup_deps() {
     apt-get install -y -qq --no-install-recommends git python3 openssh-client procps >/dev/null 2>&1
   fi
   for c in git python3 ssh-keygen; do command -v "$c" >/dev/null 2>&1 || { echo "missing: $c"; exit 2; }; done
-  git config --global init.defaultBranch main
+  # identity for the commits below (GIT_CONFIG_GLOBAL keeps it out of the host's config);
+  # every `git init` here pins the default branch itself
   git config --global user.name tester
   git config --global user.email tester@example.invalid
 }
+# git_init DIR [--bare] — a repo whose default branch is main regardless of the host's git config.
+git_init() { git -c init.defaultBranch=main init -q "$@"; }
 
 setup_root() {
   mkdir -p "$ROOT/lib/tools" "$ROOT/config" "$WORK/bin" "$WORK/tmp" "$WORK/homes"
@@ -126,10 +129,10 @@ EOF
 
 setup_memory_remote() {
   local tmp
-  git init -q --bare "$WORK/memory.git"
+  git_init --bare "$WORK/memory.git"
   tmp=$(mktemp -d "$WORK/memseed.XXXXXX")
   cp -R "$SRC/templates/memory/." "$tmp/"
-  git -C "$tmp" init -q
+  (cd "$tmp" && git_init)
   git -C "$tmp" add -A
   git -C "$tmp" commit -q -m "init vault"
   git -C "$tmp" push -q "$WORK/memory.git" HEAD:main
@@ -138,13 +141,13 @@ setup_memory_remote() {
 # code.git = the isolated root (seed kept at $WORK/code-seed for later commits),
 # config.git = the shipped example config (seed at $WORK/config-seed).
 setup_code_config_remotes() {
-  git init -q --bare "$WORK/code.git"
+  git_init --bare "$WORK/code.git"
   rm -rf "$WORK/code-seed"; cp -R "$ROOT" "$WORK/code-seed"
-  git -C "$WORK/code-seed" init -q; git -C "$WORK/code-seed" add -A; git -C "$WORK/code-seed" commit -q -m "code v1"
+  (cd "$WORK/code-seed" && git_init); git -C "$WORK/code-seed" add -A; git -C "$WORK/code-seed" commit -q -m "code v1"
   git -C "$WORK/code-seed" push -q "$WORK/code.git" HEAD:main
-  git init -q --bare "$WORK/config.git"
+  git_init --bare "$WORK/config.git"
   rm -rf "$WORK/config-seed"; cp -R "$SRC/examples/fleet-config" "$WORK/config-seed"
-  git -C "$WORK/config-seed" init -q; git -C "$WORK/config-seed" add -A; git -C "$WORK/config-seed" commit -q -m "config v1"
+  (cd "$WORK/config-seed" && git_init); git -C "$WORK/config-seed" add -A; git -C "$WORK/config-seed" commit -q -m "config v1"
   git -C "$WORK/config-seed" push -q "$WORK/config.git" HEAD:main
 }
 code_head()   { git --git-dir="$WORK/code.git" rev-parse main; }

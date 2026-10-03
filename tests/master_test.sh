@@ -225,7 +225,7 @@ assert "init master idempotent (no prompts second time)" [ "$rc" = 0 ]
 assert "init master keeps existing key, client and digest key" bash -c "[ \"\$(cat '$FLEET_VAULT/ssh/fleet_master.pub')\" = '$key1' ] && [ \"\$(cat '$FLEET_VAULT/tailscale.json')\" = '$ts1' ] && [ \"\$(cat '$FLEET_VAULT/digest.key')\" = '$dk1' ]"
 assert "rerun checks policy with the OAuth client, quietly ok" printf '%s' "$out" | grep -q 'policy: live tailnet policy isolates tag:fleet-node'
 # a missing config dir with a known FLEET_CONFIG_REPO is cloned after confirmation
-git init -q --bare "$T/cfg-remote.git"; git -C "$CFG" push -q "$T/cfg-remote.git" HEAD:main
+git -c init.defaultBranch=main init -q --bare "$T/cfg-remote.git"; git -C "$CFG" push -q "$T/cfg-remote.git" HEAD:main
 printf "FLEET_CONFIG_REPO='%s'\n" "$T/cfg-remote.git" >>"$FLEET_HOME/fleet.conf"
 out=$(printf 'n\n' | bash "$FLEET" init master --config-dir "$T/cfg-clone" 2>&1); rc=$?
 assert "declined clone: init dies, nothing cloned" bash -c "[ $rc != 0 ] && [ ! -d '$T/cfg-clone' ] && printf '%s' \"\$0\" | grep -q 'Clone $T/cfg-remote.git there'" "$out"

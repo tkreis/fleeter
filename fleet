@@ -46,6 +46,9 @@ Master:
   t3 status [NODE]                  check the T3 path as T3 would use it; list the node's T3 sessions
   t3 revoke NODE                    revoke NODE's T3 sessions, pairing tokens and the client key
   config publish [--yes] [--no-capture]   capture this machine's harness config into the config repo, commit, push
+  skill add SOURCE [--name N] [--yes]   a skill dir or git URL (#subdir, @ref) into the config repo, here, and every node
+  skill list [--json]               the fleet's skills: config | fleet | local-only (also on a node: what is installed)
+  skill remove NAME [--yes]         drop a skill from the config repo, this machine and the nodes
   skill install                     install fleeter's `fleet` agent skill into this machine's skill dirs
   policy check|apply                verify the tailnet policy / merge the fleet rules into it (templates/tailscale-policy.hujson)
   doctor                            vault modes, policy, tokens, isolation probes, schedules
@@ -89,7 +92,11 @@ usage_for() {
     "t3 status")        echo "fleet t3 status [NODE]" ;;
     "t3 revoke")        echo "fleet t3 revoke NODE" ;;
     config|"config publish") echo "fleet config publish [--yes] [--no-capture]" ;;
-    skill|"skill install") echo "fleet skill install" ;;
+    skill)              echo "fleet skill add SOURCE [--name N] [--yes] | fleet skill list [--json] | fleet skill remove NAME [--yes] | fleet skill install" ;;
+    "skill add")        echo "fleet skill add SOURCE [--name N] [--yes]    (SOURCE: a dir with SKILL.md, or a git URL[#subdir][@ref])" ;;
+    "skill list")       echo "fleet skill list [--json]" ;;
+    "skill remove")     echo "fleet skill remove NAME [--yes]" ;;
+    "skill install")    echo "fleet skill install" ;;
     policy)             echo "fleet policy check | fleet policy apply" ;;
     "policy check")     echo "fleet policy check" ;;
     "policy apply")     echo "fleet policy apply" ;;
@@ -183,7 +190,7 @@ case "$cmd" in
       config)  subcommand config "publish" "$sub" ;;
       policy)  subcommand policy "check apply" "$sub" ;;
       memory)  subcommand memory "sync" "$sub" ;;
-      skill)   subcommand skill "install" "$sub" ;;
+      skill)   subcommand skill "add list remove install" "$sub" ;;
       schedule) subcommand schedule "install" "$sub" ;;
     esac
     cmd="$cmd $sub" ;;
@@ -217,6 +224,9 @@ case "$cmd" in
   "t3 revoke")       arg_check "$cmd" 1 "" "$@"; cmd_t3_revoke "$@" ;;
   "config publish")  arg_check "$cmd" 0 "--yes -y --no-capture" "$@"; cmd_config_publish "$@" ;;
   "policy check"|"policy apply") arg_check "$cmd" 0 "" "$@"; cmd_policy "$sub" ;;
+  "skill add")       arg_check "$cmd" 1 "--name: --yes -y" "$@"; cmd_skill_add "$@" ;;
+  "skill list")      arg_check "$cmd" 0 "--json" "$@"; cmd_skill_list "$@" ;;
+  "skill remove")    arg_check "$cmd" 1 "--yes -y" "$@"; cmd_skill_remove "$@" ;;
   "skill install")   arg_check "$cmd" 0 "" "$@"; harness_skill_install ;;
   doctor)            arg_check "$cmd" 0 "" "$@"; cmd_doctor "$@" ;;
   panel)             die "the control panel is not part of this version" "use fleet nodes --live, fleet kick, and the Tailscale admin console" ;;

@@ -75,7 +75,7 @@ dump_logs() {
     docker inspect "$c" >/dev/null 2>&1 || continue
     printf '\n----- docker logs %s (tail) -----\n' "$c"; docker logs --tail 40 "$c" 2>&1
   done
-  for f in reconcile1.log provision-slow.log kick.log; do
+  for f in reconcile1.log provision-slow.log kick.log canary-hits; do
     [ -s "$WORK/$f" ] && { printf '\n----- %s -----\n' "$f"; tail -40 "$WORK/$f"; }
   done
 }
@@ -179,6 +179,7 @@ assert "secrets are age ciphertexts: minimal.env.age 0600, no plaintext env file
 assert "tailscale.json and github.json are encrypted too" mexec sh -c "test -f $VAULT/tailscale.json.age && test -f $VAULT/github.json.age && ! test -e $VAULT/tailscale.json && ! test -e $VAULT/github.json"
 mexec sh -c "mkdir -p $MHOME/repositories/app && printf 'E2E_FILE_SECRET=canary-file-e2e\n' > $MHOME/repositories/app/.env"
 assert "files add stores only a .age ciphertext" bash -c "mexec fleet files add $MHOME/repositories/app/.env >/dev/null 2>&1 && mexec test -f $VAULT/files/full/repositories/app/.env.age && ! mexec test -e $VAULT/files/full/repositories/app/.env"
+mexec rm -f $MHOME/repositories/app/.env     # the source is the user's own plaintext; gone, so the grep below sees only fleet's copies
 assert "vault status: key reachable, nothing plaintext" bash -c "o=\$(mexec fleet vault status); printf '%s' \"\$o\" | grep -q '^key:        reachable' && printf '%s' \"\$o\" | grep -q '^plaintext:  none'"
 assert "vault encrypt on an encrypted vault is a no-op" bash -c "mexec fleet vault encrypt 2>&1 | grep -q 'nothing to encrypt'"
 
@@ -334,7 +335,8 @@ assert "alpha (full) got OPENAI_API_KEY, beta (minimal) did not" bash -c "nfile 
 assert "alpha (full) got the mirrored file decrypted, 0600; beta (minimal) did not" bash -c "[ \"\$(nmode $NA $MHOME/repositories/app/.env)\" = 600 ] && nfile $NA $MHOME/repositories/app/.env | grep -qx 'E2E_FILE_SECRET=canary-file-e2e' && ! nexec $NB test -e $MHOME/repositories/app/.env"
 # the encrypted vault never left a plaintext behind on the master: nothing on its
 # filesystem holds a canary (the only copies are inside the ssh streams to the nodes)
-refute "master filesystem holds no decrypted secret (canary grep over / minus proc/sys/dev)" mroot sh -c 'grep -rlF -e fake-oauth-token-e2e -e canary-file-e2e / --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev 2>/dev/null | grep -q .'
+mroot sh -c 'grep -rlF -e fake-oauth-token-e2e -e canary-file-e2e / --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev 2>/dev/null' >"$WORK/canary-hits" 2>/dev/null
+assert "master filesystem holds no decrypted secret (canary grep over / minus proc/sys/dev)" [ ! -s "$WORK/canary-hits" ]
 assert "vault rotate-key re-encrypts everything, the nodes stay in sync after one provision" bash -c "mexec fleet vault rotate-key 2>&1 | grep -q 'vault key rotated: [0-9]* file(s)' && mexec fleet secrets list | grep -q '^OPENAI_API_KEY' && mexec fleet reconcile >/dev/null 2>&1 && mexec fleet list --offline --json | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"alpha\"][\"synced\"]==\"yes\" and d[\"beta\"][\"synced\"]==\"yes\"'"
 nexec "$NA" fleet status --json >"$WORK/status-a.json" 2>/dev/null
 assert "alpha: fleet status --json: name, memory ok, daemon timers on" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["name"]=="alpha" and d["container"] and d["memory"]["state"]=="ok" and d["timers"]["pull"] and d["applied"]' "$WORK/status-a.json"

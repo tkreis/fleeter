@@ -38,7 +38,8 @@ on it (keychain / secret service), see "Vault encryption at rest".
 | A kicked node cannot be re-provisioned by a race | `revoked` is written under the node lock before any cleanup; provision rechecks it before every step; registry writes are serialised by a registry-wide lock; a running provision worker and its ssh/tar children are killed. |
 | Published config contains no secrets | `harness_capture` replaces secret values with placeholders; `fleet config publish` runs a regex secret scan (tokens, keys, JWTs, private keys, long token-like values, home paths) over `harness/` and `skills/` on every run, with or without `--no-capture`; any hit aborts before anything is committed. |
 | Node SSH accepts keys only | Drop-in sorted first in `sshd_config.d`, reload required, effective config verified with `sshd -T -C` for the master's login; join fails otherwise. |
-| Node host keys are pinned | `vault/ssh/known_hosts` (0600) holds each node's ed25519 host key, read with `cat /etc/ssh/ssh_host_ed25519_key.pub` over the authenticated fleet session at enrolment (never `ssh-keyscan`); every later ssh — fleet's own and T3 Code's — runs with `StrictHostKeyChecking yes`, `HostKeyAlgorithms ssh-ed25519` and that file. A key that differs from the pin is refused and reported (`HOST KEY MISMATCH`), never replaced automatically. |
+| Node host keys are pinned | `vault/ssh/known_hosts` (0600) holds each node's ed25519 host key, read with `cat /etc/ssh/ssh_host_ed25519_key.pub` over the authenticated fleet session at enrolment (never `ssh-keyscan`); every later ssh — fleet's own and T3 Code's — runs with `StrictHostKeyChecking yes`, `HostKeyAlgorithms ssh-ed25519` and that file. A key that differs from the pin is refused and reported (`HOST KEY MISMATCH`), never replaced automatically. The pre-boot sshd of a FileVault Mac (`fleet unlock`) may present another key, so it is pinned on first use in a separate `vault/ssh/known_hosts_preboot` and never touches the normal pins. |
+| Restart and pre-boot unlock pass no password through fleet | `fleet reboot` runs `sudo fdesetup authrestart -delayminutes 0` (or `shutdown`/`systemctl`) over an interactive ssh session: sudo and `fdesetup` prompt on the node's TTY, fleet never uses `-inputplist`, `-password` or stdin, and logs only `authrestart|shutdown|systemctl`. `fleet unlock` opens a plain password ssh session (`PubkeyAuthentication=no`, `PreferredAuthentications=keyboard-interactive,password`, no key, no agent) to the Mac's LAN address and the user types at the Mac's own prompt; the audit log records the address and the outcome. Nothing is stored, nothing is in argv or the environment (`tests/master_test.sh` asserts both). |
 | T3 Code reaches a node with a key that can do nothing else | See "T3 Code remote access" below. |
 
 ## Vault encryption at rest
@@ -51,7 +52,7 @@ What is encrypted, where (`lib/vault.sh`):
 | every mirrored file (`fleet files add`), the CLIProxyAPI config + logins (`fleet proxy import`) | `files/<profile>/<path>.age` |
 | the Tailscale OAuth client, the GitHub fallback token | `tailscale.json.age`, `github.json.age` |
 | `vault/recipient.txt` | plain, 0644: the public recipient and the name of the key backend. Writers (`secrets set`, `files add`, `proxy import`, `lib/api.py` minting the OAuth client) need only this. |
-| `vault/ssh/fleet_master`, `ssh/t3_client`, `ssh/known_hosts` | plain, 0600: OpenSSH reads them itself. The master key is the credential for every node; it is protected by the 0700 vault and the disk encryption you run, not by age. |
+| `vault/ssh/fleet_master`, `ssh/t3_client`, `ssh/known_hosts`, `ssh/known_hosts_preboot` | plain, 0600: OpenSSH reads them itself. The master key is the credential for every node; it is protected by the 0700 vault and the disk encryption you run, not by age. |
 | registry (`nodes/*.json`), `audit.log`, `sync.json`, policy backups | plain: names, ids, dates, key ids; no credentials. |
 
 The private identity (one `AGE-SECRET-KEY-1…` line) lives in a **key backend**
@@ -190,6 +191,16 @@ forward to the server on the node's loopback (`ssh -n -N -L
   and clones. Treat everything it held as exposed and rotate (see below).
 - **LAN and Docker-bridge traffic is not governed by the tailnet policy.** The
   master listens on loopback only, so this matters only if you add services.
+- **A FileVault Mac at its pre-boot prompt accepts passwords over the LAN.**
+  macOS 26's pre-boot sshd (`apple_ssh_and_filevault(7)`) runs before the data
+  volume is mounted, so fleet's key-only `sshd_config.d` drop-in does not apply
+  there: while the Mac waits to be unlocked, port 22 on its LAN is a
+  password-guessing surface, and the Mac stays in that state until someone
+  types the password. Keep Remote Login limited to the LAN you control, use
+  `fleet reboot` for planned restarts (no prompt afterwards), and `fleet
+  unlock` to shorten the window after an unplanned one. Authenticated restart
+  itself keeps a volume key in memory/SMC for one boot ("FileVault protections
+  are reduced during authenticated restarts", `fdesetup(8)`).
 - **The master is not protected from local processes** running as your user:
   they can read the vault key the way `fleet` does (unlocked keychain, your
   secret service, or `vault.key`). Optional hardening: run `fleet` under a

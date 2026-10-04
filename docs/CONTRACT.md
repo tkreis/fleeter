@@ -47,13 +47,15 @@ step when the directory is missing.
    master's own login; `docker/spawn.sh` passes `--user fleet`) and prints one
    command line that contains the gzip+base64 of `lib/join.sh`. The join script
    then asks for the **invite code**: base64 of JSON
-   `{"v":1,"ts_auth_key","nonce","name","master_pubkey","master_user","tag","hostname_prefix","tools","keep_awake"}`
+   `{"v":1,"ts_auth_key","nonce","name","master_pubkey","master_user","tag","hostname_prefix","tools","keep_awake","keep_awake_lid"}`
    (`hostname_prefix` = `FLEET_HOSTNAME_PREFIX`, a code without it means `fleet-`;
    `tools` = the master's `FLEET_TOOLS`, so `join_privileged` can skip the
    browser without `chrome` and docker-ce without `devtools`/`cliproxy`; a code
    without it, or with an unparsable value, means "install everything";
    `keep_awake` = the master's `FLEET_KEEP_AWAKE` as `"0"`/`"1"`, absent means
-   `"1"`; `FLEET_KEEP_AWAKE` in the joining machine's environment wins).
+   `"1"`; `FLEET_KEEP_AWAKE` in the joining machine's environment wins;
+   `keep_awake_lid` = the master's `FLEET_KEEP_AWAKE_LID`, absent means `"0"`,
+   same environment rule).
    `FLEET_INVITE_CODE` env or `FLEET_INVITE_FILE` path skip the prompt (Docker).
 2. `lib/join.sh` (node, standalone — sources nothing) installs Tailscale if
    missing, runs `tailscale up --auth-key=file:<tmp> --advertise-tags=<tag>
@@ -63,7 +65,10 @@ step when the directory is missing.
    `keep_awake` is `0` (`join_power`: macOS `pmset -c sleep 0 disksleep 0 womp 1
    autorestart 1`, Linux with systemd `systemctl mask sleep.target
    suspend.target hibernate.target hybrid-sleep.target`; marker
-   `~/.config/fleet/power_done`, a failure only warns), appends `master_pubkey` to
+   `~/.config/fleet/power_done`, a failure only warns; with `keep_awake_lid`
+   `"1"` on a laptop — `pmset -g batt` lists an InternalBattery or `hw.model`
+   contains MacBook — also `pmset -a disablesleep 1`, `join_power_lid`, recorded
+   as `+lid` in the marker), appends `master_pubkey` to
    `~/.ssh/authorized_keys`, generates `~/.ssh/fleet_code`, `fleet_config`,
    `fleet_memory` (ed25519, no passphrase), writes the ssh aliases and
    `~/.config/fleet/enrol.json` (0600):
@@ -114,6 +119,9 @@ step when the directory is missing.
   "missing_since": "",           // set when the device is absent from the API device list
   "t3_access": true,             // absent/true: T3 client key authorised by provision, `Host fleet-<name>` rendered;
                                  // false after `fleet t3 revoke` until `fleet t3 setup NODE`
+  "lan_ips": ["192.168.1.50"],   // 0.4.0: the node's LAN IPv4 addresses from its status (provision reads status.json,
+  "ethernet": "yes",             // `fleet reboot` asks live); what `fleet unlock` dials. ethernet yes|no = one of them
+  "lan_seen": "…",               // is on a non-Wi-Fi port. Absent until a status with lan_ips was seen.
   "revoked": "…", "revoked_reason": "kick|gone|enrol",          // only on revoked entries
   "pending_cleanup": []          // "ts:device:<ts-id>" | "gh:<code|config|memory>:<id>:<owner/repo>" | "stop:<ts-id>" | "t3:<ts-id>"
 }
@@ -170,6 +178,8 @@ vault/
   ssh/fleet_master, ssh/fleet_master.pub      plain (ssh reads them)
   ssh/t3_client, ssh/t3_client.pub        the key T3 Code uses towards nodes (lib/t3.sh); created by init master / t3 setup
   ssh/known_hosts          pinned node host keys, one plain `<dnsname> ssh-ed25519 <key>` line per node (host_key_pin)
+  ssh/known_hosts_preboot  `fleet unlock` only: host keys of FileVault Macs' pre-boot sshd (accept-new on first contact;
+                           a different key from the booted system's is expected, so never merged into known_hosts)
   digest.key               legacy: only while plaintext items exist; `fleet vault encrypt` removes it
   tailscale.json.age       {"oauth_client_id","oauth_client_secret","tailnet":"-"}, minted by init master
                            (keyType client, scopes auth_keys devices:core policy_file:read, tag-scoped)
@@ -303,7 +313,8 @@ same, then `fleet leave`.
 ~/.config/fleet/applied          last applied digest; applied_at
 ~/.config/fleet/applied_commit   "<code HEAD>+<config HEAD>" last applied successfully (pull compares against it)
 ~/.config/fleet/privileged_done  join finished the privileged OS steps; plug-ins skip them
-~/.config/fleet/power_done       join switched system sleep off: `<UTC> macos:pmset` | `linux:mask` (FLEET_KEEP_AWAKE; join skips when present)
+~/.config/fleet/power_done       join switched system sleep off: `<UTC> macos:pmset` | `macos:pmset+lid` | `linux:mask` (FLEET_KEEP_AWAKE;
+                                 join skips when present, except that a MacBook without `+lid` gets the lid step when FLEET_KEEP_AWAKE_LID=1)
 ~/Library/LaunchAgents/dev.fleet.awake.plist   macOS nodes, FLEET_KEEP_AWAKE=1: `/usr/bin/caffeinate -i -m -s`, KeepAlive + RunAtLoad,
                                  written by apply (node_awake_apply; in the manifest), removed by leave and by apply with FLEET_KEEP_AWAKE=0;
                                  never on the master or in a container
@@ -467,6 +478,11 @@ a revoked tombstone), MEMORY (on the master row with the age of its last sync,
   "timers": {"pull": true, "memory": true, "update": true},   // no "memory" key while the memory job is off
   "awake": "on",                  // on | off | n/a — macOS: dev.fleet.awake loaded or `pmset -g custom` AC `sleep 0`;
                                   // Linux: sleep.target masked; n/a on the master and in containers
+  "awake_lid": "off",             // 0.4.0: on | off | n/a — macOS nodes: `pmset -g` lists `SleepDisabled 1` (FLEET_KEEP_AWAKE_LID)
+  "lid_set_at_join": false,       // 0.4.0: power_done records `+lid` (the table then shows "set at join" and the undo)
+  "lan_ips": ["192.168.1.50"],    // 0.4.0: LAN IPv4 addresses of the physical ports (macOS: networksetup -listallhardwareports +
+                                  // ipconfig getifaddr; Linux: /sys/class/net + ip/ifconfig); no loopback, link-local or 100.64/10;
+  "ethernet": "yes",              // [] in containers. ethernet yes|no: one of them is on a port that is not Wi-Fi
   "token_age_days": {"CLAUDE_CODE_OAUTH_TOKEN": 12},
   "updated": "…"
 }
@@ -524,7 +540,39 @@ not the master and not a container): on macOS apply converges the LaunchAgent
 same bootstrap and `FLEET_NO_SCHEDULER` rules as the job agents) and removes
 it when the knob is 0; `fleet leave` removes it. On Linux apply changes nothing
 (the sleep targets need root, which only join has) and logs a pointer when
-they are not masked. The master never gets any of it.
+they are not masked. The master never gets any of it. The lid-closed setting
+(`FLEET_KEEP_AWAKE_LID`, `pmset -a disablesleep 1`) is root-only as well: join
+sets it on laptops, apply only compares the knob with `node_awake_lid_state`
+and logs the undo (`sudo pmset -a disablesleep 0`) or the manual command.
+
+## `fleet reboot` / `fleet unlock` (master)
+
+`reboot NODE [--yes]`: refuses revoked, container and offline nodes; records
+`lan_ips`/`ethernet` from a live `fleet status --json` (`registry_record_lan`);
+on macOS asks `fdesetup status` and, when "FileVault is On", `fdesetup
+supportsauthrestart`; then over `ssh -t` with the master key and the pinned
+host key (`ssh_tty_to`, no BatchMode) runs exactly one of `sudo fdesetup
+authrestart -delayminutes 0` (both true), `sudo shutdown -r now`, `sudo
+systemctl reboot` (Linux). Exit 255 from ssh is the connection dropping; any
+other non-zero exit is the command failing (wrong password) and ends the
+command. Then `FLEET_REBOOT_GRACE_SECS` (20) of sleep and `node_wait_online`
+(tailnet peer online **and** `ssh NODE true`, every `FLEET_WAIT_POLL_SECS`,
+up to `FLEET_REBOOT_WAIT_SECS`). Audit: `reboot <name> authrestart|shutdown|systemctl`,
+then `online <N>s` | `timeout <N>s` | `fail <how> rc=<n>`.
+
+`unlock NODE [--host IP]`: non-macOS → explanation, exit 0; node online and
+answering → "nothing to unlock", exit 0; else the candidate addresses are
+`--host` or the registry's `lan_ips` (none → error naming `--host`, provision
+and reboot); the first one where `nc -z -w 3 IP 22` succeeds is dialled with
+`ssh -t -o UserKnownHostsFile=vault/ssh/known_hosts_preboot -o
+StrictHostKeyChecking=accept-new -o PreferredAuthentications=keyboard-interactive,password
+-o PubkeyAuthentication=no -o IdentitiesOnly=yes USER@IP` (no `-i`, no
+BatchMode: the user types the password at the Mac's prompt); none reachable →
+error (same LAN, Ethernet, `--host`), nothing dialled. Success = the node is
+back on the tailnet and answering within `FLEET_UNLOCK_WAIT_SECS`. Audit:
+`unlock <name> start host=<ip>`, then `ok host=<ip> <N>s` | `timeout host=<ip>
+ssh_rc=<n>`. No password is ever an argument, an environment variable or a
+file on either side.
 
 ## Shared memory vault (`fleet memory sync`, nodes and master)
 

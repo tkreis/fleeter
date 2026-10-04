@@ -273,11 +273,14 @@ Both record `~/.config/fleet/power_done`; `fleet status` shows `awake on`
 `fleet list --json` carries the same value per node.
 
 Worth knowing on a Mac: a laptop with the lid closed and no external display
-still sleeps (macOS clamshell rule — keep the lid open or plug a display in).
-The agent needs a logged-in user; after a reboot of a FileVault Mac someone has
-to log in once before anything runs (`autorestart` brings the Mac back up, and
-whether it logs in automatically is your choice in System Settings → Users &
-Groups; fleet never changes login settings).
+still sleeps (macOS clamshell rule — keep the lid open, plug a display in, or
+opt in below under "Keep a MacBook awake with the lid closed"). The agent
+needs a logged-in user; after a reboot of a FileVault Mac someone has to type
+the account password once before anything runs (`autorestart` brings the Mac
+back up to that prompt; `fleet reboot` avoids the prompt for planned restarts
+and `fleet unlock` answers it from the master, see the next three sections).
+Whether the Mac then logs in automatically is your choice in System Settings →
+Users & Groups; fleet never changes login settings.
 
 Switching off: set `FLEET_KEEP_AWAKE=0` in `fleet.conf` (the config repo for
 the whole fleet, or `~/.config/fleet/fleet.conf` on one node) and let the next
@@ -289,6 +292,98 @@ unmask sleep.target suspend.target hibernate.target hybrid-sleep.target`; then
 join step honours the fleet's setting through the invite code, and
 `FLEET_KEEP_AWAKE=0` in the environment of the one-liner skips it for just that
 machine.
+
+### Keep a MacBook awake with the lid closed
+
+Off by default. With `FLEET_KEEP_AWAKE_LID=1` in `fleet.conf` (it travels in
+the invite code; `FLEET_KEEP_AWAKE_LID=1` in the one-liner's environment opts
+in one machine) `fleet join` on a **laptop** (a battery in `pmset -g batt`, or
+a MacBook model) runs `sudo pmset -a disablesleep 1` once, after the `pmset -c`
+line above, and records `+lid` in `~/.config/fleet/power_done`. Desktops are
+skipped; Linux never gets it.
+
+Before you switch it on: a closed MacBook keeps running at full tilt, so do not
+put it in a bag or a drawer (heat), keep it on the charger (`disablesleep`
+applies to battery power too), and know that some Apple silicon models ignore
+the setting — test once by closing the lid and running `fleet ssh NODE true`
+from the master a minute later.
+
+`fleet status` on the node shows `awake on  (lid: on, set at join; undo: sudo
+pmset -a disablesleep 0)`; `awake_lid` is in `status --json`. The setting is
+root-only, so `fleet apply` never changes it: with `FLEET_KEEP_AWAKE_LID=0`
+again, apply only reminds you of the undo command, and with `1` on a Mac that
+joined before the opt-in, rerun the join one-liner (it adds just the lid step)
+or run the `pmset -a disablesleep 1` line yourself.
+
+### Restart a node
+
+```sh
+fleet reboot studio                    # type the node name to confirm (or --yes)
+```
+
+A planned restart that comes back online by itself. On a Mac with FileVault
+on, `fleet reboot` asks the node `fdesetup status` and `fdesetup
+supportsauthrestart`; when both say yes it runs `sudo fdesetup authrestart
+-delayminutes 0` over an interactive fleet session: you type your sudo password
+and then the FileVault password of your account at `fdesetup`'s own prompt on
+the node — fleet passes nothing and stores nothing. macOS keeps the volume key
+for exactly that one boot ("FileVault protections are reduced during
+authenticated restarts", `man fdesetup`) and the Mac comes back up without the
+pre-boot prompt, straight to Tailscale and sshd. Without FileVault, or on a Mac
+that does not support authenticated restart, it is `sudo shutdown -r now`
+(and, with FileVault on, the Mac will wait at the prompt: `fleet unlock`
+next); Linux nodes get `sudo systemctl reboot`. Containers are refused.
+
+Then it waits (`FLEET_REBOOT_WAIT_SECS`, 600 s) until the node is online on the
+tailnet and answers `fleet ssh NODE true`, prints `back online after Ns`, and
+on a timeout names the next step. Before restarting it refreshes the node's LAN
+addresses in the registry (`fleet status --json` → `lan_ips`), so a later
+`fleet unlock` knows where to dial. Everything is in the audit log (`reboot
+NODE authrestart|shutdown|systemctl`, then `online Ns` or `timeout`).
+
+### Unlock a node after a power cut
+
+```sh
+fleet unlock studio                    # or: fleet unlock studio --host 192.168.1.50
+```
+
+A FileVault Mac that lost power, or restarted without `fleet reboot`, stops at
+its pre-boot prompt: the data volume is locked, Tailscale and the fleet key do
+not exist yet. Since macOS 26 the pre-boot environment runs a small password-only
+sshd when Remote Login is enabled (`man apple_ssh_and_filevault` on a Mac
+running 26): connect, read "This system is locked. To unlock it, use a local
+account name and password.", type the password, the Mac closes the connection,
+mounts the volume and boots the rest; ssh and Tailscale are back a few seconds
+later. `fleet unlock` does exactly that from the master: it checks the node is
+really away, picks the first recorded LAN address that answers on port 22
+(`nc -z -w 3 IP 22`; `--host` overrides), opens
+`ssh -o PubkeyAuthentication=no -o PreferredAuthentications=keyboard-interactive,password -t USER@IP`
+with its own `vault/ssh/known_hosts_preboot`, gets out of the way while you
+type the password at the Mac's prompt, then waits (`FLEET_UNLOCK_WAIT_SECS`,
+300 s) for the node to reappear on the tailnet.
+
+Requirements, all of them:
+
+- macOS 26 or newer on Apple silicon, and Remote Login was on before the
+  restart (the join one-liner enables it).
+- The master is on the **same LAN** as the Mac, or on a VPN into it. Tailscale
+  is not running on the node before the unlock, so the tailnet does not help;
+  a master elsewhere gets "none of … answers on port 22" and stops.
+- The Mac is on **Ethernet**. Wi-Fi is often not up in pre-boot (the network
+  password lives on the locked volume); `fleet unlock` warns when the node was
+  last seen on Wi-Fi only.
+- The registry knows the Mac's LAN address: `fleet provision` and `fleet
+  reboot` record `lan_ips` from the node's status; otherwise pass `--host`.
+- A local account with a FileVault-enabled login and its password: you type
+  it, fleet never sees it (no argv, no stdin, no file).
+
+Security note: the pre-boot sshd accepts passwords, so that port on that LAN
+is a password-guessing surface fleet's key-only sshd drop-in cannot cover (the
+drop-in lives on the locked volume and only applies after the unlock). Its
+host key can differ from the booted system's, which is why it is pinned
+separately in `vault/ssh/known_hosts_preboot` (trust on first use; delete the
+line to re-pin). Linux nodes have no pre-boot lock: `fleet unlock` says so and
+exits 0.
 
 ### Spin up throwaway Docker nodes
 
@@ -734,6 +829,8 @@ and kick).
 | `fleet skill remove NAME` | `--yes` | Removes `skills/NAME` from the config repo (commit `remove skill NAME`, push), deletes this machine's copies (else the next sync would publish it again), then `reconcile`; nodes drop it on their next apply through the manifest cleanup. Asks first. |
 | `fleet skill install` | | Copy fleeter's `fleet` agent skill (`skills/fleet`) into `~/.claude/skills`, `~/.agents/skills` and `~/.cursor/skills`, each only when that harness exists here or its tool is in `FLEET_TOOLS`. Idempotent; a foreign `fleet` skill dir is kept once as `.pre-fleet`. `fleet init master` runs it; nodes get the skill from `fleet apply`. |
 | `fleet kick NODE` | `--yes` | Revoke: see "Kick a node". |
+| `fleet reboot NODE` | `--yes` | Planned restart (typed node name confirms): refreshes the node's `lan_ips` in the registry, then on macOS with FileVault on and `fdesetup supportsauthrestart` true runs `sudo fdesetup authrestart -delayminutes 0` on the node's TTY (you type the sudo and FileVault passwords there; nothing through fleet), else `sudo shutdown -r now`; Linux `sudo systemctl reboot`; containers refused. Waits `FLEET_REBOOT_WAIT_SECS` for tailnet online + `ssh NODE true`, prints `back online after Ns` or the next step (`fleet unlock NODE` for a FileVault Mac). Audited. See "Restart a node". |
+| `fleet unlock NODE` | `--host IP` | A FileVault Mac at its pre-boot prompt (macOS 26+, Remote Login on, same LAN, Ethernet): probes the recorded `lan_ips` (or `--host`) with `nc -z -w 3 IP 22`, opens a password-only ssh session (`PubkeyAuthentication=no`, `PreferredAuthentications=keyboard-interactive,password`, `vault/ssh/known_hosts_preboot`, `accept-new`) for you to type the account password at the Mac's prompt, then waits `FLEET_UNLOCK_WAIT_SECS` for the node on the tailnet. Refuses with an explanation when no address answers; Linux nodes: nothing to unlock, exit 0. See "Unlock a node after a power cut". |
 | `fleet t3 setup [NODE]` | | Creates `vault/ssh/t3_client` if missing, pins the node's host key, puts the restricted key line into the node's `authorized_keys`, regenerates `~/.ssh/config.d/fleet` and the `Include` at the top of `~/.ssh/config`, prints what to click in T3 Code. Without NODE: every registered node. Re-enables a node after `t3 revoke`. |
 | `fleet t3 status [NODE]` | | Per node: pinned host key, the alias as `ssh -G` resolves it, a BatchMode connection with the client key running T3's discovery, and the node's T3 sessions and pairing tokens (metadata only). |
 | `fleet t3 revoke NODE` | | On the node: revokes every pairing-token session and live pairing token, stops the servers T3 started, removes the `fleet-t3-client` line; records `t3_access: false`; drops the `Host fleet-<name>` block. Unreachable node → `t3:<id>` in `pending_cleanup`. |
@@ -793,6 +890,9 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_CAPTURE_AGENT_MARKERS` | `""` | `;`-separated text markers; an agent file containing one is not captured. |
 | `FLEET_CAPTURE_RULE_DROP` | `""` | Extra words that drop a Codex `prefix_rule` on capture. |
 | `FLEET_KEEP_AWAKE` | `1` | Nodes never system-sleep: macOS gets the `dev.fleet.awake` LaunchAgent (`caffeinate -i -m -s`) from apply and `pmset -c sleep 0 disksleep 0 womp 1 autorestart 1` from join; Linux join masks the systemd sleep targets. Never the master, never containers. `0` removes the agent on the next apply (root settings stay; see "Keep nodes awake"). Travels in the invite code. |
+| `FLEET_KEEP_AWAKE_LID` | `0` | `1`: `fleet join` on a MacBook (battery or MacBook model) also runs `sudo pmset -a disablesleep 1`, so a closed lid no longer sleeps it (`+lid` in `power_done`; `fleet status` shows `awake_lid` and the undo). Heat, battery and some Apple silicon models ignoring it: see "Keep a MacBook awake with the lid closed". Root-only, so apply only reports. Travels in the invite code. |
+| `FLEET_REBOOT_WAIT_SECS` | `600` | Seconds `fleet reboot` waits for the node to be back on the tailnet and answering ssh before it gives up and names the next step. |
+| `FLEET_UNLOCK_WAIT_SECS` | `300` | Seconds `fleet unlock` waits for the node on the tailnet after you typed the pre-boot password. |
 | `FLEET_PULL_EVERY` / `FLEET_MEMORY_EVERY` / `FLEET_UPDATE_EVERY` / `FLEET_RECONCILE_EVERY` | `15` / `5` / `1440` / `2` | Timer intervals in minutes (nodes: pull, memory, update; master: memory, reconcile). |
 | `FLEET_SYNC_EVERY` | `30` | Minutes between `fleet sync` runs on the master (fast-forward checkouts, reconcile, tool push). `fleet schedule install` applies a change. |
 | `FLEET_PUSH_TOOLS_EVERY` | `1440` | Minutes between `fleet update` pushes to the online nodes from `fleet sync`; `0` = never push tool updates from the master. |
@@ -813,6 +913,7 @@ Environment knobs (not config keys; all optional):
 | `FLEET_HARNESS_NO_CLI=1` | Skip `claude plugin` calls during apply. |
 | `FLEET_APPLY_LOCK_WAIT`, `FLEET_STATUS_SECS`, `FLEET_PUBLISH_DIFF_LINES` | Seconds to wait for the apply lock (600); cap per tool status check (20); diff lines shown by publish (200). |
 | `FLEET_LIST_SECS`, `FLEET_SYNC_UPDATE_SECS` | `fleet list`: seconds to wait for each node's status (10); `fleet sync`: seconds for each node's `fleet update` (900). |
+| `FLEET_REBOOT_GRACE_SECS`, `FLEET_WAIT_POLL_SECS` | `fleet reboot`: seconds to let the node go down before polling (20); `reboot`/`unlock`: seconds between polls (5). |
 | `FLEET_INVITE_CODE`, `FLEET_INVITE_FILE` | `fleet join` without the prompt (containers); the file form never shows in `docker inspect`. |
 | `FLEET_LOCAL_CONF`, `FLEET_TOOLS`, `FLEET_FAKE_TAILSCALE` | Container entrypoint: content for the node's local `fleet.conf`; a tool-list shortcut; test mode without tailscaled. |
 | `FLEET_NODE_IMAGE` | Image used by `docker/spawn.sh` (default `fleet-node:local`). |
@@ -833,10 +934,11 @@ files/<profile>/<path under $HOME>.age  mirrored files, encrypted; files/full/.c
 ssh/fleet_master(.pub)                  the key nodes authorize for provisioning (plain: ssh needs it)
 ssh/t3_client(.pub)                     the key T3 Code uses towards nodes (only with FLEET_T3_REMOTE=1 or after fleet t3 setup)
 ssh/known_hosts                         pinned node host keys (read over the fleet session); every ssh is strict once pinned
+ssh/known_hosts_preboot                 host keys of FileVault Macs' pre-boot sshd (fleet unlock; TOFU, may differ from the booted key)
 tailscale.json.age                      OAuth client (auth_keys, devices:core, policy_file:read; tag-scoped), encrypted
 github.json.age                         fallback token (only without gh), encrypted
 digest.key                              legacy (vault before `fleet vault encrypt`): HMAC key for plaintext fingerprints; removed by the migration
-nodes/<ts-id>.json                      registry; nodes/pending/, nodes/claimed/, rollback-* tombstones
+nodes/<ts-id>.json                      registry (incl. lan_ips + ethernet for fleet unlock); nodes/pending/, nodes/claimed/, rollback-* tombstones
 policy-backups/<timestamp>.hujson       the live policy as it was before each `policy apply`
 sync.json                               last `fleet update` push to the nodes (fleet sync)
 locks/<ts-id>/{pid,token}, locks/.registry, locks/.sync (sync and reconcile never overlap)
@@ -867,7 +969,7 @@ Node:
 ~/.config/fleet/applied, applied_at, applied_commit (<code>+<config>), status.json, memory.state (ok|conflict|missing|off)
 ~/.config/fleet/manifest, harness.manifest, harness.claude-mcp   what fleet owns, for cleanup
 ~/.config/fleet/privileged_done  join finished the root steps; locks/apply; logs/<job>.log; daemon.pid
-~/.config/fleet/power_done       join switched system sleep off (`<UTC> macos:pmset` or `linux:mask`; FLEET_KEEP_AWAKE)
+~/.config/fleet/power_done       join switched system sleep off (`<UTC> macos:pmset`, `macos:pmset+lid` with FLEET_KEEP_AWAKE_LID, or `linux:mask`)
 ~/.ssh/fleet_code, fleet_config, fleet_memory (+ .pub); ~/.ssh/config block `# >>> fleet >>>` (github-fleet-* aliases)
 ~/.ssh/authorized_keys           the master key (join) and, with T3 access, the restricted `fleet-t3-client` line
 ~/.t3/runtime/versions/<v>/t3    T3's own CLI archive, installed by T3's SSH flow on first connect; ~/.t3/ssh-launch/<key>/
@@ -1043,7 +1145,12 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
   skipped or failed (`~/.config/fleet/power_done` missing: rerun the
   one-liner, or run the `pmset -c` / `systemctl mask` line from "Keep nodes
   awake" by hand), or on a Mac nobody is logged in (the agent runs per user)
-  or the lid is closed without an external display.
+  or the lid is closed without an external display ("Keep a MacBook awake with
+  the lid closed").
+- **A FileVault Mac is offline after a power cut or a restart** — it waits at
+  the pre-boot password prompt. From a master on the same LAN: `fleet unlock
+  NODE` ("Unlock a node after a power cut"); next time restart it with `fleet
+  reboot NODE`, which skips the prompt.
 
 ## What fleeter does not do
 

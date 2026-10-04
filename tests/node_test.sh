@@ -1188,7 +1188,7 @@ mk_memories() {
 
 case_memory_capture() {
   begin "memory sync: captures claude/codex/grok memories (aliases, excludes, size, secret scan), mirrors deletions, quiet when unchanged"
-  local h m slug=-home-dev-repositories-app rc tip out
+  local h m slug=-home-dev-repositories-app rc tip out p1 p2 r1 r2
   h=$(mk_home kappa ""); m="$h/fleet-memory"
   mk_memories "$h" "$slug"
   fleet_as "$h" apply >/dev/null 2>&1
@@ -1219,6 +1219,14 @@ case_memory_capture() {
   printf '# by hand\n' >"$m/nodes/kappa/by-hand.md"
   fleet_as "$h" memory sync >/dev/null 2>&1
   assert "hand-written note committed alongside (+1 ~0 -0)" bash -c "git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/by-hand.md && git --git-dir='$WORK/memory.git' log -1 --format=%s main | grep -q '(+1 ~0 -0)'"
+  # two syncs at once (timer + manual): one runs, the other returns quietly, no capture error
+  printf 'parallel\n' >>"$h/.claude/projects/$slug/memory/MEMORY.md"
+  fleet_as "$h" memory sync >"$WORK/par1.log" 2>&1 & p1=$!
+  fleet_as "$h" memory sync >"$WORK/par2.log" 2>&1 & p2=$!
+  wait "$p1"; r1=$?; wait "$p2"; r2=$?
+  assert "concurrent memory syncs: both exit 0, no capture error" bash -c "[ '$r1' -eq 0 ] && [ '$r2' -eq 0 ] && ! grep -q 'capture failed' '$WORK/par1.log' '$WORK/par2.log'"
+  assert "...the change was uploaded exactly once" bash -c "git --git-dir='$WORK/memory.git' show main:nodes/kappa/claude/$slug/MEMORY.md | grep -qx parallel && [ \"\$(git --git-dir='$WORK/memory.git' log --format=%s main | grep -c '(+0 ~1 -0)')\" -ge 1 ]"
+  assert "memory lock released" [ ! -d "$h/.config/fleet/locks/memory" ]
   # FLEET_MEMORY_CAPTURE="" switches capture off
   h=$(mk_home lambda ""); printf 'FLEET_MEMORY_CAPTURE=""\n' >>"$h/.config/fleet/fleet.conf"
   mk_memories "$h" "$slug"

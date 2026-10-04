@@ -470,7 +470,21 @@ node_memory_commit_counts() {
 # pull --rebase → push, 3 tries. Runs on nodes and on the master (which clones
 # the vault itself when it is missing). --reset clears a recorded conflict
 # after a human repaired the vault.
+# One memory sync at a time: the timer and a manual run would otherwise write
+# the same capture folders concurrently. A second caller returns quietly.
 cmd_memory_sync() {
+  local lock="$FLEET_HOME/locks/memory" rc=0
+  mkdir -p "$FLEET_HOME/locks"
+  if ! lock_acquire "$lock" 0; then
+    [ -z "${FLEET_VERBOSE:-}" ] || log "memory: another sync is running; skipping"
+    return 0
+  fi
+  node_memory_sync_run "$@" || rc=$?
+  lock_release "$lock"
+  return "$rc"
+}
+
+node_memory_sync_run() {
   local reset=0 name dir sf branch attempt delay others ahead counts
   [ "${1:-}" = --reset ] && reset=1
   name=$(node_name); dir=$FLEET_MEMORY_DIR; sf="$FLEET_HOME/memory.state"

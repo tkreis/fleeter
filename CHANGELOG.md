@@ -7,6 +7,8 @@ memories, the master takes part, and one file per project merges what every
 machine learned.
 
 ### Added
+- `fleet memory sync` takes a lock: the 5-minute timer and a manual run no longer capture into the same folders at once (one returns quietly).
+- The memory vault's index workflow no longer fails before the first project view exists (`projects/` is added only when present).
 
 - `fleet memory sync` mirrors this machine's native agent memories into the
   vault before committing (`lib/memory_capture.py`): Claude Code

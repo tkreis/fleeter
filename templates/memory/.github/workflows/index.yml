@@ -32,7 +32,9 @@ jobs:
 
       - name: Commit if changed
         run: |
-          git add -A -- INDEX.md projects
+          git add -A -- INDEX.md
+          # projects/ only exists once some node has captured a Claude project memory
+          if [ -d projects ] || git ls-files --error-unmatch projects >/dev/null 2>&1; then git add -A -- projects; fi
           if git diff --cached --quiet; then
             echo "INDEX.md and projects/ unchanged"
             exit 0

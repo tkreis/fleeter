@@ -442,11 +442,15 @@ except Exception: pass')
 # ssh_to USER HOST CMD — raw ssh with the master key. stdin passes through.
 # Host keys live in vault/ssh/known_hosts (lib/t3.sh): strict once the node is
 # pinned, accept-new only for the very first contact with a node.
+# Keepalives: a node that goes to sleep or offline mid-provision would otherwise
+# leave the session (and the node lock, and every later sync) hanging forever;
+# with these the connection drops after ~FLEET_SSH_ALIVE_SECS*4 seconds of silence.
 ssh_to() {
   local user=$1 host=$2; shift 2
   ssh -i "$(master_key)" -o BatchMode=yes -o "StrictHostKeyChecking=$(ssh_strict_mode "$host")" \
       -o "UserKnownHostsFile=$(known_hosts_file)" -o HashKnownHosts=no -o HostKeyAlgorithms=ssh-ed25519 \
-      -o ConnectTimeout=10 -o LogLevel=ERROR "$user@$host" "$@"
+      -o ConnectTimeout=10 -o "ServerAliveInterval=${FLEET_SSH_ALIVE_SECS:-15}" -o ServerAliveCountMax=4 \
+      -o LogLevel=ERROR "$user@$host" "$@"
 }
 
 # node_ssh ID CMD — ssh to a registered node.
@@ -2241,7 +2245,7 @@ ssh_tty_to() {
   local user=$1 host=$2; shift 2
   ssh -t -i "$(master_key)" -o "StrictHostKeyChecking=$(ssh_strict_mode "$host")" \
       -o "UserKnownHostsFile=$(known_hosts_file)" -o HashKnownHosts=no -o HostKeyAlgorithms=ssh-ed25519 \
-      -o ConnectTimeout=10 -o LogLevel=ERROR "$user@$host" "$@"
+      -o ConnectTimeout=10 -o "ServerAliveInterval=${FLEET_SSH_ALIVE_SECS:-15}" -o ServerAliveCountMax=4 -o LogLevel=ERROR "$user@$host" "$@"
 }
 
 # known_hosts_preboot_file — the pre-boot sshd of a FileVault Mac may present a

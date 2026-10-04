@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-10-05
+
+### Fixed
+
+- A node that went to sleep or offline in the middle of a provision left the master's ssh session hanging, holding the node lock and the sync lock, so every later sync and reconcile skipped. Master-side ssh now sends keepalives (`ServerAliveInterval` `FLEET_SSH_ALIVE_SECS`, default 15, ×4) and drops a dead connection after about a minute.
+
 ## 0.4.0 — 2026-10-04
 
 Nodes come back on their own after a restart, a stuck FileVault Mac can be

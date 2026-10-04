@@ -345,7 +345,7 @@ cmd_t3_status() {
     else
       printf '  ssh config: no block for %s -> fleet t3 setup %s\n' "$alias" "$name"; continue
     fi
-    rc=0; probe=$(printf '%s\n' "$T3_NODE_PROBE_SH" | ssh -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR "$alias" sh -l -s 2>&1) || rc=$?
+    rc=0; probe=$(printf '%s\n' "$T3_NODE_PROBE_SH" | ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR "$alias" sh -l -s 2>&1) || rc=$?
     if [ "$rc" = 0 ]; then
       printf '  client key: ok (BatchMode ssh %s, no pty, as T3 does)\n' "$alias"
       printf '%s\n' "$probe" | sed 's/^/    /'

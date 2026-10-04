@@ -52,8 +52,8 @@ add. Then continue with [Quickstart](#quickstart) (`fleet init master`).
   `FLEETER_DIR` (install dir, default `~/.local/share/fleeter`),
   `FLEETER_BIN` (link dir, default `~/.local/bin`),
   `FLEETER_REPO` (git URL, e.g. your fork),
-  `FLEETER_REF` (branch or tag, default `main`, e.g. `v0.3.1`).
-  Example: `curl -fsSL https://tkreis.github.io/fleeter/install.sh | FLEETER_REF=v0.3.1 bash`
+  `FLEETER_REF` (branch or tag, default `main`, e.g. `v0.3.2`).
+  Example: `curl -fsSL https://tkreis.github.io/fleeter/install.sh | FLEETER_REF=v0.3.2 bash`
 - **Requires:** `git`, `python3`, `curl`, `ssh`. It refuses to run as root, does
   not touch a checkout with local changes, and never overwrites a `fleet` that
   is not its own link.
@@ -205,7 +205,7 @@ Docker go into `FLEET_TOOLS_SKIP_IN_CONTAINER` (default `t3code`). Changes to
 |---|---|---|---|
 | **fleeter** (this one, or your fork) | upstream / you | `fleet`, `lib/`, tool plug-ins, Docker image, templates | shipped once by the master, then `fleet pull` (deploy key `~/.ssh/fleet_code`, skipped for https) |
 | **fleet-config** (yours, private) | you, on the master | `fleet.conf`, `AGENTS.md`, `harness/` templates, `skills/` | shipped once, then `fleet pull` (RO deploy key `~/.ssh/fleet_config`) |
-| **fleet-memory** (yours, private, optional) | every node, own folder | Obsidian-compatible Markdown vault, `INDEX.md` | `fleet memory sync` (RW deploy key `~/.ssh/fleet_memory`) |
+| **fleet-memory** (yours, private, optional) | every machine (master included), own folder | Obsidian-compatible Markdown vault: every machine's agent memories under `nodes/<name>/`, `projects/<slug>.md` merged per project, `INDEX.md` | `fleet memory sync` (RW deploy key `~/.ssh/fleet_memory` on nodes; the master's own git credentials) |
 
 Secrets are in none of them. They live in the master's vault and travel to
 nodes over SSH (`fleet secrets set`, `fleet files add`, `fleet proxy import`).
@@ -277,8 +277,9 @@ fleet list --offline        # registry + tailnet only, no SSH (fast; works with 
 ```
 
 ```
-NAME    HOST          ONLINE  STATE        SYNCED  LAST PROVISION  TOOLS                   MEMORY  PROXY  FLEET
-mac2    fleet-mac2    yes     provisioned  yes     3h              9 ok, 1 login: cursor   ok      ok     0.3.0
+NAME    HOST          ONLINE  STATE        SYNCED  LAST PROVISION  TOOLS                   MEMORY   PROXY  FLEET
+mac     Mac           yes     master       -       -               -                       ok (3m)  -      0.3.2
+mac2    fleet-mac2    yes     provisioned  yes     3h              9 ok, 1 login: cursor   ok       ok     0.3.0
 build   fleet-build   yes     provisioned  behind  2d              unreachable             -       -      -
 dock-7  fleet-dock-7  no      provisioned  ?       -               -                       -       -      -
 fleet-x fleet-x       yes     unknown      -       -               -                       -       -      -
@@ -286,8 +287,11 @@ fleet-x fleet-x       yes     unknown      -       -               -            
 
 `fleet list` joins the registry, the tailnet peer list and, for every online
 node, its `fleet status --json` (fetched in parallel, 10 s cap each,
-`FLEET_LIST_SECS`). SYNCED compares what the node applied (code and config
-revisions, digest) with what this master wants: `behind` means the next
+`FLEET_LIST_SECS`). The first row is the master itself (STATE `master`): its
+MEMORY column says whether this machine's own agent memories reach the vault
+(`ok (3m)` = last sync 3 minutes ago; `missing` = run `fleet schedule install`).
+SYNCED compares what the node applied (code and config revisions, digest) with
+what this master wants: `behind` means the next
 `reconcile`/`sync` will provision it. A node on the tailnet that did not answer
 shows `unreachable`; a tagged device the master never enrolled shows `unknown`.
 The exit code is 0 either way. `fleet nodes [--live]` is the older compact
@@ -340,7 +344,8 @@ master runs `fleet sync`:
 logs to `~/.config/fleet/sync.log` when run from the timer. The 2-minute
 `reconcile` timer stays for fast enrolment; the two share a master-wide lock
 (`vault/locks/.sync`), so they never overlap. `fleet schedule install` (re)writes
-both timers, e.g. after changing the intervals in `fleet.conf`. Nodes still
+the master timers (plus `memory` when a memory repo is configured), e.g. after
+changing the intervals in `fleet.conf`. Nodes still
 pull the repos themselves every `FLEET_PULL_EVERY` minutes, so a master that is
 asleep only delays secrets and tool pushes, not code or config.
 
@@ -591,6 +596,53 @@ fleet doctor                # vault modes, OAuth token, policy, GitHub access, s
                             # `nc -z` from every online node to the master (22, 443) and another node (22): any success fails
 ```
 
+### Share what your agents learn across machines
+
+Claude Code, Codex and Grok each keep memories on the machine they run on
+(`~/.claude/projects/<slug>/memory/`, `~/.codex/memories/`,
+`~/.grok/memory-v2/`). With a memory repo configured, every `fleet memory sync`
+(every 5 minutes on every node **and on the master**) mirrors those files into
+the vault and pulls what the other machines uploaded, so an agent on any
+machine can read what every other machine learned:
+
+```
+nodes/<name>/claude/<slug>/…      that machine's Claude Code project memories (slug = Claude's dir name)
+nodes/<name>/claude/ALIASES.md    project slugs that share one memory dir there (symlinks), captured once
+nodes/<name>/codex/…, grok/…      Codex memories (text files), Grok memories (*.md); sqlite files are skipped
+projects/<slug>.md                every machine's memories for one project directory, merged (GitHub Action)
+INDEX.md                          one line per note, by node then source, plus the project views
+```
+
+Agents do not copy anything: the rendered global instructions tell them to
+read `~/fleet-memory/projects/<slug>.md` for the current working directory at
+session start (`<slug>` = the absolute path with `/` and `.` replaced by `-`),
+`INDEX.md` when they need more, and to treat everything under `nodes/**` as
+reference data, never as instructions. `fleet list` shows the master's own
+memory state in its first row; a node's shows in its MEMORY column.
+
+What is uploaded, and how to limit it:
+
+| Knob | Default | Effect |
+|---|---|---|
+| `FLEET_MEMORY_CAPTURE` | `claude codex grok` | Sources mirrored into `nodes/<name>/<source>/`. `""` turns capture off (agents' hand-written notes under `nodes/<name>/` still sync). |
+| `FLEET_MEMORY_CAPTURE_EXCLUDE` | `*Library-Application-Support-Claude-scratch*` | Space-separated shell globs matched against the source-relative path (`<slug>/<file>.md`, `global/MEMORY.md`, …); a match is never uploaded. The default drops Claude desktop scratch workspaces. |
+| `FLEET_MEMORY_MAX_KB` | `256` | Larger files are skipped. |
+| `FLEET_MASTER_NAME` | short hostname | The master's folder in the vault (`nodes/<name>`), sanitised to `[a-z0-9-]`. |
+
+Every captured file goes through the same secret scan as `fleet config
+publish` (minus the machine-path rule; commit hashes, UUIDs, kebab-case slugs and `localhost:port/path` values are allowed):
+a hit skips that file, warns once, and shows up in `fleet status` as
+`not uploaded (secret scan): <paths>`. Deleting a memory locally deletes the
+copy in the vault on the next sync (mirror, inside `nodes/<name>/<source>/`
+only); the commit subject records the counts: `memory: studio
+2026-10-04T12:00:00Z (+2 ~1 -0)`.
+
+**Privacy.** This uploads your agents' memories — including what they noted
+about work projects — to your private memory repo, readable by every machine
+in the fleet. Exclude paths with `FLEET_MEMORY_CAPTURE_EXCLUDE`, or disable
+capture with `FLEET_MEMORY_CAPTURE=""`. Existing masters: `fleet schedule
+install` clones the vault and adds the master's `dev.fleet.memory` timer.
+
 ### Recover a memory conflict
 
 `fleet status` on a node shows `memory: conflict` when a `pull --rebase` could
@@ -639,7 +691,7 @@ and kick).
 | `fleet provision NODE` | `--refresh-proxy-auth` | Takes the node lock, ships code and config (when the node has no git checkout of them, or no repo URL is set), secrets, files (via a staging dir), the T3 key line (only when the T3 key exists), runs `fleet pull --no-apply` on the node, then `fleet apply --from-master <digest>`; records the `<code>+<config>` the node reports it applied. NODE = registered name or Tailscale id, never a guessed hostname. |
 | `fleet reconcile` | | Expires old invites, enrols new tagged peers (nonce check, claims the invite atomically, registers the deploy keys), provisions nodes whose digest differs, retries pending cleanups, tracks missing devices and revokes them after the grace period. Convergent; quiet when nothing to do. Runs every `FLEET_RECONCILE_EVERY` minutes; skips (exit 0) while a `fleet sync` holds the master lock. |
 | `fleet sync` | | The periodic push (timer: `FLEET_SYNC_EVERY`): fast-forward the fleeter and config checkouts from their upstream when clean and behind, publish local-only skills (`FLEET_SYNC_PUBLISH_SKILLS`), `reconcile`, and every `FLEET_PUSH_TOOLS_EVERY` minutes `fleet update` on the online provisioned nodes (parallel, `FLEET_SYNC_UPDATE_SECS` cap each; last run in `vault/sync.json`). Quiet when nothing happened; see "Automatic updates". |
-| `fleet schedule install` | | (Re)install the `reconcile` and `sync` timers (LaunchAgents `dev.fleet.reconcile`/`dev.fleet.sync`, or systemd user timers `fleet-reconcile`/`fleet-sync`) with the intervals from `fleet.conf`. Idempotent; `FLEET_NO_SCHEDULER=1` writes without loading. |
+| `fleet schedule install` | | (Re)install the master timers `reconcile`, `sync` and, with a memory repo, `memory` (`fleet memory sync` every `FLEET_MEMORY_EVERY` min; LaunchAgents `dev.fleet.<job>`, or systemd user timers `fleet-<job>`) with the intervals from `fleet.conf`, and clone the master's memory vault when it is missing. Idempotent; `FLEET_NO_SCHEDULER=1` writes without loading. |
 | `fleet skill add SOURCE` | `--name N`, `--yes` | SOURCE = a directory with a `SKILL.md`, or a git URL (https/ssh) with optional `#subdir` and `@ref`, cloned shallowly into a private temp dir. Validates the frontmatter (`name` → directory name unless `--name`; `[a-z0-9][a-z0-9-]{0,63}`), secret-scans, copies into `$FLEET_CONFIG_DIR/skills/N` (an existing different skill only with `--yes`; identical = no-op), installs it into this machine's skill dirs, asks once, commits (`add skill N` / `update skill N`), pushes, then `reconcile` (`pushed to K nodes`; `FLEET_SKILL_ADD_NO_SYNC=1` skips it). |
 | `fleet skill list` | `--json` | Master: NAME, SOURCE (`config` = in the config repo, `fleet` = fleeter's bundled skill, `local-only` = installed here but not in the repo yet; the next sync publishes it), ON NODES? (`yes` / `not pushed` / `no`), DESCRIPTION. Node: the skills `fleet apply` installed (from `harness.manifest`). |
 | `fleet skill remove NAME` | `--yes` | Removes `skills/NAME` from the config repo (commit `remove skill NAME`, push), deletes this machine's copies (else the next sync would publish it again), then `reconcile`; nodes drop it on their next apply through the manifest cleanup. Asks first. |
@@ -656,7 +708,7 @@ and kick).
 | `fleet apply` | `--from-master DIGEST` | Converges tools, instructions, harness templates, skills, `env.sh`, shell rc block, memory clone (when configured), timers. Records the digest and `applied_commit` only on success. Takes `~/.config/fleet/locks/apply`. |
 | `fleet pull` | `--no-apply` | Fetches the code and config repos (converting the shipped tar copies into checkouts the first time, cloning a missing config dir, re-pointing `origin` when the configured URL changed), and runs `apply` when `<code>+<config>` differs from the last successful apply. Timer: `FLEET_PULL_EVERY`. |
 | `fleet update` | | Vendor updaters for every tool (`claude update`, `codex update`, `mise self-update`, brew/apt where allowed). Timer: `FLEET_UPDATE_EVERY`. |
-| `fleet memory sync` | `--reset` | `git add nodes/<name>` → commit → `pull --rebase` → push, 3 bounded retries. Conflict → abort, state `conflict`, stop. `--reset` clears the state. No-op without a memory repo. Timer: `FLEET_MEMORY_EVERY`. |
+| `fleet memory sync` | `--reset` | Mirrors this machine's agent memories (`FLEET_MEMORY_CAPTURE`) into `nodes/<name>/<source>/`, then `git add nodes/<name>` → commit (`memory: <name> <UTC> (+A ~M -D)`) → `pull --rebase` → push, 3 bounded retries. Runs on nodes and on the master (clones the vault itself when missing). Conflict → abort, state `conflict`, stop. `--reset` clears the state. No-op without a memory repo. Timer: `FLEET_MEMORY_EVERY`. |
 | `fleet login [TOOL]` | | Interactive login for TOOL, or for every tool whose status is `login`; opens GUI apps on macOS. |
 | `fleet status` | `--json` | Writes and prints `~/.config/fleet/status.json`. |
 | `fleet leave` | | Stops the daemon/timers, harness processes and the proxy, `tailscale logout`. Files stay (see "Uninstall"). |
@@ -676,7 +728,11 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_CODE_REPO` | `""` | fleeter repo URL. SSH → nodes get a read-only deploy key; `https://` → public, no key; empty → nodes cannot pull code, provision re-ships it each time. |
 | `FLEET_CONFIG_REPO` | `""` | Your config repo (SSH). Required by `init master`, enrolment, publish. |
 | `FLEET_MEMORY_REPO` | `""` | Your memory repo (SSH). Empty = shared memory off: no memory deploy key, clone, timer or seed. |
-| `FLEET_MEMORY_DIR` | `$HOME/fleet-memory` | Where nodes clone the memory vault. |
+| `FLEET_MEMORY_DIR` | `$HOME/fleet-memory` | Where nodes and the master clone the memory vault. |
+| `FLEET_MASTER_NAME` | `""` (short hostname) | The master's folder in the memory vault (`nodes/<name>`), lower-cased, `[a-z0-9-]`. |
+| `FLEET_MEMORY_CAPTURE` | `claude codex grok` | Native agent memories `fleet memory sync` mirrors into `nodes/<name>/<source>/` on every machine; `""` = off. |
+| `FLEET_MEMORY_CAPTURE_EXCLUDE` | `*Library-Application-Support-Claude-scratch*` | Shell globs (source-relative paths) never uploaded. |
+| `FLEET_MEMORY_MAX_KB` | `256` | Memory files larger than this are not uploaded. |
 | `FLEET_NODE_TAG` | `tag:fleet-node` | Tailscale tag for nodes; must match the policy template. |
 | `FLEET_HOSTNAME_PREFIX` | `fleet-` | Tailscale hostname = prefix + node name; travels in the invite code. |
 | `FLEET_TOOLS` | `base devtools claude` | Plug-ins converged on every node, in order; see "Choosing tools". Travels in the invite code so `fleet join` can skip unneeded privileged installs. |
@@ -699,7 +755,7 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_CAPTURE_AGENT_EXCLUDE` | `""` | Claude agent files (basename without `.md`) not captured. |
 | `FLEET_CAPTURE_AGENT_MARKERS` | `""` | `;`-separated text markers; an agent file containing one is not captured. |
 | `FLEET_CAPTURE_RULE_DROP` | `""` | Extra words that drop a Codex `prefix_rule` on capture. |
-| `FLEET_PULL_EVERY` / `FLEET_MEMORY_EVERY` / `FLEET_UPDATE_EVERY` / `FLEET_RECONCILE_EVERY` | `15` / `5` / `1440` / `2` | Timer intervals in minutes (nodes: pull, memory, update; master: reconcile). |
+| `FLEET_PULL_EVERY` / `FLEET_MEMORY_EVERY` / `FLEET_UPDATE_EVERY` / `FLEET_RECONCILE_EVERY` | `15` / `5` / `1440` / `2` | Timer intervals in minutes (nodes: pull, memory, update; master: memory, reconcile). |
 | `FLEET_SYNC_EVERY` | `30` | Minutes between `fleet sync` runs on the master (fast-forward checkouts, reconcile, tool push). `fleet schedule install` applies a change. |
 | `FLEET_PUSH_TOOLS_EVERY` | `1440` | Minutes between `fleet update` pushes to the online nodes from `fleet sync`; `0` = never push tool updates from the master. |
 | `FLEET_SYNC_PUBLISH_SKILLS` | `1` | `fleet sync` publishes skills installed in the master's skill dirs that the config repo lacks or has in another version (secret-scanned, commit `publish skills: a, b`, pushed; `FLEET_SKILL_EXCLUDE` and the bundled `fleet` skill excepted; never removes). `0` = off. |
@@ -725,7 +781,7 @@ Environment knobs (not config keys; all optional):
 | `FLEET_CODE_REMOTE`, `FLEET_CONFIG_REMOTE`, `FLEET_MEMORY_REMOTE` | Replace the derived `github-fleet-*` URLs on a node (local bare repos, tests). |
 | `FLEET_TS_API`, `FLEET_GH_API`, `FLEET_TS_STATUS_JSON`, `FLEET_MASTER_TS_IP` | Test/offline mode: base URLs for `lib/api.py` (see `tests/e2e/fake_api.py`); a file in place of `tailscale status --json`; the master's tailnet IP. `FLEET_GH_API` also forces the token path instead of `gh`. |
 | `FLEET_SKILL_ADD_NO_SYNC=1` | `fleet skill add` / `remove`: commit and push, but do not run `reconcile` afterwards (nodes get the change on their next pull). |
-| `FLEET_MEMORY_SEED=0`, `FLEET_NOW_EPOCH` | Never clone/seed the memory repo from the master; fake clock for the grace-period logic (tests). |
+| `FLEET_MEMORY_SEED=0`, `FLEET_NOW_EPOCH` | Never clone or seed the memory repo from the master (neither the scaffold seed nor the master's own `~/fleet-memory`); fake clock for the grace-period logic (tests). |
 | `FLEET_SSHD_CONFIG`, `FLEET_SSHD_CONFIG_DIR` | Paths `fleet join` hardens (tests redirect them). |
 
 ## Files on disk
@@ -750,7 +806,8 @@ audit.log                               one line per action
 ~/.config/fleet/fleet.conf              FLEET_CONFIG_DIR + local overrides; reconcile.log, sync.log; logs/update-<node>.log (failed pushes)
 ~/.config/fleet/vault.key               the private age key, only with FLEET_VAULT_KEY_BACKEND=file (0600); otherwise it is a
                                         keychain item (service fleet-vault, account $USER) or a secret-tool entry, never a file
-~/Library/LaunchAgents/dev.fleet.{reconcile,sync}.plist   or ~/.config/systemd/user/fleet-{reconcile,sync}.{service,timer}
+~/Library/LaunchAgents/dev.fleet.{reconcile,sync,memory}.plist   or ~/.config/systemd/user/fleet-{reconcile,sync,memory}.{service,timer}
+~/fleet-memory/                         the master's clone of the memory vault (nodes/<FLEET_MASTER_NAME>); ~/.config/fleet/memory.state, memory.log
 ~/.local/bin/fleeter                    alias of ~/.local/bin/fleet (same target)
 ~/.claude/skills/fleet, ~/.agents/skills/fleet, ~/.cursor/skills/fleet   fleeter's agent skill (for the harnesses present here)
 ~/.claude/skills/<name>, ~/.agents/skills/<name>, ~/.cursor/skills/<name>   skills added with `fleet skill add` (same dirs; recorded in ~/.config/fleet/manifest)

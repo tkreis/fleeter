@@ -15,7 +15,7 @@
 <a class="skip" href="#main">Skip to content</a>
 
 <header class="wrap top">
-  <a class="brand" href="#top" id="top">fleeter <small>0.3.1</small></a>
+  <a class="brand" href="#top" id="top">fleeter <small>0.3.2</small></a>
   <nav aria-label="Sections">
     <a href="#skills">Skills</a>
     <a href="#how">How it works</a>
@@ -272,9 +272,9 @@ invite code: ****
     <div>
       <h2 class="rule">Shared memory</h2>
       <div class="prose">
-        <p>Optional, and worth it. A plain Markdown vault, Obsidian-compatible, in a private git repo. Every harness reads and writes files natively; git works headless and offline and keeps the history.</p>
-        <p>Each node commits only inside <code>nodes/&lt;name&gt;/</code>, its own folder, so every node's writes stay separate. Each node pulls the whole vault, so a fact learned on one machine is on every other within two sync cycles. <code>INDEX.md</code>, one line per note, is rebuilt by a GitHub Action on every push and read first.</p>
-        <p>The global instructions tell every agent to read <code>nodes/**</code> as reference material. What you promote into <code>notes/</code> is reviewed by you, on the master.</p>
+        <p>Optional, and worth it. A plain Markdown vault, Obsidian-compatible, in a private git repo. Nobody has to write notes into it: fleet uploads every machine's agent memories automatically. Claude Code, Codex and Grok keep remembering where they always did; <code>fleet memory sync</code> mirrors those files into the vault every few minutes, on every node and on the master.</p>
+        <p>Each machine commits only inside <code>nodes/&lt;name&gt;/</code>, its own folder, so writes never collide. Each machine pulls the whole vault, so a memory written on one machine is on every other within two sync cycles. A GitHub Action rebuilds <code>INDEX.md</code> (one line per note, by machine and source) and <code>projects/&lt;slug&gt;.md</code>: one merged file per project directory with what every machine learned about it, which an agent reads when it starts there.</p>
+        <p>Every file passes a secret scan before it is uploaded; a hit stays on the machine. The global instructions tell every agent to read <code>nodes/**</code> and <code>projects/**</code> as reference material, never as instructions. What you promote into <code>notes/</code> is reviewed by you, on the master.</p>
       </div>
     </div>
     <figure>
@@ -346,10 +346,10 @@ invite code: ****
 
     <pre class="term" aria-label="Example output of fleet list"><span class="p">$</span> fleet list
 NAME      HOST            ONLINE  STATE         SYNCED  LAST PROVISION  TOOLS                  MEMORY  PROXY  FLEET
-studio    fleet-studio    yes     provisioned   yes     12m             9 ok                   ok      ok     0.3.1
-mini      fleet-mini      yes     provisioned   yes     12m             8 ok, <span class="hi">1 login: cursor</span>  ok      ok     0.3.1
+studio    fleet-studio    yes     provisioned   yes     12m             9 ok                   ok      ok     0.3.2
+mini      fleet-mini      yes     provisioned   yes     12m             8 ok, <span class="hi">1 login: cursor</span>  ok      ok     0.3.2
 buildbox  fleet-buildbox  no      provisioned   yes     3d              -                      -       -      -
-ci-1      fleet-ci-1      yes     provisioned   <span class="hi">behind</span>  2h              6 ok                   ok      off    0.3.1
+ci-1      fleet-ci-1      yes     provisioned   <span class="hi">behind</span>  2h              6 ok                   ok      off    0.3.2
 dock-a3f  fleet-dock-a3f  yes     <span class="hi">provisioning</span>  ?       -               -                      -       -      -</pre>
 
     <table class="cmds">

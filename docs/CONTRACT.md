@@ -299,7 +299,8 @@ same, then `fleet leave`.
 ~/.config/fleet/privileged_done  join finished the privileged OS steps; plug-ins skip them
 ~/.config/fleet/manifest         files fleet owns (one path per line), for cleanup; harness.manifest, harness.claude-mcp
 ~/.config/fleet/status.json      written by apply/status
-~/.config/fleet/memory.state     state=ok|conflict|missing|off (off: no memory remote configured), last_sync, detail
+~/.config/fleet/memory.state     state=ok|conflict|missing|off (off: no memory remote configured), last_sync, detail,
+                                 capture_skipped (source-relative paths the secret scan refused to upload). Same file on the master.
 ~/.config/fleet/fleet.conf       local overrides (optional)
 ~/.config/fleet/locks/apply      apply/pull lock; logs/<job>.log; daemon.pid, daemon.state
 ~/.ssh/authorized_keys           master key line (join) + one `… fleet-t3-client` line (provision step 4b; absent after t3 revoke/kick)
@@ -424,15 +425,24 @@ registry. Keys are stable; new ones may be added.
   "memory": "ok",                 // ok | conflict | missing | off | null
   "proxy": "off",                 // ok | off (cliproxy not in the node's tools) | down | null
   "fleet": "0.3.0",               // the node's fleet version, null when not reached
-  "missing_since": "", "cleanup_pending": []
+  "missing_since": "", "cleanup_pending": [],
+  "master": false                 // 0.3.2: true on the one row that describes the master itself
 }
 ```
+
+Since 0.3.2 the array starts with one row for the master (`"master": true`,
+`"id": "master"`, `"state": "master"`, `"online": true`, `"host"` = its
+hostname, `"memory"` = the master's own vault state `ok | conflict | missing |
+off`, plus `"memory_last_sync"`; `synced`, `applied`, `tools`, `proxy` are
+null/empty; `"fleet"` = the master's version). Every other field keeps its
+meaning; consumers that only want nodes filter on `"master": false`.
 
 `synced` is `behind` when the applied code or config revision differs from the
 master's, or the applied digest differs from the desired one; `yes` otherwise.
 The table (`fleet list`) prints NAME, HOST, ONLINE, STATE, SYNCED, LAST
 PROVISION, TOOLS (`9 ok, 1 login: cursor`; `unreachable`; `cleanup-pending` on
-a revoked tombstone), MEMORY, PROXY, FLEET; `-` where the JSON has `null`.
+a revoked tombstone), MEMORY (on the master row with the age of its last sync,
+`ok (3m)`), PROXY, FLEET; `-` where the JSON has `null`.
 
 ## `fleet status --json` (node) — consumed by `fleet nodes --live` and `fleet list`
 
@@ -489,6 +499,36 @@ memory remote is configured — `node_job_enabled`, and a job switched off since
 the last apply loses its unit/plist), `update` (FLEET_UPDATE_EVERY). Master
 (`install_master_schedule`, written by `fleet init master` and `fleet schedule
 install`, rewritten and reloaded only when the content changed): `reconcile`
-(FLEET_RECONCILE_EVERY, log `$FLEET_HOME/reconcile.log`) and `sync`
-(FLEET_SYNC_EVERY, log `$FLEET_HOME/sync.log`); both honour `FLEET_NO_SCHEDULER`
-(files written, nothing loaded).
+(FLEET_RECONCILE_EVERY, log `$FLEET_HOME/reconcile.log`), `sync`
+(FLEET_SYNC_EVERY, log `$FLEET_HOME/sync.log`) and, while a memory repo is
+configured, `memory` (`fleet memory sync`, FLEET_MEMORY_EVERY, log
+`$FLEET_HOME/memory.log`; removed again when the repo is unset); all honour
+`FLEET_NO_SCHEDULER` (files written, nothing loaded).
+
+## Shared memory vault (`fleet memory sync`, nodes and master)
+
+A machine writes only inside `nodes/<name>/` (`<name>` = the enrolled node
+name; on the master `FLEET_MASTER_NAME`, default the sanitised short hostname).
+Before each commit `lib/memory_capture.py` mirrors the machine's native agent
+memories into it, one subdirectory per source of `FLEET_MEMORY_CAPTURE`:
+
+```
+nodes/<name>/claude/<slug>/<path>.md   from ~/.claude/projects/<slug>/memory/**/*.md (slug = Claude's dir name, kept)
+nodes/<name>/claude/ALIASES.md         `- `<alias slug>` -> `<canonical slug>`` for memory dirs shared through symlinks
+nodes/<name>/codex/<path>              from ~/.codex/memories/** (text files; sqlite and other binaries skipped)
+nodes/<name>/grok/<path>.md            from ~/.grok/memory-v2/**/*.md (sqlite, -wal, -shm skipped)
+```
+
+Mirror semantics per source: a file gone or no longer allowed locally is
+deleted in `nodes/<name>/<source>/` (nowhere else). Not uploaded: a path
+matching a `FLEET_MEMORY_CAPTURE_EXCLUDE` glob, a file larger than
+`FLEET_MEMORY_MAX_KB`, a non-text file, or a file the secret scan
+(`lib/secretscan.py`, machine-path rule off; commit hashes, UUIDs, kebab-case slugs and `port/path` values allowed) hits —
+those are listed in `memory.state` `capture_skipped` and in `detail`. Commit
+subject: `memory: <name> <UTC> (+A ~M -D)` (added, modified, deleted paths
+under `nodes/<name>`). Anything the agents write by hand directly under
+`nodes/<name>/` is committed too. The vault's GitHub Action rebuilds `INDEX.md`
+(by node, then source) and `projects/<slug>.md` (every node's files for one
+Claude project slug, aliases included) with `scripts/build_index.py`; the master
+refreshes `scripts/` and the workflow in the repo from `templates/memory` when a
+fleeter update changed them (`memory_seed`).

@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.0 — 2026-10-04
+
+Nodes come back on their own after a restart, a stuck FileVault Mac can be
+unlocked from the master, and a MacBook can stay awake with the lid closed.
+
+### Added
+- `fleet reboot NODE [--yes]` (master): a planned restart with the typed
+  node name as confirmation. macOS with FileVault on and `fdesetup
+  supportsauthrestart` true: `sudo fdesetup authrestart -delayminutes 0` over
+  an interactive fleet session — the user types the sudo password and the
+  FileVault password at `fdesetup`'s own prompt on the node, so the Mac boots
+  past the pre-boot prompt (`fdesetup(8)`); otherwise `sudo shutdown -r now`,
+  Linux `sudo systemctl reboot`; containers refused. Records the node's LAN
+  addresses first, then waits (`FLEET_REBOOT_WAIT_SECS`, 600) for tailnet
+  online + `ssh NODE true` and prints `back online after Ns`, or names the
+  next step (`fleet unlock NODE` for a FileVault Mac). Audited.
+- `fleet unlock NODE [--host IP]` (master): answers the macOS 26 pre-boot
+  password prompt of a FileVault Mac over the LAN
+  (`apple_ssh_and_filevault(7)`: Remote Login's pre-boot sshd, password only,
+  no Tailscale yet). Probes the registry's `lan_ips` (or `--host`) with
+  `nc -z -w 3 IP 22`, opens `ssh -t -o PubkeyAuthentication=no -o
+  PreferredAuthentications=keyboard-interactive,password` with the separate
+  `vault/ssh/known_hosts_preboot` (TOFU; the pre-boot host key may differ),
+  the user types the password at the Mac's prompt, then waits
+  (`FLEET_UNLOCK_WAIT_SECS`, 300) for the node on the tailnet. Refuses with
+  an explanation when no address answers (same LAN? Ethernet?), lists the
+  requirements on a timeout; Linux nodes: nothing to unlock. No password is
+  ever in argv, the environment or a file.
+- Registry `lan_ips`, `ethernet`, `lan_seen`: provision reads them from the
+  node's `status.json`, `fleet reboot` from a live status.
+- `fleet status --json`: `lan_ips` (macOS `networksetup` + `ipconfig
+  getifaddr`, Linux `/sys/class/net` + `ip`/`ifconfig`; no loopback,
+  link-local or 100.64/10; `[]` in containers), `ethernet` yes|no,
+  `awake_lid` on|off|n/a (`pmset -g` `SleepDisabled`), `lid_set_at_join`;
+  the table shows `lan …` and `awake on  (lid: on, set at join; undo: sudo
+  pmset -a disablesleep 0)`.
+- `FLEET_KEEP_AWAKE_LID` (default 0; travels in the invite code as
+  `keep_awake_lid`): `fleet join` on a laptop (`pmset -g batt` battery or a
+  MacBook model) runs `sudo pmset -a disablesleep 1` after the `pmset -c`
+  line and records `macos:pmset+lid` in `power_done`; a rerun on a MacBook
+  that joined without it adds just the lid step. Desktops skipped, Linux
+  never. Apply cannot sudo: it reports the undo (knob back to 0) or the manual
+  command (knob 1, setting off). README covers heat, battery and models that
+  ignore the setting.
+- Docs: README "Restart a node", "Unlock a node after a power cut" (the
+  requirements, LAN only, Ethernet, the password-only pre-boot surface),
+  "Keep a MacBook awake with the lid closed"; SECURITY (no passwords through
+  fleet, separate pre-boot pins, the pre-boot LAN surface); CONTRACT (registry
+  and status fields, `power_done` content, the two commands); the `fleet`
+  agent skill (reboot/unlock need the user at the keyboard; agents never
+  handle the password).
+
 ## 0.3.3 — 2026-10-04
 
 Nodes stay awake, so they stay reachable and keep syncing.

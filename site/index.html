@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fleeter — one bash tool, a personal fleet of coding-agent machines</title>
-<meta name="description" content="fleeter turns your Macs, Linux boxes and Docker containers into a private fleet of machines that run Claude Code, Codex, Cursor and Grok with the same instructions, skills, tools and secrets as your laptop. Push-only over Tailscale, shared Markdown memory, MIT.">
+<meta name="description" content="fleeter turns your Macs, Linux boxes and containers into a private fleet of machines that run Claude Code, Codex, Cursor and Grok with the same instructions, skills, tools and secrets as your laptop. Push-only over Tailscale, shared Markdown memory, MIT.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#eef2ee" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e1826" media="(prefers-color-scheme: dark)">
@@ -15,14 +15,13 @@
 <a class="skip" href="#main">Skip to content</a>
 
 <header class="wrap top">
-  <a class="brand" href="#top" id="top">fleeter <small>0.2.0</small></a>
+  <a class="brand" href="#top" id="top">fleeter <small>0.3.0</small></a>
   <nav aria-label="Sections">
     <a href="#what">What you get</a>
     <a href="#how">How it works</a>
     <a href="#memory">Shared memory</a>
     <a href="#security">Security</a>
     <a href="#commands">Commands</a>
-    <a href="#fit">Is it for you</a>
     <a href="https://github.com/tkreis/fleeter">GitHub</a>
   </nav>
 </header>
@@ -32,21 +31,16 @@
 <section class="wrap hero">
   <div>
     <h1>Your Macs, Linux boxes and containers, run as one fleet of coding agents.</h1>
-    <p class="lede">fleeter is one bash tool. Your laptop is the <b>master</b>: it enrols machines over Tailscale with single-use invites, pushes Claude Code, Codex, Cursor, Grok, a browser with MCP servers, your instructions, skills and secrets over SSH, and can kick any node out. Nodes keep themselves current from git and share one Markdown memory, so the master can sleep.</p>
+    <p class="lede">fleeter is one bash tool. Your laptop is the <b>master</b>: it enrols machines over Tailscale with single-use invites, pushes Claude Code, Codex, Cursor, Grok, a browser with MCP servers, your instructions, skills and secrets over SSH, and can kick any node out. Nodes keep working while the master is off and share one Markdown memory.</p>
     <p class="actions">
-      <a class="btn" href="https://github.com/tkreis/fleeter#quickstart">Get started</a>
+      <a class="btn btn-ghost" href="https://github.com/tkreis/fleeter#quickstart">Read the quickstart</a>
       <a class="btn btn-ghost" href="https://github.com/tkreis/fleeter/blob/main/docs/ARCHITECTURE.md">Read the architecture</a>
     </p>
-    <ul class="facts">
-      <li>bash 3.2 and python3 stdlib; no agent, no server, no database</li>
-      <li>master: macOS or Linux; nodes: macOS 13+, Debian, Ubuntu, Fedora, Arch, Docker</li>
-      <li>MIT licensed</li>
-    </ul>
   </div>
 
   <svg class="chart" viewBox="0 0 520 420" role="img" aria-labelledby="chart-t chart-d">
     <title id="chart-t">Harbour chart of a fleet</title>
-    <desc id="chart-d">A nautical chart. The master, drawn as a light on the shore, reaches five named nodes on the water along dotted lines whose arrows point only towards the nodes: studio, mini, buildbox, ci-1 and dock-a3f. The nodes sit inside a dashed boundary labelled tag:fleet-node.</desc>
+    <desc id="chart-d">A nautical chart. The master, drawn as a light on the shore, reaches five named nodes on the water along dotted lines whose arrows point towards the nodes: studio, mini, buildbox, ci-1 and dock-a3f. The nodes sit inside a dashed boundary labelled your fleet, a private Tailscale network.</desc>
     <defs>
       <marker id="arrow-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
         <path d="M0 0 L10 5 L0 10 z" fill="var(--ink)"/>
@@ -63,30 +57,19 @@
     <path d="M9 236 C 92 228, 142 282, 172 314 C 184 328, 196 344, 206 360" fill="none" stroke="var(--sea)" stroke-width="1" stroke-dasharray="4 3"/>
     <!-- light sectors from the master -->
     <path d="M132.8 127.1 A150 150 0 0 1 243.4 285.1" fill="none" stroke="var(--light)" stroke-width="1" stroke-dasharray="6 5" opacity="0.55"/>
-    <path d="M182.9 27.7 A260 260 0 0 1 354 272" fill="none" stroke="var(--light)" stroke-width="1" stroke-dasharray="6 5" opacity="0.35"/>
+    <path d="M172.6 55.9 A230 230 0 0 1 324 272" fill="none" stroke="var(--light)" stroke-width="1" stroke-dasharray="6 5" opacity="0.35"/>
     <!-- tailnet boundary -->
     <ellipse cx="365" cy="210" rx="140" ry="165" fill="none" stroke="var(--sea)" stroke-width="1.2" stroke-dasharray="8 6"/>
-    <text class="sub" x="365" y="36" text-anchor="middle">tag:fleet-node</text>
-    <text class="sub" x="365" y="392" text-anchor="middle">internet yes; master and other nodes no</text>
-    <!-- soundings -->
-    <text class="sounding" x="238" y="182">12</text>
-    <text class="sounding" x="352" y="150">9</text>
-    <text class="sounding" x="482" y="118">18</text>
-    <text class="sounding" x="345" y="290">7</text>
-    <text class="sounding" x="250" y="262">15</text>
-    <text class="sounding" x="470" y="262">22</text>
-    <text class="sounding" x="200" y="62">31</text>
-    <text class="sounding" x="226" y="366">11</text>
-    <text class="sounding" x="330" y="190">14</text>
+    <text class="sub" x="365" y="36" text-anchor="middle">your fleet (private Tailscale network)</text>
     <!-- compass -->
     <circle cx="62" cy="62" r="18" fill="none" stroke="var(--sea)" stroke-width="1"/>
     <path d="M62 44 L66 62 L62 80 L58 62 Z" fill="var(--ink)"/>
     <path d="M44 62 L62 58 L80 62 L62 66 Z" fill="none" stroke="var(--ink)" stroke-width="1"/>
     <text class="sub" x="62" y="38" text-anchor="middle">N</text>
-    <!-- push lines, master to node only -->
+    <!-- push lines, master to node -->
     <g stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="2 4" marker-end="url(#arrow-ink)">
       <line x1="107.2" y1="277.1" x2="269.9" y2="119.7"/>
-      <line x1="108.3" y1="278.4" x2="408.4" y2="77.8"/>
+      <line x1="109.2" y1="279.5" x2="378.5" y2="93.9"/>
       <line x1="109.6" y1="281.2" x2="406.6" y2="193.9"/>
       <line x1="109.6" y1="286.9" x2="286.6" y2="340.9"/>
       <line x1="109.9" y1="285.3" x2="366.1" y2="320.1"/>
@@ -101,38 +84,44 @@
       <line x1="102" y1="265" x2="107" y2="261"/>
       <line x1="86" y1="265" x2="81" y2="261"/>
     </g>
-    <text class="label" x="94" y="336" text-anchor="middle">master</text>
-    <text class="sub" x="94" y="349" text-anchor="middle">reconcile 2 min</text>
+    <text class="label" x="94" y="336" text-anchor="middle">your master</text>
     <!-- nodes: buoys -->
     <g fill="var(--paper)" stroke="var(--ink)" stroke-width="1.5">
       <circle cx="280" cy="110" r="7"/>
-      <circle cx="420" cy="70" r="7"/>
+      <circle cx="390" cy="86" r="7"/>
       <circle cx="420" cy="190" r="7"/>
       <circle cx="300" cy="345" r="7"/>
       <circle cx="380" cy="322" r="7" stroke-dasharray="3 2"/>
     </g>
     <g stroke="var(--ink)" stroke-width="1.5">
       <line x1="280" y1="103" x2="280" y2="94"/>
-      <line x1="420" y1="63" x2="420" y2="54"/>
+      <line x1="390" y1="79" x2="390" y2="70"/>
       <line x1="420" y1="183" x2="420" y2="174"/>
       <line x1="300" y1="338" x2="300" y2="329"/>
     </g>
     <text class="label" x="292" y="100">studio</text>
     <text class="sub" x="292" y="113">macOS</text>
-    <text class="label" x="432" y="62">mini</text>
-    <text class="sub" x="432" y="75">macOS</text>
+    <text class="label" x="402" y="78">mini</text>
+    <text class="sub" x="402" y="91">macOS</text>
     <text class="label" x="432" y="182">buildbox</text>
     <text class="sub" x="432" y="195">linux</text>
     <text class="label" x="312" y="345">ci-1</text>
     <text class="sub" x="312" y="358">linux</text>
     <text class="label" x="392" y="318">dock-a3f</text>
-    <text class="sub" x="392" y="331">docker, ephemeral</text>
+    <text class="sub" x="392" y="331">docker</text>
     <!-- legend -->
-    <g transform="translate(24 384)">
+    <g transform="translate(24 104)">
       <line x1="0" y1="0" x2="34" y2="0" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="2 4" marker-end="url(#arrow-ink)"/>
-      <text class="sub" x="42" y="4">SSH, master to node only</text>
+      <text class="sub" x="42" y="4">master pushes to nodes</text>
+      <text class="sub" x="42" y="18">(one way)</text>
     </g>
   </svg>
+
+  <div class="install">
+    <span class="install-label">Get started on your laptop</span>
+    <pre class="term" aria-label="Install fleeter"><span class="p">$</span> curl -fsSL https://tkreis.github.io/fleeter/<wbr>install.sh | bash
+<span class="p">$</span> fleet init master</pre>
+  </div>
 </section>
 
 <section class="section" id="what">
@@ -147,7 +136,7 @@
       <li>
         <svg viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="10"/><circle cx="14" cy="14" r="4"/><path d="M14 4v6M22.7 9l-5.2 3M22.7 19l-5.2-3M14 24v-6M5.3 19l5.2-3M5.3 9l5.2 3"/></svg>
         <h3>A browser the agents can drive</h3>
-        <p>Chrome or chromium plus <code>chrome-devtools-mcp</code> and <code>@playwright/mcp</code> at pinned versions, behind wrappers that run headless when there is no display. Runtimes via mise, pnpm, uv, gh, Docker; optional CLIProxyAPI and T3 Code.</p>
+        <p>Chrome or chromium plus <code>chrome-devtools-mcp</code> and <code>@playwright/mcp</code> at pinned versions, behind wrappers that run headless on servers. Runtimes via mise, pnpm, uv, gh, Docker; optional CLIProxyAPI and T3 Code.</p>
       </li>
       <li>
         <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M6 4h11l5 5v15H6z"/><path d="M17 4v5h5M10 14h8M10 18h8"/></svg>
@@ -156,18 +145,18 @@
       </li>
       <li>
         <svg viewBox="0 0 28 28" aria-hidden="true"><rect x="5" y="12" width="18" height="12" rx="1.5"/><path d="M9 12V8a5 5 0 0110 0v4M14 17v3"/></svg>
-        <h3>Secrets from a vault, not git</h3>
-        <p><code>fleet secrets set</code>, <code>fleet files add</code> and <code>fleet proxy import</code> store values in the master's 0700 vault. They travel over SSH into a 0600 file on the node, in two profiles: <code>minimal</code> for throwaway containers, <code>full</code> for your own machines.</p>
+        <h3>Secrets from an encrypted vault</h3>
+        <p>Secrets live in an encrypted vault on the master (age, key in your macOS Keychain). They're decrypted only in memory while being sent to a node over SSH, and land in a file only your user can read. Two profiles: <code>minimal</code> for throwaway containers, <code>full</code> for your own machines.</p>
       </li>
       <li>
         <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 8h20v14H4zM4 13h20M9 8V6M19 8V6"/><path d="M8 18h4M15 18h5"/></svg>
-        <h3>A master that may be asleep</h3>
-        <p>Nodes pull code and config every 15 minutes, sync memory every 5 and run the vendor updaters daily, all as your user. The master is needed only to enrol, push secrets and kick. Containers run one foreground scheduler, Macs use launchd, Linux uses systemd user timers.</p>
+        <h3>Updates when your master is on</h3>
+        <p>The master pushes new tools, skills, config and secrets whenever it is on: <code>fleet sync</code> runs on a schedule. Nodes keep working with what they have while it is off. Nodes can be Macs, Linux boxes or containers.</p>
       </li>
       <li>
         <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 11l10-5 10 5-10 5z"/><path d="M4 11v8l10 5 10-5v-8M14 16v8"/></svg>
-        <h3>Throwaway Docker nodes</h3>
-        <p><code>docker/spawn.sh 3</code> mints three invites and starts three containers that join as ephemeral tailnet devices, get the minimal profile, and vanish when stopped. No root in the image, no <code>NET_ADMIN</code>, no tun device.</p>
+        <h3>An agent that can run the fleet</h3>
+        <p><code>fleet skill install</code> puts a <code>SKILL.md</code> on the master, so a coding agent there can check nodes, run commands on them and push updates for you, within the same confirmations as you.</p>
       </li>
     </ul>
   </div>
@@ -177,13 +166,13 @@
   <div class="wrap">
     <h2>How it works</h2>
     <div class="prose intro">
-      <p>Three git repos and one vault. The master pushes over OpenSSH inside your tailnet with its own key and pinned host keys. Nodes fetch the rest themselves with per-node deploy keys, so the master is a control point, not a dependency.</p>
+      <p>Three git repos and one vault. The master pushes over OpenSSH inside your tailnet with its own key and pinned host keys; <code>fleet sync</code> does that on a schedule whenever the master is on. Nodes fetch code, config and memory themselves with per-node deploy keys, so they keep working while the master is off.</p>
     </div>
 
     <figure>
-      <svg class="diagram" viewBox="0 0 960 440" role="img" aria-labelledby="arch-t arch-d">
+      <svg class="diagram" viewBox="0 0 960 412" role="img" aria-labelledby="arch-t arch-d">
         <title id="arch-t">Architecture: master, nodes and the three repos</title>
-        <desc id="arch-d">The master holds a vault and runs reconcile and sync. Arrows go from the master to a Mac node, a Linux node and a Docker node over SSH on Tailscale; a crossed-out line shows that nodes have no path back to the master. On the right are three GitHub repos: fleeter (code, read-only), fleet-config (yours, read-only) and fleet-memory (shared, read-write within each node's own folder). Nodes pull the first two every 15 minutes and sync the third every 5. The master pushes your config with fleet config publish.</desc>
+        <desc id="arch-d">The master holds an encrypted vault and runs fleet sync on a schedule. Arrows go from the master to a Mac node, a Linux node and a Docker node over SSH on Tailscale. On the right are three GitHub repos: fleeter (code, read-only), fleet-config (yours, read-only) and fleet-memory (shared, read-write within each node's own folder). Nodes pull the first two every 15 minutes and sync the third every 5. The master pushes your config with fleet config publish.</desc>
         <defs>
           <marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink)"/></marker>
           <marker id="a-sea" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--sea)"/></marker>
@@ -194,20 +183,20 @@
         <rect class="box" x="30" y="90" width="300" height="300" rx="2"/>
         <text class="b" x="48" y="116">master</text>
         <text class="s" x="110" y="116">your laptop, macOS or Linux</text>
-        <rect class="box-soft" x="48" y="130" width="264" height="98" rx="2"/>
+        <rect class="box-soft" x="48" y="130" width="264" height="80" rx="2"/>
         <text class="t" x="60" y="152">vault</text>
-        <text class="s" x="104" y="152">~/.config/fleet/vault, 0700</text>
-        <text class="s" x="60" y="174">secrets/   files/   ssh/   nodes/</text>
-        <text class="s" x="60" y="192">digest.key   audit.log   backups/</text>
-        <text class="s" x="60" y="214">never in a repo, argv or a log</text>
-        <rect class="box-soft" x="48" y="242" width="264" height="56" rx="2"/>
-        <text class="t" x="60" y="264">fleet reconcile</text>
-        <text class="s" x="60" y="284">every 2 min: enrol, provision, revoke</text>
-        <rect class="box-soft" x="48" y="312" width="264" height="66" rx="2"/>
-        <text class="t" x="60" y="334">fleet sync</text>
-        <text class="m" x="176" y="334">0.3.0</text>
-        <text class="s" x="60" y="352">scheduled on the master:</text>
-        <text class="s" x="60" y="368">pull, reconcile, push to all nodes</text>
+        <text class="s" x="110" y="152">encrypted with age</text>
+        <text class="s" x="60" y="174">key in your macOS Keychain</text>
+        <text class="s" x="60" y="192">secrets/   files/   ssh/   nodes/</text>
+        <rect class="box-soft" x="48" y="224" width="264" height="84" rx="2"/>
+        <text class="t" x="60" y="246">fleet sync</text>
+        <text class="s" x="148" y="246">scheduled push</text>
+        <text class="s" x="60" y="268">enrols new machines, then pushes</text>
+        <text class="s" x="60" y="284">tools, skills, config and secrets</text>
+        <text class="s" x="60" y="300">to every node that is online</text>
+        <rect class="box-soft" x="48" y="322" width="264" height="52" rx="2"/>
+        <text class="t" x="60" y="344">fleet invite, fleet kick</text>
+        <text class="s" x="60" y="364">one machine in, one machine out</text>
 
         <!-- ssh trunk and branches -->
         <line class="wire" x1="330" y1="235" x2="400" y2="235"/>
@@ -215,7 +204,8 @@
         <line class="wire" x1="400" y1="135" x2="470" y2="135" marker-end="url(#a-ink)"/>
         <line class="wire" x1="400" y1="235" x2="470" y2="235" marker-end="url(#a-ink)"/>
         <line class="wire" x1="400" y1="335" x2="470" y2="335" marker-end="url(#a-ink)"/>
-        <text class="s" x="400" y="362" text-anchor="middle">SSH over Tailscale</text>
+        <text class="s" x="400" y="362" text-anchor="middle">SSH over Tailscale,</text>
+        <text class="s" x="400" y="378" text-anchor="middle">master to node</text>
 
         <!-- nodes -->
         <rect class="box" x="470" y="100" width="180" height="70" rx="2"/>
@@ -228,23 +218,17 @@
         <text class="b" x="486" y="326">docker node</text>
         <text class="s" x="486" y="346">fleet daemon, ephemeral</text>
 
-        <!-- no path back -->
-        <line class="wire-dash" x1="460" y1="404" x2="340" y2="404"/>
-        <circle cx="400" cy="404" r="9" fill="var(--paper)" stroke="var(--light)" stroke-width="1.5"/>
-        <path d="M396 400 L404 408 M404 400 L396 408" stroke="var(--light)" stroke-width="1.5"/>
-        <text class="s" x="400" y="428" text-anchor="middle">no path from a node to the master</text>
-
         <!-- github -->
         <text class="b" x="750" y="82">GitHub</text>
         <text class="s" x="812" y="82">per-node deploy keys</text>
         <rect class="box" x="750" y="95" width="190" height="70" rx="2"/>
         <text class="t" x="764" y="118">fleeter</text>
-        <text class="s" x="764" y="136">code, upstream or your fork</text>
+        <text class="s" x="764" y="136">code, upstream or a fork</text>
         <text class="s" x="764" y="152">read-only, or public https</text>
         <rect class="box" x="750" y="200" width="190" height="70" rx="2"/>
         <text class="t" x="764" y="223">fleet-config</text>
-        <text class="s" x="764" y="241">yours, private: fleet.conf,</text>
-        <text class="s" x="764" y="257">AGENTS.md, harness/, skills/</text>
+        <text class="s" x="764" y="241">yours, private: fleet.conf</text>
+        <text class="s" x="764" y="257">AGENTS.md, harness, skills</text>
         <rect class="box" x="750" y="305" width="190" height="70" rx="2"/>
         <text class="t" x="764" y="328">fleet-memory</text>
         <text class="s" x="764" y="346">yours, optional, Markdown</text>
@@ -271,32 +255,26 @@
 
     <h2 class="rule" style="margin-top:56px">Joining a machine</h2>
     <div class="prose">
-      <p>An invite is a single-use, pre-authorised Tailscale key with a nonce, good for one hour. The node never contacts the master; the master finds it.</p>
+      <p>An invite is good for one machine and one hour. The master finds the new machine and finishes the setup on its own.</p>
     </div>
     <ol class="steps">
       <li>
         <svg class="glyph" viewBox="0 0 46 46" aria-hidden="true"><path d="M8 14h30v6a3 3 0 000 6v6H8v-6a3 3 0 000-6z"/><path d="M18 14v18" stroke-dasharray="2 3"/><path d="M26 23h7"/></svg>
         <span class="where">on the master</span>
         <h3>Mint an invite</h3>
-        <p><code>fleet invite --name studio</code> prints a one-line command and an invite code. The code carries the auth key, the nonce, the master's public key and the fleet's tool list.</p>
+        <p><code>fleet invite --name mini</code> prints one command and an invite code.</p>
       </li>
       <li>
         <svg class="glyph" viewBox="0 0 46 46" aria-hidden="true"><rect x="7" y="10" width="32" height="26" rx="2"/><path d="M13 19l5 4-5 4M21 27h9"/></svg>
         <span class="where">on the new machine</span>
-        <h3>Paste the one-liner</h3>
-        <p>The join script travels inside the command; nothing is downloaded. It reads the code from a hidden prompt, joins the tailnet with the fleet tag, enables key-only SSH, generates deploy keys and writes the nonce to disk.</p>
-      </li>
-      <li>
-        <svg class="glyph" viewBox="0 0 46 46" aria-hidden="true"><circle cx="17" cy="23" r="7"/><path d="M24 23h14M33 23v5M38 23v4"/><path d="M14 23l2 2 4-4"/></svg>
-        <span class="where">on the master, within 2 min</span>
-        <h3>Verify the nonce</h3>
-        <p>The timer sees a new tagged peer, reads its <code>enrol.json</code> over SSH and claims the matching invite atomically. A peer without a valid nonce is listed as <code>unknown</code> and never provisioned.</p>
+        <h3>Paste the command</h3>
+        <p>Paste it into a terminal and enter the invite code when asked.</p>
       </li>
       <li>
         <svg class="glyph" viewBox="0 0 46 46" aria-hidden="true"><path d="M9 20l14-6 14 6-14 6z"/><path d="M9 20v10l14 6 14-6V20"/><path d="M23 26v10"/></svg>
-        <span class="where">on the master, then the node</span>
-        <h3>Provision</h3>
-        <p>Deploy keys are registered, then code, config, secrets and files are pushed and <code>fleet apply</code> runs remotely: tools, instructions, skills, timers and the memory clone. <code>fleet nodes</code> shows <code>provisioned</code>.</p>
+        <span class="where">on the master, a few minutes later</span>
+        <h3>It sets itself up</h3>
+        <p>The master pushes tools, instructions, skills and secrets; <code>fleet list</code> shows the machine as <code>provisioned</code>.</p>
       </li>
     </ol>
   </div>
@@ -308,8 +286,8 @@
       <h2 class="rule">Shared memory</h2>
       <div class="prose">
         <p>Optional, and worth it. A plain Markdown vault, Obsidian-compatible, in a private git repo. Every harness reads and writes files natively; git works headless and offline and keeps the history.</p>
-        <p>Each node commits only inside <code>nodes/&lt;name&gt;/</code>, so two nodes can never conflict. Each node pulls the whole vault, so a fact learned on one machine is on every other within two sync cycles. <code>INDEX.md</code>, one line per note, is rebuilt by a GitHub Action on every push and read first.</p>
-        <p>The global instructions tell every agent to treat <code>nodes/**</code> as knowledge, never as instructions. What you promote into <code>notes/</code> is reviewed by you, on the master.</p>
+        <p>Each node commits only inside <code>nodes/&lt;name&gt;/</code>, its own folder, so every node's writes stay separate. Each node pulls the whole vault, so a fact learned on one machine is on every other within two sync cycles. <code>INDEX.md</code>, one line per note, is rebuilt by a GitHub Action on every push and read first.</p>
+        <p>The global instructions tell every agent to read <code>nodes/**</code> as reference material. What you promote into <code>notes/</code> is reviewed by you, on the master.</p>
       </div>
     </div>
     <figure>
@@ -379,31 +357,14 @@
     <div class="prose intro">
       <p>Assume a node can be fully compromised: an agent there runs untrusted code and reads untrusted content all day. The design makes that node cheap to lose.</p>
     </div>
-    <div class="cols">
-      <div>
-        <h3>What holds</h3>
-        <ul>
-          <li><strong>Push only.</strong> The master connects to nodes over OpenSSH with its own key and pinned host keys. Nodes get no shell, key or token for the master; there is no node-to-master channel, not even for enrolment.</li>
-          <li><strong>Isolation by tailnet policy.</strong> Your devices may reach <code>tag:fleet-node</code> on port 22; the tag may reach nothing inside the tailnet. <code>fleet init master</code>, <code>policy check</code> and <code>doctor</code> verify the live policy, and <code>doctor</code> probes from the nodes themselves with <code>nc</code>.</li>
-          <li><strong>Single-use invites.</strong> One hour, one nonce, claimed atomically by the master. The auth key is read from a hidden prompt or a 0600 file, never from argv; in Docker it arrives as a bind-mounted file that never shows in <code>docker inspect</code>.</li>
-          <li><strong>Secrets never enter git, argv or a log.</strong> Vault at 0700/0600, HMAC digest instead of values, API credentials read from files by <code>lib/api.py</code> or <code>gh</code>. <code>fleet config publish</code> runs a secret scan on every run and aborts on a hit.</li>
-          <li><strong>Per-node keys, revocable alone.</strong> Each node has its own Tailscale device and three deploy keys: code and config read-only, memory read-write but staged only inside <code>nodes/&lt;name&gt;/</code>.</li>
-          <li><strong>Kick is complete and retried.</strong> <code>fleet kick</code> kills a running provision, stops the node's jobs, deletes the device and the deploy keys, and prints the secrets the node held. Anything that fails is retried by every reconcile; a node missing for the grace period is revoked the same way.</li>
-        </ul>
-      </div>
-      <div>
-        <h3>What it does not do</h3>
-        <ul>
-          <li><strong>No credential wiping.</strong> A kicked or vanished node keeps the secrets, files and clones it had. Kick cuts access and names what to rotate; you rotate.</li>
-          <li><strong><code>launchctl setenv</code> on macOS.</strong> With a local CLIProxyAPI, publishing <code>ANTHROPIC_AUTH_TOKEN</code> into the launchd session puts the token in one process's argv for milliseconds, local user only. Without <code>cliproxy</code>, or in remote mode, no token is published.</li>
-          <li><strong>The master is not protected from local processes</strong> running as your user; they can run <code>fleet</code> themselves. Keep the vault on an encrypted disk.</li>
-          <li><strong>Shared memory is a prompt-injection return path.</strong> Instructions mitigate; they do not prevent a model from following a planted note. Review <code>nodes/**</code> before promoting anything.</li>
-          <li><strong>Shared logins share limits.</strong> One <code>CLAUDE_CODE_OAUTH_TOKEN</code> for every node; CLIProxyAPI OAuth files copied to every <code>full</code> node, so a refresh on one can log out the others.</li>
-          <li><strong>A stolen invite</strong> still enrols one node with the invited profile until it expires. <code>fleet nodes</code> shows it; <code>fleet kick</code> removes it.</li>
-        </ul>
-      </div>
-    </div>
-    <p class="note">The full threat model, the mechanisms table, the known limits and the rotation checklist are in <a href="https://github.com/tkreis/fleeter/blob/main/docs/SECURITY.md">docs/SECURITY.md</a>.</p>
+    <ul class="guards">
+      <li><strong>Push only, from the master.</strong> The master connects to nodes over OpenSSH with its own key and pinned host keys. Every change flows from the master outward, including enrolment.</li>
+      <li><strong>Nodes are isolated on the tailnet.</strong> Each node carries <code>tag:fleet-node</code>, and your own devices may reach it on port 22. <code>fleet doctor</code> checks the live policy and probes from the nodes themselves.</li>
+      <li><strong>Invites are single use.</strong> One pre-authorised Tailscale key, good for one machine and one hour, claimed by the master exactly once. The code is read from a hidden prompt.</li>
+      <li><strong>Every node has its own keys.</strong> Its own Tailscale device and its own deploy keys: code and config read-only, memory writable inside its own folder. <code>fleet kick</code> revokes all of them together and lists the secrets that node held, so you know what to rotate.</li>
+      <li><strong>Secrets live in an encrypted vault on the master</strong> (age, key in your macOS Keychain). They're decrypted only in memory while being sent to a node over SSH, and land in a file only your user can read. The vault stays outside git, and <code>fleet config publish</code> scans for secrets before every push.</li>
+    </ul>
+    <p class="note">The full threat model, the mechanisms table and the rotation checklist are in <a href="https://github.com/tkreis/fleeter/blob/main/docs/SECURITY.md">docs/SECURITY.md</a>.</p>
   </div>
 </section>
 
@@ -411,82 +372,39 @@
   <div class="wrap">
     <h2>Commands</h2>
     <div class="prose intro">
-      <p>Every command accepts <code>--help</code> and does nothing else; an unknown flag or extra argument exits 2 before anything runs. Nothing destructive happens without <code>--yes</code> or a typed confirmation, and running anything twice changes nothing the second time.</p>
+      <p>Every command accepts <code>--help</code>. Destructive ones ask for <code>--yes</code> or a typed confirmation, and running anything twice gives the same result as running it once.</p>
     </div>
 
     <pre class="term" aria-label="Example output of fleet list"><span class="p">$</span> fleet list
-NAME      OS      STATE         ONLINE  PROFILE  TOOLS                     MEMORY    APPLIED
-studio    macos   provisioned   yes     full     claude:ok codex:ok …      ok        12m
-mini      macos   provisioned   yes     full     claude:ok cursor:ok       ok        12m
-buildbox  linux   provisioned   no      full     claude:ok codex:<span class="hi">login</span>    ok        3d
-ci-1      linux   provisioned   yes     minimal  claude:ok                 ok        2h
-dock-a3f  docker  <span class="hi">provisioning</span>  yes     minimal  claude:…                  -         -
-<span class="dim">5 nodes, 4 online. reconciled 1m ago; next sync in 4m. fleet list --json for the same as JSON.</span></pre>
+NAME      HOST                 ONLINE  STATE         SYNCED  LAST PROVISION  TOOLS                MEMORY  PROXY  FLEET
+studio    studio.tn.ts.net     yes     provisioned   yes     12m ago         claude codex cursor  ok      ok     0.3.0
+mini      mini.tn.ts.net       yes     provisioned   yes     12m ago         claude cursor        ok      ok     0.3.0
+buildbox  buildbox.tn.ts.net   no      provisioned   yes     3d ago          claude codex         ok      -      0.3.0
+ci-1      ci-1.tn.ts.net       yes     provisioned   <span class="hi">no</span>      2h ago          claude               ok      -      0.3.0
+dock-a3f  dock-a3f.tn.ts.net   yes     <span class="hi">provisioning</span>  -       -               claude               -       -      -
+<span class="dim">5 nodes, 4 online. last sync 1m ago, next in 4m. fleet list --json for the same as JSON.</span></pre>
 
     <table class="cmds">
       <thead><tr><th>Command</th><th>What it does</th></tr></thead>
       <tbody>
         <tr class="group"><td colspan="2">On the master</td></tr>
-        <tr><td>fleet init master --config-dir DIR</td><td>Preflight, vault and keys, tailnet policy merge, reconcile timer. Idempotent.</td></tr>
+        <tr><td>fleet init master --config-dir DIR</td><td>Preflight, vault and keys, tailnet policy merge, sync schedule. Idempotent.</td></tr>
         <tr><td>fleet invite --name N [--user U] [--ephemeral]</td><td>Single-use join one-liner and invite code, valid one hour.</td></tr>
-        <tr><td>fleet nodes [--live]</td><td>Registry: name, id, online, state, profile, age; <code>--live</code> adds tool states over SSH.</td></tr>
-        <tr><td>fleet list [--json]<span class="new">0.3.0</span></td><td>Status of every node in one table, or as JSON. Alias <code>fleeter list</code>.</td></tr>
-        <tr><td>fleet ssh NODE [COMMAND]</td><td>Shell or command on a node with its fleet environment loaded.</td></tr>
+        <tr><td>fleet list [--json]</td><td>Every node in one table: online, state, synced, last provision, tools, memory, proxy, version.</td></tr>
+        <tr><td>fleet sync</td><td>Pull the master's repos, enrol new machines, push updates to every node. Runs on a schedule.</td></tr>
+        <tr><td>fleet ssh NODE [CMD]</td><td>Shell on a node, or run a command there with its fleet environment loaded.</td></tr>
         <tr><td>fleet secrets set NAME [--profile P]</td><td>Store a secret from a hidden prompt or stdin. <code>secrets list</code> shows names only.</td></tr>
-        <tr><td>fleet files add PATH</td><td>Mirror a file under <code>$HOME</code> to nodes, same path, 0600.</td></tr>
-        <tr><td>fleet proxy import [DIR]</td><td>Copy CLIProxyAPI config and OAuth files into the full profile.</td></tr>
-        <tr><td>fleet config publish [--no-capture]</td><td>Capture harness and skills from the master, secret scan, commit, push.</td></tr>
-        <tr><td>fleet reconcile</td><td>Enrol new peers, provision changed digests, retry cleanups, revoke vanished nodes. Timer, 2 min.</td></tr>
-        <tr><td>fleet sync<span class="new">0.3.0</span></td><td>Scheduled on the master: pull its own repos, reconcile, push updates to every node.</td></tr>
-        <tr><td>fleet provision NODE</td><td>Push code, config, secrets and files now, then <code>fleet apply</code> remotely.</td></tr>
+        <tr><td>fleet config publish</td><td>Capture harness and skills from the master, secret scan, commit, push.</td></tr>
+        <tr><td>fleet skill install</td><td>Install the fleet agent skill (<code>SKILL.md</code>) on the master.</td></tr>
         <tr><td>fleet kick NODE</td><td>Revoke: stop jobs, delete the device and deploy keys, list secrets to rotate.</td></tr>
-        <tr><td>fleet policy check | apply</td><td>Verify the live tailnet policy; merge the fleet rules in with a diff and a typed confirmation.</td></tr>
-        <tr><td>fleet doctor</td><td>Vault modes, tokens, policy, GitHub access, timers, and an isolation probe from every node.</td></tr>
-        <tr><td>fleet t3 setup | status | revoke [NODE]</td><td>Opt-in T3 Code access to a node with a restricted key.</td></tr>
-        <tr><td>docker/spawn.sh N</td><td>N ephemeral containers, one invite each.</td></tr>
+        <tr><td>fleet doctor</td><td>Vault, tokens, policy, GitHub access, schedule, and an isolation probe from every node.</td></tr>
         <tr class="group"><td colspan="2">On a node</td></tr>
-        <tr><td>fleet join</td><td>Bootstrap; embedded in the invite one-liner. Uses sudo once.</td></tr>
-        <tr><td>fleet apply</td><td>Converge tools, instructions, skills, env, timers, memory clone.</td></tr>
-        <tr><td>fleet pull | update | memory sync</td><td>The timers: repos every 15 min, vendor updaters daily, memory every 5 min.</td></tr>
-        <tr><td>fleet login [TOOL]</td><td>Device-code login for a tool whose status is <code>login</code>.</td></tr>
         <tr><td>fleet status [--json]</td><td>Versions, logins, revisions, memory state, token ages.</td></tr>
-        <tr><td>fleet leave</td><td>Stop timers and processes, leave the tailnet. Files stay.</td></tr>
+        <tr><td>fleet login [TOOL]</td><td>Device-code login for a tool whose status is <code>login</code>.</td></tr>
       </tbody>
     </table>
 
-    <div class="note">
-      <p><strong>Coming in 0.3.0</strong>, being built now: <code>fleet list</code> and <code>fleet sync</code> above, and an agent skill (<code>SKILL.md</code>) so a coding agent on the master can drive the fleet safely, within the same confirmations and limits as you.</p>
-    </div>
-  </div>
-</section>
-
-<section class="section" id="fit">
-  <div class="wrap">
-    <h2>Is it for you</h2>
-    <div class="cols">
-      <div>
-        <h3>Built for exactly this</h3>
-        <ul>
-          <li>One operator: you, your accounts, your machines. No multi-user model, no RBAC, no shared master.</li>
-          <li>Tailscale. Master and nodes are on your tailnet; fleeter manages the policy rules and uses the Tailscale API to mint keys and delete devices.</li>
-          <li>macOS 13+, Debian, Ubuntu, Fedora, Arch, and containers from the shipped image.</li>
-          <li>GitHub for the private config repo and the optional memory repo, with per-node deploy keys.</li>
-          <li>Agents that take their login from the environment: <code>CLAUDE_CODE_OAUTH_TOKEN</code>, <code>CURSOR_API_KEY</code>, API keys or a device-code login per node.</li>
-          <li>You want to try it before trusting it: <code>bash tests/e2e.sh</code> runs master and two nodes offline, with Docker only.</li>
-        </ul>
-      </div>
-      <div>
-        <h3>Not for</h3>
-        <ul>
-          <li>Teams. Several people sharing a master, or anything with roles.</li>
-          <li>Windows or WSL, as master or node.</li>
-          <li>Another VPN, or nodes on the plain internet.</li>
-          <li>GitLab or Gitea for the config repo, for now. A public code repo on any host works.</li>
-          <li>GUI logins. Claude desktop, ChatGPT desktop, the Cursor IDE: fleeter opens them and reports the manual step.</li>
-          <li>A control panel. There is <code>fleet nodes --live</code>, <code>fleet kick</code> and the Tailscale admin console on your phone.</li>
-        </ul>
-      </div>
-    </div>
+    <p class="note">Every command and flag, including <code>provision</code>, <code>files</code>, <code>proxy</code>, <code>policy</code>, <code>t3</code> and <code>leave</code>, is in the <a href="https://github.com/tkreis/fleeter#command-reference">README command reference</a>.</p>
   </div>
 </section>
 
@@ -494,7 +412,7 @@ dock-a3f  docker  <span class="hi">provisioning</span>  yes     minimal  claude:
 
 <footer class="wrap foot">
   <span>fleeter is MIT licensed. <a href="https://github.com/tkreis/fleeter">Source on GitHub</a></span>
-  <span class="mono">git clone https://github.com/tkreis/fleeter.git</span>
+  <span class="mono">curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash</span>
 </footer>
 </body>
 </html>

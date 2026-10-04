@@ -115,9 +115,9 @@ h1, h2, h3 { font-weight: 400; margin: 0; letter-spacing: -0.005em; }
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-  gap: 48px;
+  gap: 36px 48px;
   align-items: center;
-  padding-block: 64px 56px;
+  padding-block: 48px 56px;
 }
 .hero h1 {
   font-size: clamp(34px, 4.4vw, 52px);
@@ -141,22 +141,22 @@ h1, h2, h3 { font-weight: 400; margin: 0; letter-spacing: -0.005em; }
 .btn:hover { filter: brightness(0.92); }
 .btn-ghost { background: transparent; color: var(--ink); border-color: var(--ink); }
 .btn-ghost:hover { background: var(--shoal); filter: none; }
-.facts {
-  margin: 26px 0 0; padding: 0; list-style: none;
-  font-family: var(--mono); font-size: 13px; color: var(--sea); line-height: 1.7;
-}
+.install { grid-column: 1 / -1; }
+.install-label { display: block; font-family: var(--mono); font-size: 12px; color: var(--sea); margin-bottom: 8px; }
+.install .term { font-size: 15px; padding: 16px 20px 18px; white-space: pre-wrap; overflow-wrap: break-word; }
+.install .term .p { user-select: none; }
 .chart { width: 100%; height: auto; display: block; }
 
 @media (max-width: 880px) {
-  .hero { grid-template-columns: 1fr; gap: 28px; padding-block: 40px 36px; }
+  .hero { grid-template-columns: minmax(0, 1fr); gap: 28px; padding-block: 40px 36px; }
   .hero h1 { max-width: 18ch; }
+  .install .term { font-size: 13.5px; }
 }
 
 /* Chart details */
 
 .chart .label { font-family: var(--mono); font-size: 13px; fill: var(--ink); }
 .chart .sub { font-family: var(--mono); font-size: 10.5px; fill: var(--sea); }
-.chart .sounding { font-family: var(--mono); font-size: 10px; fill: var(--sea); opacity: 0.8; }
 .chart .flare { animation: flare 6s ease-in-out infinite; transform-origin: 94px 272px; }
 @keyframes flare {
   0%, 100% { opacity: 0.25; transform: scale(1); }
@@ -209,18 +209,12 @@ figcaption { font-size: 14px; color: var(--sea); margin-top: 12px; max-width: va
 @media (max-width: 880px) { .features { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .features { grid-template-columns: 1fr; gap: 28px; } }
 
-/* Two-column text blocks */
+/* Security statements */
 
-.cols {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 36px 56px;
-}
-.cols h3 { font-size: 22px; margin-bottom: 14px; }
-.cols ul { margin: 0; padding-left: 1.1em; }
-.cols li { margin-bottom: 10px; }
-.cols li:last-child { margin-bottom: 0; }
-@media (max-width: 720px) { .cols { grid-template-columns: 1fr; } }
+.guards { margin: 0; padding: 0; list-style: none; max-width: var(--measure); }
+.guards li { border-top: 1px solid var(--rule); padding: 14px 0; }
+.guards li:last-child { border-bottom: 1px solid var(--rule); }
+.guards strong { font-weight: 400; font-style: italic; }
 
 .split {
   display: grid;
@@ -235,8 +229,8 @@ figcaption { font-size: 14px; color: var(--sea); margin-top: 12px; max-width: va
 .steps {
   counter-reset: step;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 24px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 32px;
   margin: 40px 0 0; padding: 0; list-style: none;
   position: relative;
 }
@@ -252,7 +246,7 @@ figcaption { font-size: 14px; color: var(--sea); margin-top: 12px; max-width: va
 }
 .steps li::after {
   content: "";
-  position: absolute; top: 15px; left: 38px; right: -24px;
+  position: absolute; top: 15px; left: 38px; right: -32px;
   border-top: 1px dashed var(--sea);
 }
 .steps li:last-child::after { display: none; }
@@ -297,7 +291,6 @@ figcaption { font-size: 14px; color: var(--sea); margin-top: 12px; max-width: va
 .cmds th { font-weight: 400; font-style: italic; color: var(--sea); border-top: 0; padding-top: 0; }
 .cmds td:first-child { white-space: nowrap; font-family: var(--mono); font-size: 13.5px; width: 34%; }
 .cmds tbody tr.group td { border-top: 1px solid var(--ink); padding-top: 18px; font-family: var(--serif); font-size: 17px; white-space: normal; }
-.cmds .new { font-family: var(--mono); font-size: 11px; color: var(--light); border: 1px solid var(--light); border-radius: 2px; padding: 1px 5px; margin-left: 8px; vertical-align: middle; }
 
 @media (max-width: 640px) {
   .cmds, .cmds tbody, .cmds tr, .cmds td { display: block; width: 100%; }

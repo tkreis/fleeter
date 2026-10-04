@@ -233,7 +233,8 @@ fleet invite --name studio            # prints a one-line command and an invite 
 
 On the Mac: paste the one-liner in a terminal, paste the code when asked (it is
 read hidden, never from argv). `fleet join` installs Homebrew and Tailscale if
-missing, enables Remote Login (key-only, verified with `sshd -T`), adds the
+missing, enables Remote Login (key-only, verified with `sshd -T`), switches
+system sleep off on the charger (`pmset -c`, see "Keep nodes awake"), adds the
 master's key, generates the deploy keys and writes `~/.config/fleet/enrol.json`.
 Then it waits. Within two minutes the master's `reconcile` timer enrols the
 node, registers its deploy keys, pushes code, config, secrets and files, and
@@ -250,8 +251,44 @@ fleet invite --name buildbox --user ubuntu
 
 `fleet join` uses `sudo` once for apt/dnf/apk/pacman packages, Tailscale,
 `openssh-server`, docker-ce and the browser (both only when the fleet's tools
-need them), and `loginctl enable-linger`. After that nothing on the node runs
-as root; timers are systemd user units (or cron).
+need them), `loginctl enable-linger`, and masking the systemd sleep targets
+(see "Keep nodes awake"). After that nothing on the node runs as root; timers
+are systemd user units (or cron).
+
+### Keep nodes awake
+
+A node that sleeps is gone: Tailscale cannot wake it, the master's provision
+times out and its memory stops syncing. With `FLEET_KEEP_AWAKE=1` (the
+default) nodes never enter system sleep; the **master is never touched** (it
+may sleep) and containers have nothing to do.
+
+| | `fleet join` (once, with `sudo`) | `fleet apply` (every run, no root) |
+|---|---|---|
+| macOS | `pmset -c sleep 0 disksleep 0 womp 1 autorestart 1` — the charger profile only, so a MacBook on battery still sleeps; `displaysleep` is never changed, the screen may turn off. `womp` = wake for network access, `autorestart` = power back on after an outage. | LaunchAgent `dev.fleet.awake` running `/usr/bin/caffeinate -i -m -s` (`KeepAlive`, `RunAtLoad`): no idle, disk or system sleep while you are logged in. Removed by `fleet leave` and by the next apply after `FLEET_KEEP_AWAKE=0`. |
+| Linux | `systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target` (systemd only) | nothing privileged; apply only points back to join when the targets are not masked |
+
+Both record `~/.config/fleet/power_done`; `fleet status` shows `awake on`
+(macOS: the agent is loaded or `pmset -g custom` says `sleep 0` on AC; Linux:
+`sleep.target` is masked), `off`, or `n/a` on the master and in containers.
+`fleet list --json` carries the same value per node.
+
+Worth knowing on a Mac: a laptop with the lid closed and no external display
+still sleeps (macOS clamshell rule — keep the lid open or plug a display in).
+The agent needs a logged-in user; after a reboot of a FileVault Mac someone has
+to log in once before anything runs (`autorestart` brings the Mac back up, and
+whether it logs in automatically is your choice in System Settings → Users &
+Groups; fleet never changes login settings).
+
+Switching off: set `FLEET_KEEP_AWAKE=0` in `fleet.conf` (the config repo for
+the whole fleet, or `~/.config/fleet/fleet.conf` on one node) and let the next
+apply remove the agent. The one-off root settings stay until you undo them —
+macOS `sudo pmset -c sleep 1 disksleep 10 womp 0 autorestart 0` (or any values
+you like; `pmset -g custom` shows the current ones), Linux `sudo systemctl
+unmask sleep.target suspend.target hibernate.target hybrid-sleep.target`; then
+`rm ~/.config/fleet/power_done` if you want a later join to redo them. The
+join step honours the fleet's setting through the invite code, and
+`FLEET_KEEP_AWAKE=0` in the environment of the one-liner skips it for just that
+machine.
 
 ### Spin up throwaway Docker nodes
 
@@ -755,6 +792,7 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_CAPTURE_AGENT_EXCLUDE` | `""` | Claude agent files (basename without `.md`) not captured. |
 | `FLEET_CAPTURE_AGENT_MARKERS` | `""` | `;`-separated text markers; an agent file containing one is not captured. |
 | `FLEET_CAPTURE_RULE_DROP` | `""` | Extra words that drop a Codex `prefix_rule` on capture. |
+| `FLEET_KEEP_AWAKE` | `1` | Nodes never system-sleep: macOS gets the `dev.fleet.awake` LaunchAgent (`caffeinate -i -m -s`) from apply and `pmset -c sleep 0 disksleep 0 womp 1 autorestart 1` from join; Linux join masks the systemd sleep targets. Never the master, never containers. `0` removes the agent on the next apply (root settings stay; see "Keep nodes awake"). Travels in the invite code. |
 | `FLEET_PULL_EVERY` / `FLEET_MEMORY_EVERY` / `FLEET_UPDATE_EVERY` / `FLEET_RECONCILE_EVERY` | `15` / `5` / `1440` / `2` | Timer intervals in minutes (nodes: pull, memory, update; master: memory, reconcile). |
 | `FLEET_SYNC_EVERY` | `30` | Minutes between `fleet sync` runs on the master (fast-forward checkouts, reconcile, tool push). `fleet schedule install` applies a change. |
 | `FLEET_PUSH_TOOLS_EVERY` | `1440` | Minutes between `fleet update` pushes to the online nodes from `fleet sync`; `0` = never push tool updates from the master. |
@@ -829,12 +867,14 @@ Node:
 ~/.config/fleet/applied, applied_at, applied_commit (<code>+<config>), status.json, memory.state (ok|conflict|missing|off)
 ~/.config/fleet/manifest, harness.manifest, harness.claude-mcp   what fleet owns, for cleanup
 ~/.config/fleet/privileged_done  join finished the root steps; locks/apply; logs/<job>.log; daemon.pid
+~/.config/fleet/power_done       join switched system sleep off (`<UTC> macos:pmset` or `linux:mask`; FLEET_KEEP_AWAKE)
 ~/.ssh/fleet_code, fleet_config, fleet_memory (+ .pub); ~/.ssh/config block `# >>> fleet >>>` (github-fleet-* aliases)
 ~/.ssh/authorized_keys           the master key (join) and, with T3 access, the restricted `fleet-t3-client` line
 ~/.t3/runtime/versions/<v>/t3    T3's own CLI archive, installed by T3's SSH flow on first connect; ~/.t3/ssh-launch/<key>/
 ~/fleet-memory/                  memory vault (when configured); $FLEET_CLIPROXY_DIR (cliproxy plug-in, default ~/cli-proxy-api)
 ~/.zshrc, ~/.zshenv, ~/.bashrc, ~/.bash_profile, ~/.profile   one marker block each (whichever exist) that sources env.sh
 ~/Library/LaunchAgents/dev.fleet.{pull,memory,update}.plist   or ~/.config/systemd/user/fleet-*.timer, or crontab lines `# fleet:<job>`
+~/Library/LaunchAgents/dev.fleet.awake.plist                  macOS only: caffeinate -i -m -s while FLEET_KEEP_AWAKE=1 (in the manifest)
 ```
 
 Harness files fleet writes (and the ownership rules) are listed in
@@ -916,8 +956,8 @@ logged in to Tailscale and reachable by you; nodes never need the master to
 be awake except for enrolment, secrets and kick.
 
 **Does anything run as root?** Only `fleet join`, once, through `sudo`
-(packages, Tailscale, sshd, docker-ce, linger). Timers and `fleet apply` run as
-your user; the Docker image has no sudo at all.
+(packages, Tailscale, sshd, docker-ce, linger, the sleep settings). Timers and
+`fleet apply` run as your user; the Docker image has no sudo at all.
 
 **What about Windows, or WSL?** No. macOS and Linux (incl. containers) only.
 
@@ -997,6 +1037,13 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
 - **Mac: `could not enable Remote Login automatically`** — newer macOS needs
   Full Disk Access for the terminal app, or enable Remote Login in System
   Settings → General → Sharing and rerun the one-liner.
+- **A node keeps going offline / `unreachable` after a while** — it sleeps;
+  an asleep Mac cannot be woken over Tailscale. On the node `fleet status`
+  should say `awake on`; `off` means `FLEET_KEEP_AWAKE=0`, the join step was
+  skipped or failed (`~/.config/fleet/power_done` missing: rerun the
+  one-liner, or run the `pmset -c` / `systemctl mask` line from "Keep nodes
+  awake" by hand), or on a Mac nobody is logged in (the agent runs per user)
+  or the lid is closed without an external display.
 
 ## What fleeter does not do
 

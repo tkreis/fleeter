@@ -98,6 +98,7 @@ master's own agent memories reach the vault (`ok (3m)` = last sync 3 min ago).
 | Symptom in `fleet list` | Meaning | Next step |
 |---|---|---|
 | ONLINE `no` | the node is off or left the tailnet | wake it; after the grace period (1 h ephemeral, `FLEET_MISSING_GRACE_HOURS`) the master revokes its keys |
+| a node goes offline or `unreachable` on its own, repeatedly | it sleeps; an asleep Mac cannot be woken over Tailscale | once it is back: `fleet ssh NODE fleet status` must say `awake on` (`fleet list --json` has `awake` per node). `off` = `FLEET_KEEP_AWAKE=0`, or the join step failed (`~/.config/fleet/power_done` missing: rerun the join one-liner), or nobody is logged in on the Mac / its lid is closed (README "Keep nodes awake") |
 | TOOLS `unreachable` | online on the tailnet but SSH failed or took > 10 s | `fleet ssh NODE true`; check sshd and the master key on the node; `FLEET_LIST_SECS=30 fleet list` for a slow node |
 | STATE `provisioning` | a provision is running right now | wait; `tail -f ~/.config/fleet/reconcile.log` or `sync.log` on the master |
 | STATE `unknown` | tagged device the master never enrolled | invite expired or nonce mismatch: `fleet invite` again, rerun the one-liner; `FLEET_VERBOSE=1 fleet reconcile` explains |

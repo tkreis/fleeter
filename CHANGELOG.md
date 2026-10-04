@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.3 — 2026-10-04
+
+Nodes stay awake, so they stay reachable and keep syncing.
+
+### Added
+- `FLEET_KEEP_AWAKE` (default `1`; never the master, never containers).
+  macOS nodes: `fleet apply` installs the LaunchAgent `dev.fleet.awake`
+  (`/usr/bin/caffeinate -i -m -s`, `KeepAlive`, `RunAtLoad`; the display may
+  still sleep), removed by `fleet leave` and by the next apply after
+  `FLEET_KEEP_AWAKE=0`; `fleet join` additionally runs `sudo pmset -c sleep 0
+  disksleep 0 womp 1 autorestart 1` (charger profile only, `displaysleep`
+  untouched) so the node survives logout, reboots to the login window and
+  power loss. Linux nodes: `fleet join` masks `sleep.target suspend.target
+  hibernate.target hybrid-sleep.target` (systemd). Join records
+  `~/.config/fleet/power_done`, skips when `FLEET_KEEP_AWAKE=0` (the fleet's
+  value travels in the invite code as `keep_awake`; the environment of the
+  one-liner wins) and only warns when sudo is refused.
+- `fleet status` shows `awake on|off|n/a` (also in `--json`); `fleet list
+  --json` carries `awake` per node. README "Keep nodes awake" covers the
+  clamshell and FileVault caveats and how to undo the root settings.
+
 ## 0.3.2 — 2026-10-04
 
 The shared memory vault fills itself: every machine uploads its agents' own

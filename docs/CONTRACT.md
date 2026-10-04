@@ -47,17 +47,23 @@ step when the directory is missing.
    master's own login; `docker/spawn.sh` passes `--user fleet`) and prints one
    command line that contains the gzip+base64 of `lib/join.sh`. The join script
    then asks for the **invite code**: base64 of JSON
-   `{"v":1,"ts_auth_key","nonce","name","master_pubkey","master_user","tag","hostname_prefix","tools"}`
+   `{"v":1,"ts_auth_key","nonce","name","master_pubkey","master_user","tag","hostname_prefix","tools","keep_awake"}`
    (`hostname_prefix` = `FLEET_HOSTNAME_PREFIX`, a code without it means `fleet-`;
    `tools` = the master's `FLEET_TOOLS`, so `join_privileged` can skip the
    browser without `chrome` and docker-ce without `devtools`/`cliproxy`; a code
-   without it, or with an unparsable value, means "install everything").
+   without it, or with an unparsable value, means "install everything";
+   `keep_awake` = the master's `FLEET_KEEP_AWAKE` as `"0"`/`"1"`, absent means
+   `"1"`; `FLEET_KEEP_AWAKE` in the joining machine's environment wins).
    `FLEET_INVITE_CODE` env or `FLEET_INVITE_FILE` path skip the prompt (Docker).
 2. `lib/join.sh` (node, standalone — sources nothing) installs Tailscale if
    missing, runs `tailscale up --auth-key=file:<tmp> --advertise-tags=<tag>
    --hostname=<prefix><name>`, enables a key-only SSH server (verified with
    `sshd -T -C`), runs the privileged OS steps once (marker
-   `~/.config/fleet/privileged_done`), appends `master_pubkey` to
+   `~/.config/fleet/privileged_done`), switches system sleep off once unless
+   `keep_awake` is `0` (`join_power`: macOS `pmset -c sleep 0 disksleep 0 womp 1
+   autorestart 1`, Linux with systemd `systemctl mask sleep.target
+   suspend.target hibernate.target hybrid-sleep.target`; marker
+   `~/.config/fleet/power_done`, a failure only warns), appends `master_pubkey` to
    `~/.ssh/authorized_keys`, generates `~/.ssh/fleet_code`, `fleet_config`,
    `fleet_memory` (ed25519, no passphrase), writes the ssh aliases and
    `~/.config/fleet/enrol.json` (0600):
@@ -297,6 +303,10 @@ same, then `fleet leave`.
 ~/.config/fleet/applied          last applied digest; applied_at
 ~/.config/fleet/applied_commit   "<code HEAD>+<config HEAD>" last applied successfully (pull compares against it)
 ~/.config/fleet/privileged_done  join finished the privileged OS steps; plug-ins skip them
+~/.config/fleet/power_done       join switched system sleep off: `<UTC> macos:pmset` | `linux:mask` (FLEET_KEEP_AWAKE; join skips when present)
+~/Library/LaunchAgents/dev.fleet.awake.plist   macOS nodes, FLEET_KEEP_AWAKE=1: `/usr/bin/caffeinate -i -m -s`, KeepAlive + RunAtLoad,
+                                 written by apply (node_awake_apply; in the manifest), removed by leave and by apply with FLEET_KEEP_AWAKE=0;
+                                 never on the master or in a container
 ~/.config/fleet/manifest         files fleet owns (one path per line), for cleanup; harness.manifest, harness.claude-mcp
 ~/.config/fleet/status.json      written by apply/status
 ~/.config/fleet/memory.state     state=ok|conflict|missing|off (off: no memory remote configured), last_sync, detail,
@@ -425,6 +435,7 @@ registry. Keys are stable; new ones may be added.
   "memory": "ok",                 // ok | conflict | missing | off | null
   "proxy": "off",                 // ok | off (cliproxy not in the node's tools) | down | null
   "fleet": "0.3.0",               // the node's fleet version, null when not reached
+  "awake": "on",                  // 0.3.3: the node's `awake` (on | off | n/a); null when not reached, on the master row and unknown peers
   "missing_since": "", "cleanup_pending": [],
   "master": false                 // 0.3.2: true on the one row that describes the master itself
 }
@@ -454,6 +465,8 @@ a revoked tombstone), MEMORY (on the master row with the age of its last sync,
   "tools": {"claude": {"state": "ok", "detail": "2.1.0 env-token"}, "codex": {"state": "login", "detail": "run: fleet login codex"}},
   "memory": {"state": "ok|conflict|missing|off", "last_sync": "…", "detail": "…"},
   "timers": {"pull": true, "memory": true, "update": true},   // no "memory" key while the memory job is off
+  "awake": "on",                  // on | off | n/a — macOS: dev.fleet.awake loaded or `pmset -g custom` AC `sleep 0`;
+                                  // Linux: sleep.target masked; n/a on the master and in containers
   "token_age_days": {"CLAUDE_CODE_OAUTH_TOKEN": 12},
   "updated": "…"
 }
@@ -504,6 +517,14 @@ install`, rewritten and reloaded only when the content changed): `reconcile`
 configured, `memory` (`fleet memory sync`, FLEET_MEMORY_EVERY, log
 `$FLEET_HOME/memory.log`; removed again when the repo is unset); all honour
 `FLEET_NO_SCHEDULER` (files written, nothing loaded).
+
+Keep awake (`FLEET_KEEP_AWAKE`, default 1; `node_keep_awake` = the knob and
+not the master and not a container): on macOS apply converges the LaunchAgent
+`dev.fleet.awake` (`/usr/bin/caffeinate -i -m -s`, `KeepAlive`, `RunAtLoad`;
+same bootstrap and `FLEET_NO_SCHEDULER` rules as the job agents) and removes
+it when the knob is 0; `fleet leave` removes it. On Linux apply changes nothing
+(the sleep targets need root, which only join has) and logs a pointer when
+they are not masked. The master never gets any of it.
 
 ## Shared memory vault (`fleet memory sync`, nodes and master)
 

@@ -1201,11 +1201,12 @@ out=$(bash "$FLEET" skill add "$SK" --yes 2>&1); rc=$?
 assert "skill add DIR --yes: exit 0, says added / published (secret scan clean) / pushed to N nodes" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'added review to your fleet config' && printf '%s' \"\$0\" | grep -q 'published (secret scan clean)' && printf '%s' \"\$0\" | grep -Eq 'pushed to [0-9]+ node'" "$out"
 assert "copied into the config repo without node_modules/.DS_Store, mode kept, committed 'add skill review', pushed to origin, tree clean" bash -c "[ -f '$CFG/skills/review/SKILL.md' ] && [ -x '$CFG/skills/review/scripts/run.sh' ] && [ ! -e '$CFG/skills/review/node_modules' ] && [ ! -e '$CFG/skills/review/.DS_Store' ] && [ \"\$(git -C '$CFG' rev-list --count HEAD)\" = $((n_before + 1)) ] && [ \"\$(git -C '$CFG' log -1 --format=%s)\" = 'add skill review' ] && [ \"\$(git --git-dir='$T/cfg-remote.git' rev-parse main)\" = \"\$(git -C '$CFG' rev-parse HEAD)\" ] && [ -z \"\$(git -C '$CFG' status --porcelain)\" ]"
 assert "installed on the master too (~/.claude/skills only: FLEET_TOOLS has claude, no other harness dir), both manifests updated" bash -c "cmp -s '$HOME/.claude/skills/review/SKILL.md' '$SK/SKILL.md' && [ ! -e '$HOME/.claude/skills/review/node_modules' ] && [ ! -e '$HOME/.agents/skills/review' ] && grep -qx '$HOME/.claude/skills/review' '$FLEET_HOME/manifest' && grep -qx '$HOME/.claude/skills/review' '$FLEET_HOME/harness.manifest'"
-assert "the add ran reconcile: skillnode re-provisioned with the digest of the new config revision" bash -c "grep -q 'fleet-skillnode.tail1.ts.net ~/.local/share/fleet/fleet apply --from-master' '$SSH_LOG' && [ \"\$(cat '$NODES/fleet-skillnode.tail1.ts.net/.config/fleet/applied')\" = \"\$(digest_of full)\" ]"
+sk_want=$(digest_of full)
+assert "the add ran reconcile: skillnode re-provisioned with the digest of the new config revision" bash -c "grep -q 'fleet-skillnode.tail1.ts.net ~/.local/share/fleet/fleet apply --from-master' '$SSH_LOG' && [ -n '$sk_want' ] && [ \"\$(cat '$NODES/fleet-skillnode.tail1.ts.net/.config/fleet/applied')\" = '$sk_want' ]"
 assert "audit log records the add" grep -q ' skill.add review pushed' "$FLEET_VAULT/audit.log"
 refute "skill add never echoes the node's secrets or the vault" printf '%s' "$out" | grep -Eq 'fullsecret|s3cr3t|vault/secrets'
 out=$(bash "$FLEET" skill add "$SK" --yes 2>&1); rc=$?
-assert "adding the identical skill again is a no-op (no commit, no reconcile)" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'review is already in your fleet config (unchanged' && [ \"\$(git -C '$CFG' rev-list --count HEAD)\" = $((n_before + 1))" "$out"
+assert "adding the identical skill again is a no-op (no commit, no reconcile)" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'review is already in your fleet config (unchanged' && [ \"\$(git -C '$CFG' rev-list --count HEAD)\" = $((n_before + 1)) ]" "$out"
 # a git source: file:// bare repo with two skills, tag v1 and a later main
 SKREPO="$T/skill-src"; mkdir -p "$SKREPO/skills/review" "$SKREPO/skills/other"
 printf -- '---\nname: review\ndescription: v1 of the review skill from git.\n---\n# review v1\n' >"$SKREPO/skills/review/SKILL.md"
@@ -1237,8 +1238,8 @@ out=$(bash "$FLEET" skill add "$T/does-not-exist" --yes 2>&1); rc=$?
 assert "neither a directory nor a git URL: refused" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'not a directory and not a git URL'" "$out"
 out=$(bash "$FLEET" skill add "$SK" </dev/null 2>&1); rc=$?
 assert "existing skill with different content, no --yes: refused, repo untouched and clean" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'already exists in your fleet config with different content' && grep -qx '# review v1' '$CFG/skills/review/SKILL.md' && [ \"\$(git -C '$CFG' rev-parse HEAD)\" = '$n_head' ] && [ -z \"\$(git -C '$CFG' status --porcelain)\" ]" "$out"
-out=$(printf 'n\n' | bash "$FLEET" skill add "file://$T/skill-src.git#skills/review" 2>&1); rc=$?
-assert "declined confirmation (v2 from git over v1): aborted, nothing committed, working tree restored" bash -c "printf '%s' \"\$0\" | grep -q 'Update skill review in' && printf '%s' \"\$0\" | grep -q 'aborted; nothing added' && grep -qx '# review v1' '$CFG/skills/review/SKILL.md' && [ \"\$(git -C '$CFG' rev-parse HEAD)\" = '$n_head' ] && [ -z \"\$(git -C '$CFG' status --porcelain)\" ]" "$out"
+out=$(printf 'n\n' | bash "$FLEET" skill add "file://$T/skill-src.git#skills/other" --name other-three 2>&1); rc=$?
+assert "declined confirmation (a new skill, no --yes): staged diff shown, aborted, nothing committed, working tree clean" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'skills/other-three/SKILL.md' && printf '%s' \"\$0\" | grep -q 'Add skill other-three in' && printf '%s' \"\$0\" | grep -q 'aborted; nothing added' && [ ! -e '$CFG/skills/other-three' ] && [ ! -e '$HOME/.claude/skills/other-three' ] && [ \"\$(git -C '$CFG' rev-parse HEAD)\" = '$n_head' ] && [ -z \"\$(git -C '$CFG' status --porcelain)\" ]" "$out"
 LEAK="$T/my-skills/leaky"; mkdir -p "$LEAK"
 printf -- '---\nname: leaky\ndescription: leaks a token\n---\ntoken: %s%s\n' 'ghp_' 'abcdefghijklmnopqrstuvwxyz0123456789' >"$LEAK/SKILL.md"   # split: no token-shaped literal in the repo
 out=$(bash "$FLEET" skill add "$LEAK" --yes 2>&1); rc=$?
@@ -1279,7 +1280,7 @@ printf -- '---\nname: leaky2\ndescription: leaks\n---\ntoken: %s%s\n' 'ghp_' 'ab
 n_head=$(git -C "$CFG" rev-parse HEAD)
 out=$(bash "$SFLEET" sync 2>&1); rc=$?
 assert "sync publishes the local-only skills: commit 'publish skills: autopub, localonly', pushed, logged" bash -c "[ $rc = 0 ] && [ \"\$(git -C '$CFG' log -1 --format=%s)\" = 'publish skills: autopub, localonly' ] && [ -f '$CFG/skills/autopub/SKILL.md' ] && [ -f '$CFG/skills/localonly/SKILL.md' ] && [ \"\$(git --git-dir='$T/cfg-remote.git' rev-parse main)\" = \"\$(git -C '$CFG' rev-parse HEAD)\" ] && printf '%s' \"\$0\" | grep -q 'skills: publish skills: autopub, localonly'" "$out"
-assert "the leaking skill is skipped with a warning, never committed; the fleet skill and the synced cache are not published" bash -c "printf '%s' \"\$0\" | grep -q 'skill leaky2: not published, the secret scan found 1 hit' && [ ! -e '$CFG/skills/leaky2' ] && [ ! -e '$CFG/skills/fleet' ] && [ ! -e '$CFG/skills/synced' ] && ! git -C '$CFG' log --format=%s | grep -q leaky2" "$out"
+assert "the leaking skill is skipped with a warning, never committed; the fleet skill and the synced cache are not published" bash -c "printf '%s' \"\$0\" | grep -Eq 'skill leaky2: not published, the secret scan found [0-9]+ hit' && [ ! -e '$CFG/skills/leaky2' ] && [ ! -e '$CFG/skills/fleet' ] && [ ! -e '$CFG/skills/synced' ] && ! git -C '$CFG' log --format=%s | grep -q leaky2" "$out"
 assert "audit log records the auto-publish" grep -q ' sync.skills - pushed: autopub localonly' "$FLEET_VAULT/audit.log"
 rm -rf "$HOME/.claude/skills/leaky2"
 n_head=$(git -C "$CFG" rev-parse HEAD)

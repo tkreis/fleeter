@@ -27,8 +27,37 @@ database.
    ┌────────┼─────────┬──────────────┐               │
    ▼        ▼         ▼              ▼               │
  mac node  linux node docker node  docker node ──────┘
- tag:fleet-node: may reach the internet, may NOT reach the master or each other
+ tag:fleet-node: nodes cannot reach the master or each other
 ```
+
+## Install
+
+One line, on macOS or Linux, as your normal user (no sudo):
+
+```sh
+curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash
+```
+
+It clones fleeter into `~/.local/share/fleeter` and links `fleet` and
+`fleeter` (same command, two names) into `~/.local/bin`. Nothing else on the
+system changes. If `~/.local/bin` is not on your `PATH`, it prints the line to
+add. Then continue with [Quickstart](#quickstart) (`fleet init master`).
+
+- **Update:** run the same line again. It fast-forwards the checkout; on a
+  master, `fleet sync` also does this on its schedule.
+- **Read it first:** the script is [`install.sh`](install.sh) in this repo; the
+  same file is served at the URL above. Mirror without GitHub Pages:
+  `curl -fsSL https://raw.githubusercontent.com/tkreis/fleeter/main/install.sh | bash`
+- **Options** (environment variables before `bash`):
+  `FLEETER_DIR` (install dir, default `~/.local/share/fleeter`),
+  `FLEETER_BIN` (link dir, default `~/.local/bin`),
+  `FLEETER_REPO` (git URL, e.g. your fork),
+  `FLEETER_REF` (branch or tag, default `main`, e.g. `v0.3.1`).
+  Example: `curl -fsSL https://tkreis.github.io/fleeter/install.sh | FLEETER_REF=v0.3.1 bash`
+- **Requires:** `git`, `python3`, `curl`, `ssh`. It refuses to run as root, does
+  not touch a checkout with local changes, and never overwrites a `fleet` that
+  is not its own link.
+- **Remove:** see [Uninstall / teardown](#uninstall--teardown).
 
 ## Is this for you?
 

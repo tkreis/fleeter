@@ -1223,6 +1223,44 @@ EOF
   assert "macOS pmset failure: exit 0, warning names the agent fallback, no marker" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'warn.*pmset failed.*dev.fleet.awake' && [ ! -e '$h/.config/fleet/power_done' ]"
   out=$(FAKE_POWER_FAIL=1 jp linux join_power 2>&1); rc=$?
   assert "Linux mask failure: exit 0, warning with the manual command, no marker" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'warn.*mask failed.*systemctl mask' && [ ! -e '$h/.config/fleet/power_done' ]"
+  # lid-closed opt-in (FLEET_KEEP_AWAKE_LID): `pmset -a disablesleep 1` only with 1 and only on a laptop
+  cat >"$d/pmset" <<'EOF'
+#!/usr/bin/env bash
+echo "pmset $*" >>"$FAKE_POWER_LOG"
+[ -z "${FAKE_POWER_FAIL:-}" ] || exit 1
+case "$*" in "-g batt") if [ -n "${FAKE_LAPTOP:-}" ]; then echo " -InternalBattery-0 (id=1234567)	100%; charged; 0:00 remaining present: true"; else echo "Now drawing from 'AC Power'"; fi ;; esac
+exit 0
+EOF
+  # shellcheck disable=SC2016  # the fake expands FAKE_HW_MODEL itself
+  printf '#!/usr/bin/env bash\necho "${FAKE_HW_MODEL:-Mac15,3}"\n' >"$d/sysctl"
+  chmod 755 "$d/pmset" "$d/sysctl"
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(jp macos join_power 2>&1)
+  refute "default (FLEET_KEEP_AWAKE_LID=0) on a laptop: no disablesleep, battery not even asked" grep -Eq 'disablesleep|-g batt' "$FAKE_POWER_LOG"
+  assert "default: marker is macos:pmset" grep -q ' macos:pmset$' "$h/.config/fleet/power_done"
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(FLEET_KEEP_AWAKE_LID=1 FAKE_LAPTOP=1 jp macos join_power 2>&1); rc=$?
+  assert "FLEET_KEEP_AWAKE_LID=1 on a laptop: pmset -c first, then exactly pmset -a disablesleep 1" bash -c "[ '$rc' -eq 0 ] && grep -qx 'pmset -c sleep 0 disksleep 0 womp 1 autorestart 1' '$FAKE_POWER_LOG' && grep -qx 'pmset -a disablesleep 1' '$FAKE_POWER_LOG'"
+  assert "lid: marker records macos:pmset+lid; output names the undo" bash -c "grep -q ' macos:pmset+lid\$' '$h/.config/fleet/power_done' && printf '%s' '$out' | grep -q 'undo: sudo pmset -a disablesleep 0'"
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(FLEET_KEEP_AWAKE_LID=1 jp macos join_power 2>&1)
+  assert "FLEET_KEEP_AWAKE_LID=1 on a desktop (no battery, model Mac15,3): disablesleep skipped, says so, marker without +lid" bash -c "! grep -q disablesleep '$FAKE_POWER_LOG' && printf '%s' '$out' | grep -q 'lid setting skipped' && grep -q ' macos:pmset\$' '$h/.config/fleet/power_done'"
+  : >"$FAKE_POWER_LOG"
+  out=$(FLEET_KEEP_AWAKE_LID=1 FAKE_HW_MODEL=MacBookPro18,3 jp macos join_power 2>&1)
+  assert "rerun with the marker present and LID=1 on a MacBook (model match): only the lid step runs, marker gains +lid" bash -c "grep -qx 'pmset -a disablesleep 1' '$FAKE_POWER_LOG' && ! grep -q 'pmset -c' '$FAKE_POWER_LOG' && grep -q ' macos:pmset+lid\$' '$h/.config/fleet/power_done'"
+  : >"$FAKE_POWER_LOG"
+  out=$(FLEET_KEEP_AWAKE_LID=1 FAKE_LAPTOP=1 jp macos join_power 2>&1)
+  refute "rerun with +lid already recorded: nothing runs" grep -q disablesleep "$FAKE_POWER_LOG"
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(FLEET_KEEP_AWAKE_LID=1 FAKE_LAPTOP=1 jp linux join_power 2>&1)
+  refute "Linux never gets the lid step" grep -q disablesleep "$FAKE_POWER_LOG"
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(FAKE_LAPTOP=1 jp macos eval 'JOIN_KEEP_AWAKE_LID=1; join_power' 2>&1)
+  assert "keep_awake_lid 1 from the invite opts in" grep -qx 'pmset -a disablesleep 1' "$FAKE_POWER_LOG"
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(FLEET_KEEP_AWAKE_LID=0 FAKE_LAPTOP=1 jp macos eval 'JOIN_KEEP_AWAKE_LID=1; join_power' 2>&1)
+  refute "FLEET_KEEP_AWAKE_LID=0 in the environment beats 1 from the invite" grep -q disablesleep "$FAKE_POWER_LOG"
+  rm -f "$h/.config/fleet/power_done"
   # the invite carries keep_awake; an older master's code without it means 1
   code=$(python3 -c 'import base64,json
 print(base64.b64encode(json.dumps({"v":1,"ts_auth_key":"tskey-auth-test-FAKE","nonce":"n-power","name":"power",
@@ -1236,7 +1274,87 @@ print(base64.b64encode(json.dumps({"v":1,"ts_auth_key":"tskey-auth-test-FAKE","n
   # shellcheck disable=SC2016
   out=$(JC="$code" jp linux eval 'JOIN_CODE=$JC; join_decode >/dev/null 2>&1; echo "$JOIN_KEEP_AWAKE"')
   assert "join_decode: no keep_awake field (older master) means 1" [ "$out" = 1 ]
+  # shellcheck disable=SC2016
+  out=$(JC="$code" jp linux eval 'JOIN_CODE=$JC; join_decode >/dev/null 2>&1; echo "$JOIN_KEEP_AWAKE_LID"')
+  assert "join_decode: no keep_awake_lid field means 0" [ "$out" = 0 ]
+  code=$(python3 -c 'import base64,json
+print(base64.b64encode(json.dumps({"v":1,"ts_auth_key":"tskey-auth-test-FAKE","nonce":"n-power","name":"power",
+  "master_pubkey":"ssh-ed25519 AAAA fleet-master","master_user":"root","tag":"tag:fleet-node","keep_awake":"1","keep_awake_lid":"1"}).encode()).decode())')
+  # shellcheck disable=SC2016
+  out=$(JC="$code" jp linux eval 'JOIN_CODE=$JC; join_decode >/dev/null 2>&1; echo "$JOIN_KEEP_AWAKE $JOIN_KEEP_AWAKE_LID"')
+  assert "join_decode: keep_awake_lid 1 from the invite" [ "$out" = "1 1" ]
   unset -f jp
+  end
+}
+
+# Status on a (fake) Mac: lan_ips + ethernet from networksetup/ipconfig,
+# awake_lid from `pmset -g` SleepDisabled, the table line with the undo
+# command when the lid setting came from join, apply's pointer.
+case_lan_lid() {
+  begin "status: lan_ips/ethernet from networksetup + ipconfig, awake_lid from pmset -g, lid note and undo in the table, apply reports"
+  local h d="$WORK/lan-bin" out N_ENV=""
+  h=$(mk_home lanlid "")
+  mkdir -p "$d"
+  export FAKE_PMSET_LOG="$WORK/lan-pmset.log" FAKE_SLEEP_DISABLED=1 FAKE_PORTS="$WORK/lan-ports"
+  printf '#!/usr/bin/env bash\necho Darwin\n' >"$d/uname"
+  printf '#!/usr/bin/env bash\nexit 113\n' >"$d/launchctl"
+  cat >"$d/pmset" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$FAKE_PMSET_LOG"
+case "$*" in
+  "-g") printf 'System-wide power settings:\nCurrently in use:\n standby              1\n SleepDisabled        %s\n sleep                0\n' "$FAKE_SLEEP_DISABLED" ;;
+  "-g custom") printf 'Battery Power:\n sleep                1\nAC Power:\n sleep                0\n' ;;
+esac
+exit 0
+EOF
+  cat >"$d/networksetup" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = -listallhardwareports ] && cat "$FAKE_PORTS"
+exit 0
+EOF
+  cat >"$d/ipconfig" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = getifaddr ] || exit 1
+case "$2" in en0) echo 192.168.1.50 ;; en5) echo 10.0.0.5 ;; *) exit 1 ;; esac
+EOF
+  chmod 755 "$d"/*
+  printf '\nHardware Port: Wi-Fi\nDevice: en0\nEthernet Address: aa:bb\n\nHardware Port: Thunderbolt Ethernet\nDevice: en5\nEthernet Address: aa:bc\n\nHardware Port: Thunderbolt Bridge\nDevice: bridge0\nEthernet Address: aa:bd\n\nVLAN Configurations\n===================\n' >"$FAKE_PORTS"
+  : >"$FAKE_PMSET_LOG"
+  n() {   # n FUNC [ARGS] — a node.sh function on the fake Mac as a real node (not a container); extra env in N_ENV
+    # shellcheck disable=SC2086,SC2016
+    env HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_ROOT="$ROOT" FLEET_BIN="$h/.local/bin" PATH="$d:$PATH" $N_ENV \
+      bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/node.sh"; fleet_in_container() { return 1; }; "$@"' bash "$@"
+  }
+  assert "node_lan_info: both addresses, Ethernet yes (en5 is a Thunderbolt Ethernet port)" [ "$(n node_lan_info)" = "$(printf '192.168.1.50,10.0.0.5\tyes')" ]
+  printf '\nHardware Port: Wi-Fi\nDevice: en0\n\nHardware Port: Ethernet\nDevice: en1\n' >"$FAKE_PORTS"
+  assert "Wi-Fi only (the Ethernet port has no address): ethernet no" [ "$(n node_lan_info)" = "$(printf '192.168.1.50\tno')" ]
+  assert "awake_lid on from pmset -g SleepDisabled 1" [ "$(n node_awake_lid_state)" = on ]
+  N_ENV="FAKE_SLEEP_DISABLED=0"; out=$(n node_awake_lid_state); N_ENV=""
+  assert "awake_lid off from SleepDisabled 0" [ "$out" = off ]
+  printf '2026-10-04T00:00:00Z macos:pmset+lid\n' >"$h/.config/fleet/power_done"
+  n node_write_status >/dev/null 2>&1
+  out="$(jget "$h/.config/fleet/status.json" lan_ips)|$(jget "$h/.config/fleet/status.json" ethernet)|$(jget "$h/.config/fleet/status.json" awake_lid)|$(jget "$h/.config/fleet/status.json" lid_set_at_join)"
+  assert "status.json: lan_ips, ethernet, awake_lid, lid_set_at_join" [ "$out" = '["192.168.1.50"]|no|on|true' ]
+  out=$(n cmd_status 2>/dev/null)
+  assert "status table: awake on (lid: on, set at join; undo: sudo pmset -a disablesleep 0) and the lan line" bash -c "printf '%s' '$out' | grep -q '^awake *on  (lid: on, set at join; undo: sudo pmset -a disablesleep 0)\$' && printf '%s' '$out' | grep -q '^lan *192.168.1.50  ethernet no\$'"
+  out=$(n node_awake_lid_report 2>&1)
+  assert "apply with FLEET_KEEP_AWAKE_LID=0 and +lid set at join: points at the undo" bash -c "printf '%s' '$out' | grep -q 'set at join; FLEET_KEEP_AWAKE_LID is now 0); undo: sudo pmset -a disablesleep 0'"
+  printf 'FLEET_TOOLS=""\nFLEET_KEEP_AWAKE_LID=1\n' >"$h/.config/fleet/fleet.conf"   # a config key: fleet.conf, not the environment
+  N_ENV="FAKE_SLEEP_DISABLED=0"; out=$(n node_awake_lid_report 2>&1); N_ENV=""
+  assert "apply with FLEET_KEEP_AWAKE_LID=1 but sleep allowed: points at join / the manual command" bash -c "printf '%s' '$out' | grep -q 'rerun the join one-liner or: sudo pmset -a disablesleep 1'"
+  out=$(n node_awake_lid_report 2>&1)
+  assert "apply with the knob and the Mac in agreement: quiet" [ -z "$out" ]
+  printf 'FLEET_TOOLS=""\n' >"$h/.config/fleet/fleet.conf"
+  rm -f "$h/.config/fleet/power_done"
+  out=$(n cmd_status 2>/dev/null)
+  assert "lid on but not from join: note without 'set at join'" bash -c "printf '%s' '$out' | grep -q '^awake *on  (lid: on; undo: sudo pmset -a disablesleep 0)\$'"
+  # containers and Linux: n/a, no LAN probing of the container
+  out=$(HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_ROOT="$ROOT" PATH="$d:$PATH" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/node.sh"; node_awake_lid_state; node_lan_info' 2>&1)
+  assert "container: awake_lid n/a, no lan addresses" [ "$out" = "$(printf 'n/a\n\tno')" ]
+  fleet_as "$h" status --json >"$WORK/status-lanlid.json" 2>/dev/null
+  out="$(jget "$WORK/status-lanlid.json" awake_lid)|$(jget "$WORK/status-lanlid.json" lan_ips)|$(jget "$WORK/status-lanlid.json" ethernet)"
+  assert "fleet status --json on a container node: awake_lid n/a, lan_ips [], ethernet no" [ "$out" = 'n/a|[]|no' ]
+  unset -f n
   end
 }
 
@@ -1482,6 +1600,7 @@ case_daemon
 case_daemon_reexec
 case_schedules_noload
 case_awake
+case_lan_lid
 case_leave
 case_leave_tree
 case_sshd

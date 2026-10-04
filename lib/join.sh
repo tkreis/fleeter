@@ -103,6 +103,7 @@ JOIN_NONCE=""; JOIN_NAME=""; JOIN_MASTER_PUBKEY=""; JOIN_MASTER_USER=""; JOIN_TA
 JOIN_PREFIX="fleet-"                # tailscale hostname = prefix + name (FLEET_HOSTNAME_PREFIX on the master)
 JOIN_TOOLS=""                       # the master's FLEET_TOOLS (optional in the code; empty = install everything)
 JOIN_KEEP_AWAKE=1                   # the master's FLEET_KEEP_AWAKE (optional in the code; absent = 1)
+JOIN_KEEP_AWAKE_LID=0               # the master's FLEET_KEEP_AWAKE_LID (optional in the code; absent = 0)
 JOIN_TS=""; JOIN_TS_SUDO=0          # tailscale CLI path and whether it needs root
 
 join_cleanup() {
@@ -355,6 +356,8 @@ if not isinstance(tools, str) or not re.match(r"^[a-z0-9 _-]{0,200}$", tools):
     tools = ""
 # optional (older masters omit it): the master's FLEET_KEEP_AWAKE; only "0" switches it off
 awake = "0" if str(d.get("keep_awake", "1")).strip() == "0" else "1"
+# optional: the master's FLEET_KEEP_AWAKE_LID (no sleep with the lid closed); only "1" opts in
+lid = "1" if str(d.get("keep_awake_lid", "0")).strip() == "1" else "0"
 fd = os.open(sys.argv[1], os.O_WRONLY | os.O_TRUNC | os.O_CREAT, 0o600)
 os.write(fd, d["ts_auth_key"].strip().encode("utf-8"))
 os.close(fd)
@@ -363,6 +366,7 @@ for k in ("nonce", "name", "master_pubkey", "master_user", "tag"):
 print(prefix)
 print(" ".join(tools.split()))
 print(awake)
+print(lid)
 PY
   ) || j_die "could not decode the invite code" "ask the master for a fresh 'fleet invite'"
   {
@@ -374,6 +378,7 @@ PY
     IFS= read -r JOIN_PREFIX || JOIN_PREFIX=""     # the heredoc strips trailing empty lines:
     IFS= read -r JOIN_TOOLS || JOIN_TOOLS=""       # an empty prefix or tool list reads as end of input
     IFS= read -r JOIN_KEEP_AWAKE || JOIN_KEEP_AWAKE=1
+    IFS= read -r JOIN_KEEP_AWAKE_LID || JOIN_KEEP_AWAKE_LID=0
   } <<EOF
 $_fields
 EOF
@@ -669,6 +674,33 @@ join_privileged() {
 # for this node) wins over the master's value carried in the invite; default on.
 join_keep_awake() { [ "${FLEET_KEEP_AWAKE:-$JOIN_KEEP_AWAKE}" != 0 ]; }
 
+# join_keep_awake_lid — the lid-closed opt-in (FLEET_KEEP_AWAKE_LID, default
+# 0): this machine's environment first, else the master's value from the invite.
+join_keep_awake_lid() { [ "${FLEET_KEEP_AWAKE_LID:-$JOIN_KEEP_AWAKE_LID}" = 1 ]; }
+
+# join_is_laptop — a Mac with a battery: `pmset -g batt` lists an
+# InternalBattery, or the model name contains MacBook.
+join_is_laptop() {
+  if j_have pmset && pmset -g batt 2>/dev/null | grep -q InternalBattery; then return 0; fi
+  case "$(sysctl -n hw.model 2>/dev/null)" in *MacBook*) return 0 ;; esac
+  return 1
+}
+
+# join_power_lid — on a laptop with FLEET_KEEP_AWAKE_LID=1: `pmset -a
+# disablesleep 1`, which keeps a MacBook awake with the lid closed (the
+# clamshell rule otherwise puts it to sleep without an external display).
+# Prints "+lid" on success (recorded in power_done), nothing otherwise; a
+# refused sudo only warns. Not on desktops: nothing to gain, and the setting
+# would survive forever.
+join_power_lid() {
+  join_keep_awake_lid || return 0
+  if ! join_is_laptop; then j_ok "keep awake: lid setting skipped (no battery, not a laptop)"; return 0; fi
+  j_log "keep awake: pmset -a disablesleep 1 (FLEET_KEEP_AWAKE_LID=1: no sleep with the lid closed; undo: sudo pmset -a disablesleep 0)"
+  if j_root_try pmset -a disablesleep 1; then printf '+lid'
+  else j_warn "keep awake: pmset -a disablesleep 1 failed; a closed lid still sleeps this Mac (by hand: sudo pmset -a disablesleep 1)"; fi
+  return 0
+}
+
 # A node is only useful while it is reachable and syncing, so join (the one step
 # with root) switches system sleep off once and records ~/.config/fleet/power_done.
 #   macOS  `pmset -c sleep 0 disksleep 0 womp 1 autorestart 1`: the charger (AC)
@@ -685,14 +717,25 @@ join_keep_awake() { [ "${FLEET_KEEP_AWAKE:-$JOIN_KEEP_AWAKE}" != 0 ]; }
 # no sudo) warns and never fails the join — on macOS the agent still covers the
 # logged-in case. Rerunning join leaves settings the user changed since alone.
 join_power() {
-  local _marker="$HOME/.config/fleet/power_done" _what=""
+  local _marker="$HOME/.config/fleet/power_done" _what="" _prev _lid
   [ "$JOIN_CONTAINER" -eq 0 ] || return 0
   if ! join_keep_awake; then j_ok "keep awake: skipped (FLEET_KEEP_AWAKE=0)"; return 0; fi
-  if [ -f "$_marker" ]; then j_ok "keep awake: already done ($(cat "$_marker" 2>/dev/null))"; return 0; fi
+  if [ -f "$_marker" ]; then
+    _prev=$(cat "$_marker" 2>/dev/null)
+    j_ok "keep awake: already done ($_prev)"
+    # a later opt-in to the lid setting on a Mac that joined without it
+    if [ "$JOIN_OS" = macos ] && j_have pmset; then
+      case "$_prev" in *+lid*) ;; *)
+        _lid=$(join_power_lid)
+        [ -n "$_lid" ] && printf '%s%s\n' "$_prev" "$_lid" | join_write_atomic "$_marker" 0600 ;;
+      esac
+    fi
+    return 0
+  fi
   if [ "$JOIN_OS" = macos ]; then
     j_have pmset || { j_warn "keep awake: pmset not found; sleep settings unchanged"; return 0; }
     j_log "keep awake: pmset -c sleep 0 disksleep 0 womp 1 autorestart 1 (charger profile only; asks for your password)"
-    if j_root_try pmset -c sleep 0 disksleep 0 womp 1 autorestart 1; then _what=pmset
+    if j_root_try pmset -c sleep 0 disksleep 0 womp 1 autorestart 1; then _what="pmset$(join_power_lid)"
     else
       j_warn "keep awake: pmset failed; the dev.fleet.awake agent from fleet apply still covers the logged-in session (by hand: sudo pmset -c sleep 0 disksleep 0 womp 1 autorestart 1)"
       return 0

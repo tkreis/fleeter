@@ -803,6 +803,9 @@ node_write_status() {
   FLEET_ST_MEM_DIR="$FLEET_MEMORY_DIR" \
   FLEET_ST_SECRETS="$FLEET_HOME/secrets.env" \
   FLEET_ST_AWAKE="$(node_awake_state)" \
+  FLEET_ST_AWAKE_LID="$(node_awake_lid_state)" \
+  FLEET_ST_POWER_DONE="$(cat "$FLEET_HOME/power_done" 2>/dev/null || true)" \
+  FLEET_ST_LAN="$(node_lan_info)" \
   python3 - "$tmp" <<'PY' | atomic_write "$FLEET_HOME/status.json" 0600
 import json, os, re, sys, time
 e = os.environ.get
@@ -830,6 +833,7 @@ if os.path.isfile(sp):
             m = re.match(r"^(?:export\s+)?([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET)[A-Z0-9_]*)=", ln)
             if m:
                 ages[m.group(1)] = days
+lan = (e("FLEET_ST_LAN") or "").split("\t")
 print(json.dumps({
     "fleet": e("FLEET_ST_VERSION"), "name": e("FLEET_ST_NAME"), "os": e("FLEET_ST_OS"),
     "container": e("FLEET_ST_CONTAINER") == "true",
@@ -837,6 +841,10 @@ print(json.dumps({
     "code_commit": e("FLEET_ST_CODE_COMMIT") or None, "config_commit": e("FLEET_ST_COMMIT") or None,
     "applied_commit": e("FLEET_ST_APPLIED_COMMIT") or None,
     "tools": tools, "memory": memory, "timers": timers, "awake": e("FLEET_ST_AWAKE") or "n/a",
+    "awake_lid": e("FLEET_ST_AWAKE_LID") or "n/a",
+    "lid_set_at_join": "+lid" in (e("FLEET_ST_POWER_DONE") or ""),
+    "lan_ips": [ip for ip in lan[0].split(",") if ip],
+    "ethernet": lan[1] if len(lan) > 1 and lan[1] else "no",
     "token_age_days": ages,
     "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 }, indent=2))
@@ -860,7 +868,12 @@ for label, key, applied in (("code", "code_commit", ac[0]), ("config", "config_c
 m = d["memory"]
 print("memory    %s  last sync %s%s" % (m["state"], m.get("last_sync") or "-", ("  (" + m["detail"] + ")") if m.get("detail") else ""))
 print("timers    " + "  ".join("%s=%s" % (k, "on" if v else "off") for k, v in sorted(d["timers"].items())))
-print("awake     %s" % d.get("awake", "n/a"))
+lid_note = ""
+if d.get("awake_lid") == "on":
+    lid_note = "  (lid: on%s; undo: sudo pmset -a disablesleep 0)" % (", set at join" if d.get("lid_set_at_join") else "")
+print("awake     %s%s" % (d.get("awake", "n/a"), lid_note))
+if d.get("lan_ips"):
+    print("lan       %s  ethernet %s" % (" ".join(d["lan_ips"]), d.get("ethernet", "no")))
 for k, v in sorted(d["tools"].items()):
     print("tool      %-12s %-8s %s" % (k, v["state"], v["detail"]))
 for k, v in sorted(d["token_age_days"].items()):
@@ -1307,7 +1320,8 @@ node_awake_apply() {
   if fleet_is_master || fleet_in_container; then return 0; fi
   case "$(fleet_os)" in
     macos)
-      if node_keep_awake; then node_awake_install_macos; else node_awake_remove_macos; fi ;;
+      if node_keep_awake; then node_awake_install_macos; else node_awake_remove_macos; fi
+      node_awake_lid_report ;;
     linux)
       if node_keep_awake && have systemctl && [ "$(node_awake_state)" = off ]; then
         log "keep awake: sleep targets not masked; rerun the join one-liner or: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target"
@@ -1340,4 +1354,102 @@ node_awake_state() {
       if have systemctl && [ "$(systemctl is-enabled sleep.target 2>/dev/null)" = masked ]; then echo on; else echo off; fi ;;
     *) echo n/a ;;
   esac
+}
+
+# ---------- lid closed (FLEET_KEEP_AWAKE_LID) ----------
+
+# The pmset -c settings from join and the caffeinate agent do not stop a
+# MacBook from sleeping when its lid is closed without an external display
+# (macOS clamshell rule). `pmset -a disablesleep 1` does, and is root-only, so
+# `fleet join` sets it when FLEET_KEEP_AWAKE_LID=1 on a laptop (join_power_lid
+# in lib/join.sh) and records `+lid` in ~/.config/fleet/power_done. Apply
+# cannot sudo: it only reports, and status shows the undo command.
+
+# node_awake_lid_state — on | off | n/a: `pmset -g` lists `SleepDisabled 1`
+# while system sleep is disabled outright. macOS nodes only.
+node_awake_lid_state() {
+  if fleet_is_master || fleet_in_container; then echo n/a; return 0; fi
+  case "$(fleet_os)" in
+    macos)
+      have pmset || { echo n/a; return 0; }
+      if pmset -g 2>/dev/null | awk '$1 == "SleepDisabled" { f = ($2 == "1") } END { exit !f }'; then echo on; else echo off; fi ;;
+    *) echo n/a ;;
+  esac
+}
+
+# node_awake_lid_report — apply's pointer when the knob and the Mac disagree:
+# the setting is root-only, so apply never changes it.
+node_awake_lid_report() {
+  local state marker="$FLEET_HOME/power_done"
+  have pmset || return 0
+  state=$(node_awake_lid_state)
+  if [ "${FLEET_KEEP_AWAKE_LID:-0}" = 1 ] && [ "$state" = off ]; then
+    log "keep awake: FLEET_KEEP_AWAKE_LID=1 but sleep with the lid closed is still allowed; rerun the join one-liner or: sudo pmset -a disablesleep 1"
+  elif [ "${FLEET_KEEP_AWAKE_LID:-0}" != 1 ] && [ "$state" = on ] && grep -q '+lid' "$marker" 2>/dev/null; then
+    log "keep awake: lid-closed sleep is still disabled (set at join; FLEET_KEEP_AWAKE_LID is now 0); undo: sudo pmset -a disablesleep 0"
+  fi
+  return 0
+}
+
+# ---------- LAN addresses (fleet unlock) ----------
+
+# A FileVault Mac that restarted waits at its pre-boot prompt with no
+# Tailscale, so the master can only reach it over the LAN (`fleet unlock`,
+# apple_ssh_and_filevault(7)). Status therefore reports this node's LAN IPv4
+# addresses and whether one of them is on an Ethernet port (Wi-Fi is often
+# not up in pre-boot); the master records both in the registry.
+
+# node_lan_ifaces — "<device><TAB><hardware port>" per physical interface.
+# macOS: `networksetup -listallhardwareports` (ports such as "Ethernet",
+# "Thunderbolt Ethernet", "USB 10/100/1000 LAN", "Wi-Fi"; no utun/tailscale).
+# Linux: /sys/class/net, "Wi-Fi" when the interface has a wireless dir;
+# virtual interfaces (tailscale, docker, bridges, veth) skipped.
+node_lan_ifaces() {
+  local d
+  case "$(fleet_os)" in
+    macos)
+      have networksetup || return 0
+      networksetup -listallhardwareports 2>/dev/null | awk -F': ' '/^Hardware Port: / { p = $2 } /^Device: / { print $2 "\t" p }' ;;
+    linux)
+      for d in /sys/class/net/*; do
+        [ -e "$d" ] || continue
+        d=$(basename "$d")
+        case "$d" in lo|tailscale*|docker*|br-*|veth*|virbr*|utun*) continue ;; esac
+        if [ -d "/sys/class/net/$d/wireless" ]; then printf '%s\tWi-Fi\n' "$d"; else printf '%s\tEthernet\n' "$d"; fi
+      done ;;
+  esac
+  return 0
+}
+
+# node_iface_ip DEVICE — its IPv4 address, or nothing.
+node_iface_ip() {
+  case "$(fleet_os)" in
+    macos) ipconfig getifaddr "$1" 2>/dev/null || true ;;
+    linux)
+      if have ip; then ip -4 -o addr show dev "$1" scope global 2>/dev/null | awk '{ print $4; exit }' | cut -d/ -f1
+      elif have ifconfig; then ifconfig "$1" 2>/dev/null | awk '$1 == "inet" { sub(/^addr:/, "", $2); print $2; exit }'
+      fi ;;
+  esac
+  return 0
+}
+
+# node_lan_info — "<ip>[,<ip>...]<TAB>yes|no": every LAN IPv4 address and
+# whether one of them is on a port that is not Wi-Fi. Loopback, link-local and
+# the tailnet's CGNAT range (100.64/10) are never LAN addresses. Containers:
+# none (the master cannot unlock a container).
+node_lan_info() {
+  local dev port ip ips="" eth=no
+  if fleet_in_container; then printf '\tno\n'; return 0; fi
+  while IFS="$(printf '\t')" read -r dev port; do
+    [ -n "$dev" ] || continue
+    ip=$(node_iface_ip "$dev")
+    [ -n "$ip" ] || continue
+    case "$ip" in 127.*|169.254.*) continue ;; esac
+    case "$ip" in 100.*) if [ "$(printf '%s' "$ip" | cut -d. -f2)" -ge 64 ] && [ "$(printf '%s' "$ip" | cut -d. -f2)" -le 127 ]; then continue; fi ;; esac
+    ips="$ips${ips:+,}$ip"
+    case "$port" in *Wi-Fi*|*WLAN*|*Wireless*|*AirPort*) ;; *) eth=yes ;; esac
+  done <<EOF
+$(node_lan_ifaces)
+EOF
+  printf '%s\t%s\n' "$ips" "$eth"
 }

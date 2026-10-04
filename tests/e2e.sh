@@ -286,6 +286,24 @@ EOF
 assert "fleet list table: header and both rows (provisioned, synced yes)" bash -c "o=\$(mexec fleet list); printf '%s\n' \"\$o\" | head -1 | grep -Eq '^NAME +HOST +ONLINE +STATE +SYNCED +LAST PROVISION +TOOLS +MEMORY +PROXY +FLEET$' && printf '%s\n' \"\$o\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +yes +[0-9]+[mhd] ' && printf '%s\n' \"\$o\" | grep -Eq '^beta +fleet-beta +yes +provisioned +yes +[0-9]+[mhd] .* ok +off +[0-9.]+$'"
 assert "fleet list --offline: no ssh, reachable null, synced from the registry" bash -c "mexec fleet list --offline --json | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"alpha\"][\"reachable\"] is None and d[\"alpha\"][\"synced\"]==\"yes\" and d[\"alpha\"][\"applied\"][\"source\"]==\"registry\"'"
 
+# ======================================================================
+step "fleet sync: a config commit pushed from elsewhere is fast-forwarded on the master and provisioned to both nodes"
+# shellcheck disable=SC2016  # runs inside the container
+mexec bash -ec 'git clone -q /srv/repos/config.git "$HOME/cfg-other"
+  printf "\n## sync\n\nconfig sync marker\n" >> "$HOME/cfg-other/AGENTS.md"
+  git -C "$HOME/cfg-other" commit -qam "config via sync"; git -C "$HOME/cfg-other" push -q origin main' >"$WORK/cfg-other.log" 2>&1
+CFG_SYNC=$(mexec git --git-dir=/srv/repos/config.git rev-parse main)
+assert "the master's config checkout is behind the remote before sync" [ "$(mexec git -C $MHOME/fleet-config rev-parse HEAD)" != "$CFG_SYNC" ]
+mexec fleet sync >"$WORK/sync1.log" 2>&1; rc=$?
+assert "fleet sync exits 0" [ "$rc" = 0 ] || tail -20 "$WORK/sync1.log"
+assert "sync fast-forwarded the master's config checkout (clean, behind) and left the code checkout alone (already current)" bash -c "grep -q 'config: .* -> .* (origin/main)' '$WORK/sync1.log' && ! grep -q 'code: .* -> ' '$WORK/sync1.log' && [ \"\$(mexec git -C $MHOME/fleet-config rev-parse HEAD)\" = '$CFG_SYNC' ] && [ -z \"\$(mexec git -C $MHOME/fleet-config status --porcelain)\" ]"
+assert "sync provisioned both nodes with the new config: rendered CLAUDE.md carries the marker, registry applied_commit ends in the new config commit" bash -c "nfile $NA $MHOME/.claude/CLAUDE.md | grep -q 'config sync marker' && nfile $NB $MHOME/.claude/CLAUDE.md | grep -q 'config sync marker' && [ \"\${0#*+}\" = '$CFG_SYNC' ] && [ \"\${1#*+}\" = '$CFG_SYNC' ]" "$(mfile $VAULT/nodes/$IDA.json | jget applied_commit)" "$(mfile $VAULT/nodes/$IDB.json | jget applied_commit)"
+assert "first sync pushed tool updates to both online nodes and recorded the run" bash -c "grep -q 'tools: fleet update on 2 node(s): 2 ok' '$WORK/sync1.log' && mexec python3 -c 'import json,sys; json.load(open(sys.argv[1]))[\"tools_pushed\"]' $VAULT/sync.json"
+assert "audit: sync.ff config, sync.tools, provision alpha + beta ok" bash -c "a=\$(mfile $VAULT/audit.log); printf '%s' \"\$a\" | grep -q ' sync.ff config ' && printf '%s' \"\$a\" | grep -q ' sync.tools - 2/2 ok' && [ \"\$(printf '%s' \"\$a\" | grep -c ' provision alpha ok')\" -ge 2 ]"
+assert "fleet list after sync: both synced yes again" bash -c "mexec fleet list --json | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"alpha\"][\"synced\"]==\"yes\" and d[\"beta\"][\"synced\"]==\"yes\"'"
+mexec fleet sync >"$WORK/sync2.log" 2>&1; rc=$?
+assert "second sync: exit 0 and quiet (nothing to pull, nothing to provision, tools pushed recently)" bash -c "[ $rc = 0 ] && [ ! -s '$WORK/sync2.log' ]" || cat "$WORK/sync2.log"
+assert "master lock released after sync" mexec sh -c "! test -e $VAULT/locks/.sync"
 
 # ======================================================================
 step "node state after provision"

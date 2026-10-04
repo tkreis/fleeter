@@ -96,6 +96,7 @@ case "$cmd" in
   *"fleet pull --no-apply"*)      touch "$nh/.fleet-pulled"; exit 0 ;;
   *"fleet apply --from-master "*) mkdir -p "$nh/.config/fleet"; printf '%s' "${cmd##* }" >"$nh/.config/fleet/applied"; printf 'c0ffee+cafe\n' >"$nh/.config/fleet/applied_commit"; exit 0 ;;
   *"fleet leave"*)                [ -f "$T/leave-fail" ] && exit 1; touch "$nh/.fleet-left"; exit 0 ;;
+  *"fleet update"*)               touch "$nh/.fleet-updated"; exit 0 ;;
   *"fleet status --json"*)        if [ -f "$T/status-reply.json" ]; then cat "$T/status-reply.json"; else echo '{"fleet":"0.1.0","tools":{"claude":{"state":"ok","detail":"x"},"codex":{"state":"login","detail":"y"}}}'; fi; exit 0 ;;
 esac
 HOME="$nh" exec bash -c "$cmd"
@@ -222,6 +223,10 @@ case "$(uname -s)" in
 esac
 assert "init master installed the fleeter alias next to fleet (no fleet link here: points at this checkout)" [ "$(readlink "$HOME/.local/bin/fleeter")" = "$ROOT/fleet" ]
 assert "init master installed the fleet skill for the harnesses in FLEET_TOOLS (claude): ~/.claude/skills/fleet only" bash -c "printf '%s' \"\$0\" | grep -q 'skill fleet: 1 dir(s) (.claude/skills; 1 changed)' && cmp -s '$HOME/.claude/skills/fleet/SKILL.md' '$ROOT/skills/fleet/SKILL.md' && [ ! -e '$HOME/.agents' ] && [ ! -e '$HOME/.cursor' ]" "$out"
+case "$(uname -s)" in
+  Darwin) assert "init master wrote the sync LaunchAgent too" [ -f "$HOME/Library/LaunchAgents/dev.fleet.sync.plist" ] ;;
+  *)      assert "init master wrote the sync systemd timer too" [ -f "$HOME/.config/systemd/user/fleet-sync.timer" ] ;;
+esac
 key1=$(cat "$FLEET_VAULT/ssh/fleet_master.pub"); ts1=$(cat "$FLEET_VAULT/tailscale.json"); dk1=$(cat "$FLEET_VAULT/digest.key")
 out=$(bash "$FLEET" init master </dev/null 2>&1); rc=$?
 assert "init master idempotent (no prompts second time)" [ "$rc" = 0 ]
@@ -253,9 +258,9 @@ sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -
 export -f vault_snap sha256
 snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
 HELP_OK=1; HELP_BAD=""
-for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite list nodes "ssh alpha" "provision alpha" reconcile "kick alpha" \
-         "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" doctor join apply pull update "memory sync" login status leave daemon \
-         init secrets files proxy t3 config policy memory skill; do
+for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" \
+         "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" "schedule install" doctor join apply pull update "memory sync" login status leave daemon \
+         init secrets files proxy t3 config policy memory skill schedule; do
   for h in --help -h; do
     # shellcheck disable=SC2086  # $c is meant to split into words
     out=$(printf 'tskey-api-FAKE\n' | PATH="$T/tsbin:$PATH" bash "$FLEET" $c $h 2>&1); rc=$?
@@ -269,7 +274,7 @@ BAD_OK=1; BAD_BAD=""
 for c in "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
          "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "list --bogus" "list extra" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
          "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" \
-         "skill frob" "skill install --bogus" nosuch; do
+         "sync --bogus" "sync extra" "skill frob" "skill install --bogus" "schedule frob" "schedule install extra" nosuch; do
   # shellcheck disable=SC2086
   out=$(PATH="$T/tsbin:$PATH" bash "$FLEET" $c </dev/null 2>&1); rc=$?
   if [ "$rc" != 2 ] || ! printf '%s' "$out" | grep -qi 'usage'; then BAD_OK=0; BAD_BAD="$BAD_BAD [$c -> rc $rc]"; fi
@@ -1058,6 +1063,120 @@ git -C "$CFG" remote remove origin
 out=$(bash "$FLEET" config publish --no-capture --yes 2>&1)
 assert "publish without a remote warns and keeps the commit" printf '%s' "$out" | grep -q 'no origin remote'
 
+# ======================================================================
+echo "== sync: fast-forward only clean + behind checkouts, re-exec after a code update, reconcile, tool push cadence, lock, schedules"
+# The master's code checkout for this test is a clone of a bare repo seeded from
+# this tree (the checkout the tests run from is never touched); the config
+# checkout is $CFG with its origin back. Both get a commit on the remote side.
+SYNC_SRC="$T/sync-src"; mkdir -p "$SYNC_SRC"
+(cd "$ROOT" && tar -cf - fleet lib config skills templates examples) | tar -xf - -C "$SYNC_SRC"
+(cd "$SYNC_SRC" && git -c init.defaultBranch=main init -q && git add -A && git commit -q -m "code v1")
+git -c init.defaultBranch=main init -q --bare "$T/sync-code.git"
+git -C "$SYNC_SRC" push -q "$T/sync-code.git" HEAD:main
+git clone -q "$T/sync-code.git" "$T/sync-wt"
+SFLEET="$T/sync-wt/fleet"
+sync_digest_of() { FLEET_ROOT="$T/sync-wt" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/master.sh"; desired_digest "$1"' _ "$1" 2>/dev/null; }
+git -C "$CFG" remote add origin "$T/cfg-remote.git"; git -C "$CFG" push -q -u origin main 2>/dev/null
+git clone -q "$T/cfg-remote.git" "$T/cfg-other"
+printf '\nsync marker\n' >>"$T/cfg-other/AGENTS.md"; git -C "$T/cfg-other" commit -qam "config via sync"; git -C "$T/cfg-other" push -q origin main
+echo "code marker" >"$SYNC_SRC/SYNC-MARKER"; git -C "$SYNC_SRC" add -A; git -C "$SYNC_SRC" commit -q -m "code v2"; git -C "$SYNC_SRC" push -q "$T/sync-code.git" HEAD:main
+# a fresh node waiting to be enrolled: sync's reconcile step must pick it up
+bash "$FLEET" invite --name syncnode >/dev/null 2>&1
+sn_pending=$(grep -l '"name": "syncnode"' "$FLEET_VAULT"/nodes/pending/*.json)
+mk_node fleet-syncnode.tail1.ts.net "$(jget "$sn_pending" nonce)"
+write_status ',"k11":{"ID":"nSYNCCNTRL","HostName":"fleet-syncnode","DNSName":"fleet-syncnode.tail1.ts.net.","TailscaleIPs":["100.64.0.40"],"Online":true,"Tags":["tag:fleet-node"]}'
+echo '[{"nodeId":"nAAAACNTRL"},{"nodeId":"nSYNCCNTRL"}]' >"$DEVICES_JSON"
+NOW0=$(date +%s)
+: >"$SSH_LOG"
+out=$(FLEET_NOW_EPOCH=$NOW0 bash "$SFLEET" sync 2>&1); rc=$?
+assert "sync exits 0" [ "$rc" = 0 ]
+assert "sync fast-forwarded the clean, behind code checkout and re-executed itself from the new code" bash -c "[ -f '$T/sync-wt/SYNC-MARKER' ] && [ \"\$(git -C '$T/sync-wt' rev-parse HEAD)\" = \"\$(git --git-dir='$T/sync-code.git' rev-parse main)\" ] && printf '%s' \"\$0\" | grep -q 'code: .* -> .* (origin/main)' && printf '%s' \"\$0\" | grep -q 're-executing fleet sync'" "$out"
+assert "sync fast-forwarded the clean, behind config checkout" bash -c "[ \"\$(git -C '$CFG' rev-parse HEAD)\" = \"\$(git --git-dir='$T/cfg-remote.git' rev-parse main)\" ] && grep -q 'sync marker' '$CFG/AGENTS.md' && printf '%s' \"\$0\" | grep -q 'config: .* -> .* (origin/main)'" "$out"
+assert "both checkouts are clean afterwards (no stash, no merge commit)" bash -c "[ -z \"\$(git -C '$T/sync-wt' status --porcelain)\" ] && [ -z \"\$(git -C '$CFG' status --porcelain)\" ] && [ \"\$(git -C '$T/sync-wt' rev-list --count HEAD)\" = 2 ]"
+sync_want=$(sync_digest_of full)
+assert "sync ran reconcile: the waiting node was enrolled and provisioned with the new revs' digest" bash -c "[ \"\$(jget '$FLEET_VAULT/nodes/nSYNCCNTRL.json' state)\" = provisioned ] && [ -n '$sync_want' ] && [ \"\$(cat '$NODES/fleet-syncnode.tail1.ts.net/.config/fleet/applied')\" = '$sync_want' ]"
+assert "first sync pushed tool updates (never pushed before): fleet update on the online provisioned node, summarised, recorded in vault/sync.json" bash -c "grep -q 'fleetuser@fleet-syncnode.tail1.ts.net ~/.local/bin/fleet update' '$SSH_LOG' && [ -f '$NODES/fleet-syncnode.tail1.ts.net/.fleet-updated' ] && printf '%s' \"\$0\" | grep -q 'tools: fleet update on 1 node(s): 1 ok' && [ -n \"\$(jget '$FLEET_VAULT/sync.json' tools_pushed)\" ] && [ \"\$(mode_of '$FLEET_VAULT/sync.json')\" = 600 ]" "$out"
+assert "audit log records the fast-forwards and the tool push" bash -c "grep -q ' sync.ff code ' '$FLEET_VAULT/audit.log' && grep -q ' sync.ff config ' '$FLEET_VAULT/audit.log' && grep -q ' sync.tools - 1/1 ok' '$FLEET_VAULT/audit.log'"
+refute "sync released the master lock" [ -d "$FLEET_VAULT/locks/.sync" ]
+: >"$SSH_LOG"
+out=$(FLEET_NOW_EPOCH=$((NOW0 + 60)) bash "$SFLEET" sync 2>&1); rc=$?
+assert "second sync a minute later: exit 0, quiet, no tool push (cadence 1440 min)" bash -c "[ $rc = 0 ] && [ -z \"\$0\" ] && ! grep -q 'fleet update' '$SSH_LOG' && grep -q 'cat ~/.config/fleet/applied' '$SSH_LOG'" "$out"
+# tool push cadence from fleet.conf, and 0 = off
+printf 'FLEET_PUSH_TOOLS_EVERY=60\n' >>"$FLEET_HOME/fleet.conf"
+: >"$SSH_LOG"; FLEET_NOW_EPOCH=$((NOW0 + 30 * 60)) bash "$SFLEET" sync >/dev/null 2>&1
+refute "30 min after the push with FLEET_PUSH_TOOLS_EVERY=60: no tool push" grep -q 'fleet update' "$SSH_LOG"
+: >"$SSH_LOG"; out=$(FLEET_NOW_EPOCH=$((NOW0 + 61 * 60)) bash "$SFLEET" sync 2>&1)
+assert "61 min after the push: tools pushed again, last run moved" bash -c "grep -q 'fleet update' '$SSH_LOG' && printf '%s' \"\$0\" | grep -q 'tools: fleet update on 1 node(s): 1 ok' && [ \"\$(jget '$FLEET_VAULT/sync.json' tools_pushed)\" = \"\$(FLEET_ROOT='$ROOT' bash -c '. \"\$FLEET_ROOT/lib/common.sh\"; . \"\$FLEET_ROOT/lib/master.sh\"; epoch_iso $((NOW0 + 61 * 60))')\" ]" "$out"
+printf 'FLEET_PUSH_TOOLS_EVERY=0\n' >>"$FLEET_HOME/fleet.conf"
+: >"$SSH_LOG"; FLEET_NOW_EPOCH=$((NOW0 + 10 * 86400)) bash "$SFLEET" sync >/dev/null 2>&1
+refute "FLEET_PUSH_TOOLS_EVERY=0 never pushes tools" grep -q 'fleet update' "$SSH_LOG"
+grep -v '^FLEET_PUSH_TOOLS_EVERY=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+# dirty tree: a tracked file modified -> warned, not updated, the change kept
+echo "code v3" >"$SYNC_SRC/SYNC-MARKER"; git -C "$SYNC_SRC" commit -qam "code v3"; git -C "$SYNC_SRC" push -q "$T/sync-code.git" HEAD:main
+code_v2=$(git -C "$T/sync-wt" rev-parse HEAD)
+printf '# dirty\n' >>"$T/sync-wt/config/defaults.conf"
+out=$(bash "$SFLEET" sync 2>&1); rc=$?
+assert "dirty code checkout: sync exits 0, warns, leaves HEAD and the local change alone" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'code: .* uncommitted changes; not updated' && [ \"\$(git -C '$T/sync-wt' rev-parse HEAD)\" = '$code_v2' ] && grep -q '^# dirty' '$T/sync-wt/config/defaults.conf'" "$out"
+git -C "$T/sync-wt" checkout -q -- config/defaults.conf
+# untracked files do not count as dirty
+echo scratch >"$T/sync-wt/SCRATCH"
+out=$(bash "$SFLEET" sync 2>&1); rc=$?
+assert "an untracked file does not block the fast-forward" bash -c "[ $rc = 0 ] && [ \"\$(git -C '$T/sync-wt' rev-parse HEAD)\" = \"\$(git --git-dir='$T/sync-code.git' rev-parse main)\" ] && [ -f '$T/sync-wt/SCRATCH' ] && printf '%s' \"\$0\" | grep -q 'code: .* -> '" "$out"
+rm -f "$T/sync-wt/SCRATCH"
+# diverged: a local commit and a new remote commit -> warned, nothing merged
+echo local >"$T/sync-wt/LOCAL"; git -C "$T/sync-wt" add LOCAL; git -C "$T/sync-wt" commit -q -m "local only"
+code_local=$(git -C "$T/sync-wt" rev-parse HEAD)
+echo "code v4" >"$SYNC_SRC/SYNC-MARKER"; git -C "$SYNC_SRC" commit -qam "code v4"; git -C "$SYNC_SRC" push -q "$T/sync-code.git" HEAD:main
+out=$(bash "$SFLEET" sync 2>&1); rc=$?
+assert "diverged code checkout: sync exits 0, warns, HEAD unchanged, no merge" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'code: main and origin/main have diverged' && [ \"\$(git -C '$T/sync-wt' rev-parse HEAD)\" = '$code_local' ] && [ \"\$(git -C '$T/sync-wt' rev-list --count HEAD)\" = 4 ]" "$out"
+# ahead only (unpushed commit, remote caught up): quiet
+git -C "$T/sync-wt" reset -q --hard origin/main; echo ahead >"$T/sync-wt/AHEAD"; git -C "$T/sync-wt" add AHEAD; git -C "$T/sync-wt" commit -q -m "ahead"
+code_ahead=$(git -C "$T/sync-wt" rev-parse HEAD)
+out=$(bash "$SFLEET" sync 2>&1); rc=$?
+# (the new local commit changes the desired digest, so this run re-provisions the node: that part is not quiet)
+assert "a checkout that is only ahead is left alone without a warning" bash -c "[ $rc = 0 ] && ! printf '%s' \"\$0\" | grep -q 'code:' && [ \"\$(git -C '$T/sync-wt' rev-parse HEAD)\" = '$code_ahead' ] && [ -f '$T/sync-wt/AHEAD' ]" "$out"
+git -C "$T/sync-wt" reset -q --hard origin/main
+# unreachable remote: warned, exit 0
+git -C "$T/sync-wt" remote set-url origin "$T/does-not-exist.git"
+out=$(bash "$SFLEET" sync 2>&1); rc=$?
+assert "unreachable remote: sync exits 0 and warns" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'code: fetch from origin failed'" "$out"
+git -C "$T/sync-wt" remote set-url origin "$T/sync-code.git"
+# the master lock: a running sync makes another sync and a reconcile skip
+mkdir -p "$FLEET_VAULT/locks/.sync"; sleep 60 & LP=$!; echo "$LP" >"$FLEET_VAULT/locks/.sync/pid"; echo tok >"$FLEET_VAULT/locks/.sync/token"
+: >"$SSH_LOG"
+out=$(bash "$SFLEET" sync 2>&1); rc=$?
+assert "sync while the lock is held: exit 0, says it skipped, touched no node" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'another fleet sync or reconcile is running' && [ ! -s '$SSH_LOG' ]" "$out"
+out=$(bash "$FLEET" reconcile 2>&1); rc=$?
+assert "reconcile while the lock is held: exit 0, skipped, touched no node, lock kept" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'skipping this run' && [ ! -s '$SSH_LOG' ] && [ -d '$FLEET_VAULT/locks/.sync' ] && [ \"\$(cat '$FLEET_VAULT/locks/.sync/pid')\" = $LP ]" "$out"
+kill "$LP" 2>/dev/null; wait "$LP" 2>/dev/null
+out=$(bash "$FLEET" reconcile 2>&1); rc=$?
+assert "lock holder gone: reconcile removes the stale lock, runs, releases" bash -c "[ $rc = 0 ] && grep -q 'cat ~/.config/fleet/applied' '$SSH_LOG' && [ ! -d '$FLEET_VAULT/locks/.sync' ]"
+# schedules: init master wrote both; schedule install is idempotent
+case "$(uname -s)" in
+  Darwin)
+    SP="$HOME/Library/LaunchAgents/dev.fleet.sync.plist"
+    assert "init master wrote the sync LaunchAgent: label, fleet sync, every 1800 s, logs to sync.log" bash -c "grep -q '<string>dev.fleet.sync</string>' '$SP' && grep -q '<string>$ROOT/fleet</string><string>sync</string>' '$SP' && grep -q '<integer>1800</integer>' '$SP' && grep -q '$FLEET_HOME/sync.log' '$SP'"
+    RP="$HOME/Library/LaunchAgents/dev.fleet.reconcile.plist" ;;
+  *)
+    SP="$HOME/.config/systemd/user/fleet-sync.timer"
+    assert "init master wrote the sync systemd timer + service: every 30 min, fleet sync, logs to sync.log" bash -c "grep -q '^OnUnitActiveSec=30min' '$SP' && grep -q '^ExecStart=$ROOT/fleet sync$' '$HOME/.config/systemd/user/fleet-sync.service' && grep -q 'sync.log' '$HOME/.config/systemd/user/fleet-sync.service'"
+    RP="$HOME/.config/systemd/user/fleet-reconcile.timer" ;;
+esac
+sp1=$(cat "$SP"); rp1=$(cat "$RP")
+out=$(bash "$FLEET" schedule install 2>&1); rc=$?
+assert "schedule install exits 0 and reports both timers" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'reconcile schedule:' && printf '%s' \"\$0\" | grep -q 'sync schedule:'" "$out"
+assert "schedule install is idempotent: both files unchanged, no temp files left" bash -c "[ \"\$(cat '$SP')\" = \"\$0\" ] && [ \"\$(cat '$RP')\" = \"\$1\" ] && ! ls \"\$(dirname '$SP')\"/.fleet.* 2>/dev/null | grep -q ." "$sp1" "$rp1"
+printf 'FLEET_SYNC_EVERY=7\n' >>"$FLEET_HOME/fleet.conf"
+bash "$FLEET" schedule install >/dev/null 2>&1
+case "$(uname -s)" in
+  Darwin) assert "FLEET_SYNC_EVERY changes the interval (420 s)" grep -q '<integer>420</integer>' "$SP" ;;
+  *)      assert "FLEET_SYNC_EVERY changes the interval (7min)" grep -q '^OnUnitActiveSec=7min' "$SP" ;;
+esac
+grep -v '^FLEET_SYNC_EVERY=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+bash "$FLEET" schedule install >/dev/null 2>&1
+assert "doctor sees both schedules" bash -c "bash '$FLEET' doctor 2>&1 | grep -q 'sync schedule installed'"
+rm -f "$FLEET_VAULT/nodes/nSYNCCNTRL.json"; rm -rf "$NODES/fleet-syncnode.tail1.ts.net"; write_status ""
+echo '[{"nodeId":"nAAAACNTRL"}]' >"$DEVICES_JSON"
 
 # ======================================================================
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

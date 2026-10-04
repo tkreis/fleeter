@@ -787,6 +787,7 @@ cmd_init_master() {
 
   github_setup "$reconfigure"
   install_reconcile_schedule
+  install_sync_schedule
   master_bin_link
   harness_skill_install
   audit "init.master" "-" ok
@@ -830,20 +831,44 @@ repo_slug() {
   echo "$s"
 }
 
-install_reconcile_schedule() {
-  local every=$((FLEET_RECONCILE_EVERY * 60)) plist unit
+# ---------- master schedules: reconcile (fast enrolment) and sync (the periodic push) ----------
+
+# master_schedule_file JOB — the plist (macOS) or timer unit (Linux) of a master job.
+master_schedule_file() {
+  case "$(fleet_os)" in
+    macos) echo "$HOME/Library/LaunchAgents/dev.fleet.$1.plist" ;;
+    *)     echo "$HOME/.config/systemd/user/fleet-$1.timer" ;;
+  esac
+}
+
+# _master_write_if_changed TMP DEST — move TMP over DEST when the content
+# differs (0644); prints 1 when it did.
+_master_write_if_changed() {
+  if [ -f "$2" ] && cmp -s "$1" "$2"; then rm -f "$1"; return 0; fi
+  chmod 0644 "$1"; mv -f "$1" "$2"; echo 1
+}
+
+# install_master_schedule JOB EVERY_MIN — `fleet JOB` every EVERY_MIN minutes
+# as the user: LaunchAgent dev.fleet.JOB (macOS) or systemd user timer
+# fleet-JOB (Linux), output in $FLEET_HOME/JOB.log. Idempotent: the files are
+# rewritten only when their content changed, and (re)loaded only then or when
+# the job is not loaded; FLEET_NO_SCHEDULER writes without loading.
+install_master_schedule() {
+  local job=$1 every_min=$2 every plist unit tmp changed="" label uid
+  every=$((every_min * 60))
   case "$(fleet_os)" in
     macos)
-      plist="$HOME/Library/LaunchAgents/dev.fleet.reconcile.plist"
+      label="dev.fleet.$job"; plist=$(master_schedule_file "$job"); uid=$(id -u)
       mkdir -p "$(dirname "$plist")"
-      atomic_write "$plist" 0644 <<EOF
+      tmp=$(mktemp "$(dirname "$plist")/.fleet.XXXXXX")
+      cat >"$tmp" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>dev.fleet.reconcile</string>
+  <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array><string>$FLEET_ROOT/fleet</string><string>reconcile</string></array>
+  <array><string>$FLEET_ROOT/fleet</string><string>$job</string></array>
   <key>StartInterval</key><integer>$every</integer>
   <key>RunAtLoad</key><true/>
   <key>EnvironmentVariables</key>
@@ -851,45 +876,185 @@ install_reconcile_schedule() {
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>FLEET_HOME</key><string>$FLEET_HOME</string>
   </dict>
-  <key>StandardOutPath</key><string>$FLEET_HOME/reconcile.log</string>
-  <key>StandardErrorPath</key><string>$FLEET_HOME/reconcile.log</string>
+  <key>StandardOutPath</key><string>$FLEET_HOME/$job.log</string>
+  <key>StandardErrorPath</key><string>$FLEET_HOME/$job.log</string>
 </dict>
 </plist>
 EOF
+      changed=$(_master_write_if_changed "$tmp" "$plist")
       if [ -z "${FLEET_NO_SCHEDULER:-}" ] && have launchctl; then
-        launchctl bootout "gui/$(id -u)/dev.fleet.reconcile" >/dev/null 2>&1 || true
-        launchctl bootstrap "gui/$(id -u)" "$plist" >/dev/null 2>&1 || warn "launchctl bootstrap failed; load manually: launchctl load $plist"
+        if [ -n "$changed" ] || ! launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+          launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+          launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1 || warn "launchctl bootstrap failed; load manually: launchctl load $plist"
+        fi
       fi
-      ok "reconcile schedule: $plist (every $FLEET_RECONCILE_EVERY min)"
+      ok "$job schedule: $plist (every $every_min min)"
       ;;
     linux)
       unit="$HOME/.config/systemd/user"
       mkdir -p "$unit"
-      atomic_write "$unit/fleet-reconcile.service" 0644 <<EOF
+      tmp=$(mktemp "$unit/.fleet.XXXXXX")
+      cat >"$tmp" <<EOF
 [Unit]
-Description=fleet reconcile
+Description=fleet $job
 [Service]
 Type=oneshot
 Environment=FLEET_HOME=$FLEET_HOME
-ExecStart=$FLEET_ROOT/fleet reconcile
+ExecStart=$FLEET_ROOT/fleet $job
+StandardOutput=append:$FLEET_HOME/$job.log
+StandardError=inherit
 EOF
-      atomic_write "$unit/fleet-reconcile.timer" 0644 <<EOF
+      changed=$(_master_write_if_changed "$tmp" "$unit/fleet-$job.service")
+      tmp=$(mktemp "$unit/.fleet.XXXXXX")
+      cat >"$tmp" <<EOF
 [Unit]
-Description=fleet reconcile every $FLEET_RECONCILE_EVERY min
+Description=fleet $job every $every_min min
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=${FLEET_RECONCILE_EVERY}min
+OnUnitActiveSec=${every_min}min
 [Install]
 WantedBy=timers.target
 EOF
+      changed="$changed$(_master_write_if_changed "$tmp" "$unit/fleet-$job.timer")"
       if [ -z "${FLEET_NO_SCHEDULER:-}" ] && have systemctl; then
-        systemctl --user daemon-reload >/dev/null 2>&1 || true
-        systemctl --user enable --now fleet-reconcile.timer >/dev/null 2>&1 || warn "systemctl --user enable failed (no user session?)"
+        if [ -n "$changed" ] || ! systemctl --user is-active --quiet "fleet-$job.timer" 2>/dev/null; then
+          systemctl --user daemon-reload >/dev/null 2>&1 || true
+          systemctl --user enable --now "fleet-$job.timer" >/dev/null 2>&1 || warn "systemctl --user enable failed (no user session?)"
+        fi
       fi
-      ok "reconcile schedule: $unit/fleet-reconcile.timer (every $FLEET_RECONCILE_EVERY min)"
+      ok "$job schedule: $unit/fleet-$job.timer (every $every_min min)"
       ;;
-    *) warn "unsupported OS: no reconcile schedule installed" ;;
+    *) warn "unsupported OS: no $job schedule installed" ;;
   esac
+}
+
+install_reconcile_schedule() { install_master_schedule reconcile "${FLEET_RECONCILE_EVERY:-2}"; }
+install_sync_schedule()      { install_master_schedule sync "${FLEET_SYNC_EVERY:-30}"; }
+
+# fleet schedule install — (re)install both master timers. Idempotent.
+cmd_schedule_install() {
+  vault_require
+  install_reconcile_schedule
+  install_sync_schedule
+}
+
+# ---------- sync: the periodic master push ----------
+
+SYNC_CODE_UPDATED=0
+
+# sync_ff_repo LABEL DIR — fast-forward DIR's checked-out branch from its
+# upstream, only when the working tree is clean (untracked files do not count)
+# and the branch is strictly behind. Never stashes, resets or merges: a dirty
+# tree, a detached HEAD, a missing remote, a failed fetch (offline) or a
+# diverged history is reported and the checkout left alone. Quiet when there
+# is nothing to do.
+sync_ff_repo() {
+  local label=$1 dir=$2 branch remote mref old new
+  if [ ! -d "$dir/.git" ]; then
+    [ -n "${FLEET_VERBOSE:-}" ] && log "$label: $dir is not a git checkout; not updated"
+    return 0
+  fi
+  branch=$(git -C "$dir" symbolic-ref --short -q HEAD) || { warn "$label: detached HEAD in $dir; not updated"; return 0; }
+  remote=$(git -C "$dir" config --get "branch.$branch.remote" 2>/dev/null || true); : "${remote:=origin}"
+  mref=$(git -C "$dir" config --get "branch.$branch.merge" 2>/dev/null || true); mref=${mref#refs/heads/}; : "${mref:=$branch}"
+  if ! git -C "$dir" remote get-url "$remote" >/dev/null 2>&1; then
+    [ -n "${FLEET_VERBOSE:-}" ] && log "$label: no remote '$remote' in $dir; not updated"
+    return 0
+  fi
+  if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    warn "$label: $dir has uncommitted changes; not updated (commit or discard them first)"
+    return 0
+  fi
+  if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" \
+       git -C "$dir" fetch --quiet "$remote" "$mref" 2>/dev/null; then
+    warn "$label: fetch from $remote failed (offline?); not updated"
+    return 0
+  fi
+  old=$(git -C "$dir" rev-parse HEAD); new=$(git -C "$dir" rev-parse FETCH_HEAD)
+  [ "$old" != "$new" ] || return 0
+  if git -C "$dir" merge-base --is-ancestor "$old" "$new"; then
+    if git -C "$dir" merge --ff-only --quiet FETCH_HEAD >/dev/null 2>&1; then
+      log "$label: $(git -C "$dir" rev-parse --short "$old") -> $(git -C "$dir" rev-parse --short "$new") ($remote/$mref)"
+      audit "sync.ff" "$label" "$(git -C "$dir" rev-parse --short "$old")->$(git -C "$dir" rev-parse --short "$new")"
+      [ "$label" = code ] && SYNC_CODE_UPDATED=1
+    else
+      warn "$label: fast-forward of $dir failed (untracked files in the way?); not updated"
+    fi
+  elif git -C "$dir" merge-base --is-ancestor "$new" "$old"; then
+    [ -n "${FLEET_VERBOSE:-}" ] && log "$label: ahead of $remote/$mref (unpushed commits); nothing to pull"
+  else
+    warn "$label: $branch and $remote/$mref have diverged in $dir; not updated (rebase or merge by hand)"
+  fi
+  return 0
+}
+
+# sync_push_tools PEERS — every FLEET_PUSH_TOOLS_EVERY minutes (0 = never):
+# `fleet update` on every online provisioned node, in parallel, each capped
+# (FLEET_SYNC_UPDATE_SECS, default 900 s). One summary line; the output of a
+# node whose update failed is kept in $FLEET_HOME/logs/update-<name>.log. The
+# run is recorded in vault/sync.json (tools_pushed) once there was a node to push to.
+sync_push_tools() {
+  local peers=$1 every=${FLEET_PUSH_TOOLS_EVERY:-1440} last=0 tmpd id ids="" n=0 okn=0 failed="" name secs=${FLEET_SYNC_UPDATE_SECS:-900}
+  case "$every" in ''|*[!0-9]*) warn "FLEET_PUSH_TOOLS_EVERY must be a number of minutes (0 = off); got '$every'"; return 0 ;; esac
+  [ "$every" -gt 0 ] || return 0
+  [ -f "$FLEET_VAULT/sync.json" ] && last=$(iso_epoch "$(json_get "$FLEET_VAULT/sync.json" tools_pushed)")
+  [ $(( $(now_epoch) - last )) -ge $(( every * 60 )) ] || return 0
+  for id in $(registry_ids); do
+    [ "$(registry_get "$id" state)" = provisioned ] && peer_online "$peers" "$id" && ids="$ids $id"
+  done
+  [ -n "$ids" ] || return 0
+  json_set "$FLEET_VAULT/sync.json" tools_pushed "$(now_iso)"
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/fleet-sync.XXXXXX"); chmod 0700 "$tmpd"
+  for id in $ids; do
+    # shellcheck disable=SC2088  # the ~ is expanded by the node's shell, not ours
+    ( with_timeout "$secs" node_ssh "$id" '~/.local/bin/fleet update' >"$tmpd/$id.log" 2>&1 && : >"$tmpd/$id.ok" ) &
+  done
+  wait
+  mkdir -p "$FLEET_HOME/logs"
+  for id in $ids; do
+    n=$((n + 1)); name=$(registry_get "$id" name)
+    if [ -f "$tmpd/$id.ok" ]; then okn=$((okn + 1))
+    else failed="$failed $name"; atomic_write "$FLEET_HOME/logs/update-$name.log" 0600 <"$tmpd/$id.log"
+    fi
+  done
+  rm -rf "$tmpd"
+  log "tools: fleet update on $n node(s): $okn ok${failed:+, failed:$failed (see $FLEET_HOME/logs/update-<name>.log)}"
+  audit "sync.tools" "-" "$okn/$n ok${failed:+ failed:$failed}"
+}
+
+# fleet sync — the scheduled master push, one run: (a) fast-forward this
+# checkout ($FLEET_ROOT) and the config checkout ($FLEET_CONFIG_DIR) from their
+# upstream when clean and behind (a code update re-executes this command once
+# so the new code runs the rest), (b) reconcile: enrol new nodes, provision
+# every node whose desired state changed, (c) every FLEET_PUSH_TOOLS_EVERY
+# minutes run `fleet update` on the online provisioned nodes. Under the master
+# lock (vault/locks/.sync); a second sync, or a reconcile, skips while it runs.
+# Quiet when nothing happened.
+cmd_sync() {
+  vault_require
+  local l rc=0
+  l=$(master_lock_path)
+  if master_lock_held_by_me; then :     # re-executed after a code update: the lock is ours already
+  elif ! lock_acquire "$l" 0; then
+    log "another fleet sync or reconcile is running (lock $l, pid $(lock_pid "$l")); skipping this run"; return 0
+  fi
+  # shellcheck disable=SC2064  # expand now: the lock path is fixed
+  trap "lock_release '$l' $$" EXIT
+  if [ -z "${FLEET_SYNC_REEXEC:-}" ]; then
+    sync_ff_repo code "$FLEET_ROOT"
+    if [ "$SYNC_CODE_UPDATED" = 1 ] && [ -x "$FLEET_ROOT/fleet" ]; then
+      log "code updated; re-executing fleet sync from the new checkout"
+      trap - EXIT
+      FLEET_SYNC_REEXEC=1 exec "$FLEET_ROOT/fleet" sync
+    fi
+  fi
+  [ -d "$FLEET_CONFIG_DIR" ] && sync_ff_repo config "$FLEET_CONFIG_DIR"
+  fleet_load_config          # a config fast-forward may have changed fleet.conf
+  reconcile_run || rc=$?
+  sync_push_tools "$(ts_peers)"
+  lock_release "$l" $$
+  trap - EXIT
+  return "$rc"
 }
 
 # ---------- invite ----------
@@ -1568,9 +1733,36 @@ memory_seed() {
   rm -rf "$tmpd"
 }
 
+# ---------- master-wide lock: sync and reconcile never run at the same time ----------
+
+master_lock_path() { echo "$FLEET_VAULT/locks/.sync"; }
+
+# master_lock_held_by_me — the lock dir exists and records this very process
+# (a `fleet sync` running its reconcile step in-process, or re-executing itself).
+master_lock_held_by_me() {
+  local l
+  l=$(master_lock_path)
+  [ -d "$l" ] && [ "$(lock_pid "$l")" = "$$" ]
+}
+
+# cmd_reconcile — one reconcile run under the master lock. Skips (exit 0, one
+# line) while a `fleet sync` or another reconcile holds it; a sync that calls
+# reconcile_run itself already holds the lock and is not affected.
 cmd_reconcile() {
   vault_require
   [ -n "${1:-}" ] && die "usage: fleet reconcile"
+  local l rc=0 mine=0
+  l=$(master_lock_path)
+  if master_lock_held_by_me; then :
+  elif lock_acquire "$l" 0; then mine=1
+  else log "another fleet sync or reconcile is running (lock $l, pid $(lock_pid "$l")); skipping this run"; return 0
+  fi
+  reconcile_run || rc=$?
+  [ "$mine" = 1 ] && lock_release "$l" $$
+  return "$rc"
+}
+
+reconcile_run() {
   local peers pid host dns online lock id state f key_id applied digest profile devices missing_since rk stops
   peers=$(ts_peers)
   memory_seed
@@ -2008,11 +2200,13 @@ cmd_doctor() {
     if m=$(api gh user 2>/dev/null) && [ -n "$m" ]; then ok "github token: ok ($m)"; else warn "github token: FAILED"; fails=$((fails + 1)); fi
   else warn "github: neither gh login nor a token (deploy keys cannot be registered)"; fi
 
-  case "$(fleet_os)" in
-    macos) f="$HOME/Library/LaunchAgents/dev.fleet.reconcile.plist" ;;
-    *)     f="$HOME/.config/systemd/user/fleet-reconcile.timer" ;;
-  esac
-  if [ -f "$f" ]; then ok "reconcile schedule installed: $f"; else warn "reconcile schedule missing (run: fleet init master)"; fails=$((fails + 1)); fi
+  f=$(master_schedule_file reconcile)
+  if [ -f "$f" ]; then ok "reconcile schedule installed: $f"; else warn "reconcile schedule missing (run: fleet schedule install)"; fails=$((fails + 1)); fi
+  f=$(master_schedule_file sync)
+  if [ -f "$f" ]; then ok "sync schedule installed: $f"; else warn "sync schedule missing (run: fleet schedule install)"; fails=$((fails + 1)); fi
+  if [ -d "$FLEET_CONFIG_DIR/.git" ] && [ -z "$(git -C "$FLEET_CONFIG_DIR" config --get "branch.$(git -C "$FLEET_CONFIG_DIR" symbolic-ref --short -q HEAD 2>/dev/null || echo main).remote" 2>/dev/null)" ]; then
+    log "config dir $FLEET_CONFIG_DIR has no upstream branch: fleet sync cannot fast-forward it (git branch --set-upstream-to=origin/main)"
+  fi
 
   rc=0; doctor_isolation || rc=$?
   fails=$((fails + rc))

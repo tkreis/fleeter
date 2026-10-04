@@ -1,7 +1,8 @@
 name: index
 
-# Rebuild INDEX.md whenever a note changes. The paths filter excludes INDEX.md
-# itself and the commit carries [skip ci], so the bot's own push cannot loop.
+# Rebuild INDEX.md and projects/ whenever a note or an uploaded memory changes.
+# The paths filter excludes INDEX.md and projects/ themselves and the commit
+# carries [skip ci], so the bot's own push cannot loop.
 on:
   push:
     branches: [main]
@@ -26,19 +27,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Rebuild INDEX.md
+      - name: Rebuild INDEX.md and projects/
         run: python3 scripts/build_index.py
 
       - name: Commit if changed
         run: |
-          if git diff --quiet -- INDEX.md; then
-            echo "INDEX.md unchanged"
+          git add -A -- INDEX.md projects
+          if git diff --cached --quiet; then
+            echo "INDEX.md and projects/ unchanged"
             exit 0
           fi
           git config user.name "fleet-index[bot]"
           git config user.email "fleet-index[bot]@users.noreply.github.com"
-          git add INDEX.md
-          git commit -m "index: rebuild INDEX.md [skip ci]"
+          git commit -m "index: rebuild INDEX.md and projects/ [skip ci]"
           # Nodes push every few minutes; rebase once so the push is fast-forward.
           git pull --rebase --quiet origin main || true
           git push origin HEAD:main

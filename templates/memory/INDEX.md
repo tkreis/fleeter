@@ -5,3 +5,7 @@
 ## notes
 
 (none yet)
+
+## projects
+
+(none yet)

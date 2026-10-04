@@ -186,13 +186,17 @@ revs_pushed() {
 
 # node_behind_pushed ID — the node recorded older code/config revs than this
 # checkout, and this checkout's revs are pushed (so a provision would help).
+# Tried once per target revs (registry `retried_for`): a node that cannot fetch
+# them (broken deploy key, offline GitHub) is not re-provisioned every cycle.
 node_behind_pushed() {
   local acc want
   acc=$(registry_get "$1" applied_commit)
   want="$(code_rev)+$(config_rev)"
   [ -n "$acc" ] && [ "$acc" != "$want" ] || return 1
+  [ "$(registry_get "$1" retried_for)" != "$want" ] || return 1
   revs_pushed "$FLEET_ROOT" || return 1
-  [ ! -d "$FLEET_CONFIG_DIR" ] || revs_pushed "$FLEET_CONFIG_DIR"
+  [ ! -d "$FLEET_CONFIG_DIR" ] || revs_pushed "$FLEET_CONFIG_DIR" || return 1
+  registry_set "$1" retried_for "$want"
 }
 config_rev() { if [ -d "$FLEET_CONFIG_DIR" ]; then repo_rev "$FLEET_CONFIG_DIR"; else echo none; fi; }
 
@@ -1569,6 +1573,11 @@ provision_node() {
   if [ -n "$applied_cc" ] && [ "$applied_cc" != "$want_cc" ]; then
     warn "$name applied revs $applied_cc; this checkout is at $want_cc (unpushed commits? nodes only pull what is pushed)"
     audit provision "$name" "ok revs-differ"
+    # pushed already: this provision was the fair try for these revs (see
+    # node_behind_pushed); unpushed: reconcile retries once they are pushed
+    if revs_pushed "$FLEET_ROOT" && { [ ! -d "$FLEET_CONFIG_DIR" ] || revs_pushed "$FLEET_CONFIG_DIR"; }; then
+      registry_set "$id" retried_for "$want_cc"
+    fi
   else
     audit provision "$name" ok
   fi

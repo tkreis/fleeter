@@ -1347,6 +1347,17 @@ refute "sync released the master lock" [ -d "$FLEET_VAULT/locks/.sync" ]
 : >"$SSH_LOG"
 out=$(FLEET_NOW_EPOCH=$((NOW0 + 60)) bash "$SFLEET" sync 2>&1); rc=$?
 assert "second sync a minute later: exit 0, quiet, no tool push (cadence 1440 min)" bash -c "[ $rc = 0 ] && [ -z \"\$0\" ] && ! grep -q 'fleet update' '$SSH_LOG' && grep -q 'cat ~/.config/fleet/applied' '$SSH_LOG'" "$out"
+# A node provisioned while the master had unpushed commits applied older revs.
+# Once the revs are pushed, reconcile tries again exactly once.
+python3 - "$FLEET_VAULT/nodes/nSYNCCNTRL.json" <<'PY'
+import json, sys
+f = sys.argv[1]; d = json.load(open(f)); d["applied_commit"] = "old+old"; d["retried_for"] = ""
+json.dump(d, open(f, "w"))
+PY
+out=$(FLEET_NOW_EPOCH=$((NOW0 + 120)) bash "$SFLEET" sync 2>&1); rc=$?
+assert "node behind pushed revs: sync provisions it again" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'provision syncnode'" "$out"
+out=$(FLEET_NOW_EPOCH=$((NOW0 + 180)) bash "$SFLEET" sync 2>&1); rc=$?
+assert "...and only once for the same revs (node still reports old revs, sync stays quiet)" bash -c "[ $rc = 0 ] && [ -z \"\$0\" ]" "$out"
 # tool push cadence from fleet.conf, and 0 = off
 printf 'FLEET_PUSH_TOOLS_EVERY=60\n' >>"$FLEET_HOME/fleet.conf"
 : >"$SSH_LOG"; FLEET_NOW_EPOCH=$((NOW0 + 30 * 60)) bash "$SFLEET" sync >/dev/null 2>&1

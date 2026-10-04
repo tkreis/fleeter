@@ -119,7 +119,7 @@ refute "image has no tailscale state" docker run --rm "$IMG" sh -c 'ls /var/lib/
 # shellcheck disable=SC2016  # runs inside the container
 assert "image user fleet uid 1000, bash, no password" docker run --rm "$IMG" sh -c '[ "$(id -u fleet)" = 1000 ] && grep -q "^fleet:x:1000:1000:.*:/bin/bash$" /etc/passwd && grep -q "^fleet:\*:" /etc/shadow'
 assert "image: ~fleet/.config and ~fleet/.local owned by fleet" docker run --rm "$IMG" sh -c "[ \"\$(stat -c %U $MHOME/.config $MHOME/.local $MHOME/.ssh | sort -u)\" = fleet ]"
-assert "image: fleet code present, templates + examples, no tests, no .git, no config repo" docker run --rm "$IMG" sh -c '[ -x /opt/fleet/fleet ] && [ -f /opt/fleet/lib/master.sh ] && [ -d /opt/fleet/templates/memory ] && [ -f /opt/fleet/examples/fleet-config/AGENTS.md ] && [ ! -e /opt/fleet/tests ] && [ ! -e /opt/fleet/.git ] && [ ! -e /opt/fleet/skills ]'
+assert "image: fleet code present, templates + examples + the fleet skill, no tests, no .git, no config repo" docker run --rm "$IMG" sh -c '[ -x /opt/fleet/fleet ] && [ -f /opt/fleet/lib/master.sh ] && [ -d /opt/fleet/templates/memory ] && [ -f /opt/fleet/examples/fleet-config/AGENTS.md ] && [ -f /opt/fleet/skills/fleet/SKILL.md ] && [ ! -e /opt/fleet/tests ] && [ ! -e /opt/fleet/.git ] && [ ! -e /opt/fleet/examples/fleet-config/.git ]'
 assert "image: chromium (agents' browser) baked in by default" docker run --rm "$IMG" sh -c 'command -v chromium >/dev/null && chromium --version | grep -q Chromium'
 assert "image: chrome status sees the browser as the node user" docker run --rm -u fleet -e HOME=$MHOME "$IMG" sh -c 'cd /opt/fleet && FLEET_ROOT=/opt/fleet bash -c ". lib/common.sh; fleet_load_config; . lib/tools/chrome.sh; tool_chrome_status" | grep -q "chrome=1"'
 
@@ -266,6 +266,7 @@ assert "fleet nodes --live reaches both nodes" bash -c "o=\$(mexec fleet nodes -
 : >"$WORK/empty"
 mexec fleet reconcile >"$WORK/reconcile2.log" 2>&1
 assert "second reconcile is quiet (convergent)" [ ! -s "$WORK/reconcile2.log" ]
+assert "init master installed the fleeter alias and the fleet skill on the master" bash -c "[ \"\$(mexec readlink $MHOME/.local/bin/fleeter)\" = $MHOME/fleeter/fleet ] && mexec fleeter --version | grep -q '^fleet ' && mexec test -f $MHOME/.claude/skills/fleet/SKILL.md"
 
 # ======================================================================
 step "fleet list: the one-shot overview, table and JSON"
@@ -294,6 +295,7 @@ for n in "$NA:alpha" "$NB:beta"; do
   assert "$name: env.sh present, 0600, sources" bash -c "[ \"\$(nmode $c $MHOME/.config/fleet/env.sh)\" = 600 ] && nexec $c bash -c '. ~/.config/fleet/env.sh && [ \"\$FLEET_NODE\" = $name ] && [ \"\$CLAUDE_CODE_OAUTH_TOKEN\" = fake-oauth-token-e2e ]'"
   assert "$name: ~/.claude/CLAUDE.md rendered from the config repo's AGENTS.md (node name filled in)" bash -c "nfile $c $MHOME/.claude/CLAUDE.md | grep -q 'fleet node .$name.' && ! nfile $c $MHOME/.claude/CLAUDE.md | grep -q '\${FLEET_NODE}'"
   assert "$name: ~/.agents/skills non-empty, ~/.claude/skills too" nexec "$c" sh -c "[ \"\$(ls $MHOME/.agents/skills | wc -l)\" -gt 0 ] && [ \"\$(ls $MHOME/.claude/skills | wc -l)\" -gt 0 ] && [ -f $MHOME/.agents/skills/fleet-notes/SKILL.md ]"
+  assert "$name: fleeter's fleet skill installed into the claude, agents and cursor skill dirs, recorded in the manifest" nexec "$c" sh -c "grep -q '^name: fleet$' $MHOME/.claude/skills/fleet/SKILL.md && [ -f $MHOME/.agents/skills/fleet/SKILL.md ] && [ -f $MHOME/.cursor/skills/fleet/SKILL.md ] && grep -qx $MHOME/.claude/skills/fleet $MHOME/.config/fleet/harness.manifest"
   assert "$name: ~/.local/bin/fleeter alias points at the installed checkout" [ "$(nexec "$c" readlink $MHOME/.local/bin/fleeter)" = "$MHOME/.local/share/fleet/fleet" ]
   assert "$name: ~/.codex/AGENTS.md + ~/.cursor/rules/fleet-global.mdc" nexec "$c" sh -c "test -s $MHOME/.codex/AGENTS.md && test -s $MHOME/.cursor/rules/fleet-global.mdc"
   assert "$name: code + config shipped, ~/.local/bin/fleet linked" nexec "$c" sh -c "test -x $MHOME/.local/share/fleet/fleet && test -f $MHOME/.local/share/fleet-config/AGENTS.md && [ \"\$(readlink $MHOME/.local/bin/fleet)\" = $MHOME/.local/share/fleet/fleet ]"

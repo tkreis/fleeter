@@ -613,7 +613,9 @@ class Capture:
         lines += ['', '## Excluded', '', '| Name | Seen in | Why |', '|---|---|---|']
         for n, s, why in excluded: lines.append('| %s | `%s` | %s |' % (n, s, why))
         lines += ['', 'Plugin-provided skills (Claude plugins) come from the marketplaces and plugins',
-                  'listed in `harness/claude/plugins.txt`, not from this directory.', '']
+                  'listed in `harness/claude/plugins.txt`, not from this directory. fleeter\'s own',
+                  '`fleet` skill (skills/fleet in the fleeter repo) is installed by `fleet apply` as',
+                  'well; a `fleet/` directory here replaces it.', '']
         write(os.path.join(dst_root, 'README.md'), '\n'.join(lines))
         return len(rows), len(excluded)
 
@@ -776,7 +778,8 @@ _harness_stage() {
     [ -f "$tpl/t3code/keybindings.json" ] && { harness_py render "$tpl/t3code/keybindings.json" "$tmp" "$@" || die "render t3code/keybindings.json"; put t3code .t3/userdata/keybindings.json 0644 <"$tmp"; }
   fi
 
-  # --- skills ---
+  # --- skills: the config repo's, then fleeter's own `fleet` skill unless the
+  #     config repo ships a skill of that name (yours wins) ---
   if [ -d "$(harness_skills_dir)" ]; then
     for s in "$(harness_skills_dir)"/*/; do
       [ -f "$s/SKILL.md" ] || continue
@@ -788,8 +791,73 @@ _harness_stage() {
       done
     done
   fi
+  if [ -f "$(harness_builtin_skill)/SKILL.md" ] && [ ! -f "$(harness_skills_dir)/fleet/SKILL.md" ]; then
+    for target in $(harness_skill_targets "$stage"); do
+      mkdir -p "$stage/$target"
+      cp -R "$(harness_builtin_skill)" "$stage/$target/fleet"
+      add dir skills "$target/fleet" 0755
+    done
+  fi
   rm -f "$tmp" "$tmp.a"
   unset -f add put
+}
+
+# ---------- fleeter's own agent skill (skills/fleet) ----------
+
+harness_builtin_skill() { echo "$FLEET_ROOT/skills/fleet"; }
+
+# harness_skill_targets [STAGE] — the skill dirs (relative to $HOME) the `fleet`
+# skill goes into: one per harness that is present on this machine (its config
+# dir exists in $HOME, or STAGE is about to create it) or listed in FLEET_TOOLS.
+# Codex reads ~/.agents/skills (~/.codex/skills is a link to it); Grok reads
+# the Claude and Cursor dirs itself.
+harness_skill_targets() {
+  local stage=${1:-} tools=" ${FLEET_TOOLS:-} " claude=0 codex=0 cursor=0 d
+  case "$tools" in *" claude "*) claude=1 ;; esac
+  case "$tools" in *" codex "*)  codex=1 ;; esac
+  case "$tools" in *" cursor "*) cursor=1 ;; esac
+  for d in "$HOME" ${stage:+"$stage"}; do
+    [ -d "$d/.claude" ] && claude=1
+    [ -d "$d/.codex" ] || [ -d "$d/.agents" ] && codex=1
+    [ -d "$d/.cursor" ] && cursor=1
+  done
+  [ "$claude" = 1 ] && echo .claude/skills
+  [ "$codex" = 1 ] && echo .agents/skills
+  [ "$cursor" = 1 ] && echo .cursor/skills
+  return 0
+}
+
+# _harness_manifest_add PATH [FILE] — remember a path fleet wrote, once
+# (FILE defaults to $FLEET_HOME/manifest, the cleanup list).
+_harness_manifest_add() {
+  local m=${2:-$FLEET_HOME/manifest}
+  if [ -f "$m" ] && grep -qxF "$1" "$m"; then return 0; fi
+  mkdir -p "$(dirname "$m")"
+  { [ -f "$m" ] && cat "$m" || true; printf '%s\n' "$1"; } | atomic_write "$m" 0600
+}
+
+# harness_skill_install — copy skills/fleet into every enabled skill dir of
+# this machine (master: `fleet init master`, `fleet skill install`). Idempotent:
+# a dir with the same content is left alone; a foreign dir of that name is kept
+# once as <dir>.pre-fleet. The paths go into $FLEET_HOME/manifest (cleanup) and
+# harness.manifest (ownership). Nodes get the same skill through harness_apply.
+harness_skill_install() {
+  local src tgt dest r n=0 changed=0
+  src=$(harness_builtin_skill)
+  [ -f "$src/SKILL.md" ] || { warn "no skill at $src"; return 0; }
+  need python3
+  for tgt in $(harness_skill_targets); do
+    dest="$HOME/$tgt/fleet"
+    r=$(_harness_install_dir "$src" "$dest")
+    _harness_manifest_add "$dest"
+    _harness_manifest_add "$dest" "$FLEET_HOME/harness.manifest"
+    n=$((n + 1)); [ -n "$r" ] && changed=$((changed + 1))
+  done
+  if [ "$n" = 0 ]; then
+    log "skill fleet: no harness found here (no ~/.claude, ~/.codex, ~/.agents or ~/.cursor; nothing in FLEET_TOOLS); nothing installed"
+  else
+    ok "skill fleet: $n dir(s) ($(harness_skill_targets | tr '\n' ' ' | sed 's/ $//'); $changed changed)"
+  fi
 }
 
 # _harness_install_file SRC DEST MODE — backup_once + atomic_write when content differs. Prints 1 if changed.

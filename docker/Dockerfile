@@ -78,6 +78,7 @@ COPY lib /opt/fleet/lib
 COPY config /opt/fleet/config
 COPY templates /opt/fleet/templates
 COPY examples /opt/fleet/examples
+COPY skills /opt/fleet/skills
 COPY docker/entrypoint.sh /usr/local/bin/fleet-entrypoint
 RUN chmod 0755 /opt/fleet/fleet /usr/local/bin/fleet-entrypoint \
  && ln -s /opt/fleet/fleet /usr/local/bin/fleet

@@ -788,6 +788,7 @@ cmd_init_master() {
   github_setup "$reconfigure"
   install_reconcile_schedule
   master_bin_link
+  harness_skill_install
   audit "init.master" "-" ok
   ok "master ready. next: fleet secrets set CLAUDE_CODE_OAUTH_TOKEN; fleet config publish; fleet invite"
 }

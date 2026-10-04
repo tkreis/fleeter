@@ -221,6 +221,7 @@ case "$(uname -s)" in
   *)      assert "systemd timer written" [ -f "$HOME/.config/systemd/user/fleet-reconcile.timer" ] ;;
 esac
 assert "init master installed the fleeter alias next to fleet (no fleet link here: points at this checkout)" [ "$(readlink "$HOME/.local/bin/fleeter")" = "$ROOT/fleet" ]
+assert "init master installed the fleet skill for the harnesses in FLEET_TOOLS (claude): ~/.claude/skills/fleet only" bash -c "printf '%s' \"\$0\" | grep -q 'skill fleet: 1 dir(s) (.claude/skills; 1 changed)' && cmp -s '$HOME/.claude/skills/fleet/SKILL.md' '$ROOT/skills/fleet/SKILL.md' && [ ! -e '$HOME/.agents' ] && [ ! -e '$HOME/.cursor' ]" "$out"
 key1=$(cat "$FLEET_VAULT/ssh/fleet_master.pub"); ts1=$(cat "$FLEET_VAULT/tailscale.json"); dk1=$(cat "$FLEET_VAULT/digest.key")
 out=$(bash "$FLEET" init master </dev/null 2>&1); rc=$?
 assert "init master idempotent (no prompts second time)" [ "$rc" = 0 ]
@@ -253,8 +254,8 @@ export -f vault_snap sha256
 snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
 HELP_OK=1; HELP_BAD=""
 for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite list nodes "ssh alpha" "provision alpha" reconcile "kick alpha" \
-         "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" doctor join apply pull update "memory sync" login status leave daemon \
-         init secrets files proxy t3 config policy memory; do
+         "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" doctor join apply pull update "memory sync" login status leave daemon \
+         init secrets files proxy t3 config policy memory skill; do
   for h in --help -h; do
     # shellcheck disable=SC2086  # $c is meant to split into words
     out=$(printf 'tskey-api-FAKE\n' | PATH="$T/tsbin:$PATH" bash "$FLEET" $c $h 2>&1); rc=$?
@@ -268,7 +269,7 @@ BAD_OK=1; BAD_BAD=""
 for c in "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
          "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "list --bogus" "list extra" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
          "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" \
-         nosuch; do
+         "skill frob" "skill install --bogus" nosuch; do
   # shellcheck disable=SC2086
   out=$(PATH="$T/tsbin:$PATH" bash "$FLEET" $c </dev/null 2>&1); rc=$?
   if [ "$rc" != 2 ] || ! printf '%s' "$out" | grep -qi 'usage'; then BAD_OK=0; BAD_BAD="$BAD_BAD [$c -> rc $rc]"; fi

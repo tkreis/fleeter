@@ -1059,6 +1059,66 @@ case_schedules_noload() {
   end
 }
 
+# fleeter's own `fleet` agent skill (skills/fleet): harness_apply installs it
+# into the skill dir of every harness present, records the paths, and a skill
+# of the same name in the config repo replaces it. `fleet skill install` does
+# the same directly (the master's path).
+case_skill() {
+  begin "skill: apply installs skills/fleet into the harness skill dirs (manifest), config repo's fleet/ wins, targets follow harness dirs + FLEET_TOOLS, skill install is idempotent"
+  local r2="$WORK/fleet-h" h h2 cfg rc out m1 m2
+  rm -rf "$r2"; cp -R "$ROOT" "$r2"
+  cp "$SRC/lib/harness.sh" "$r2/lib/"; mkdir -p "$r2/skills"; cp -R "$SRC/skills/fleet" "$r2/skills/fleet"
+  assert "shipped skill has the Agent Skills frontmatter (name: fleet, description)" bash -c "head -1 '$SRC/skills/fleet/SKILL.md' | grep -qx -- '---' && grep -qx 'name: fleet' '$SRC/skills/fleet/SKILL.md' && grep -q '^description: .*fleet' '$SRC/skills/fleet/SKILL.md'"
+  assert "shipped skill stays under 200 lines" [ "$(wc -l <"$SRC/skills/fleet/SKILL.md" | tr -d ' ')" -lt 200 ]
+  h=$(mk_home skill "base claude")
+  cfg="$h/.local/share/fleet-config"; git clone -q "$WORK/config.git" "$cfg"
+  HOME="$h" "$r2/fleet" apply >"$WORK/apply-skill.log" 2>&1; rc=$?
+  assert "apply exits 0 (see $WORK/apply-skill.log)" [ "$rc" -eq 0 ] || sed 's/^/     | /' "$WORK/apply-skill.log"
+  assert "fleet skill in ~/.claude/skills, ~/.agents/skills and ~/.cursor/skills (AGENTS.md makes every harness dir exist)" bash -c "[ -f '$h/.claude/skills/fleet/SKILL.md' ] && [ -f '$h/.agents/skills/fleet/SKILL.md' ] && [ -f '$h/.cursor/skills/fleet/SKILL.md' ]"
+  assert "installed skill is the shipped one" cmp -s "$h/.claude/skills/fleet/SKILL.md" "$SRC/skills/fleet/SKILL.md"
+  assert "the config repo's own skills are still installed next to it" [ -f "$h/.agents/skills/fleet-notes/SKILL.md" ]
+  assert "skill dirs recorded in harness.manifest and manifest (cleanup)" bash -c "grep -qx '$h/.claude/skills/fleet' '$h/.config/fleet/harness.manifest' && grep -qx '$h/.agents/skills/fleet' '$h/.config/fleet/harness.manifest' && grep -qx '$h/.cursor/skills/fleet' '$h/.config/fleet/manifest'"
+  m1=$(cat "$h/.config/fleet/harness.manifest")
+  HOME="$h" "$r2/fleet" apply >"$WORK/apply-skill2.log" 2>&1; rc=$?
+  m2=$(cat "$h/.config/fleet/harness.manifest")
+  assert "second apply: exit 0, manifest unchanged, skill still there" bash -c "[ '$rc' -eq 0 ] && [ \"\$0\" = \"\$1\" ] && [ -f '$h/.claude/skills/fleet/SKILL.md' ]" "$m1" "$m2"
+  # the config repo ships a skill named fleet: it replaces the built-in one everywhere
+  mkdir -p "$cfg/skills/fleet"; printf -- '---\nname: fleet\ndescription: the fleet-config version\n---\n# mine\n' >"$cfg/skills/fleet/SKILL.md"
+  HOME="$h" "$r2/fleet" apply >"$WORK/apply-skill3.log" 2>&1; rc=$?
+  assert "config repo skill of the same name wins in every skill dir" bash -c "[ '$rc' -eq 0 ] && grep -qx '# mine' '$h/.claude/skills/fleet/SKILL.md' && grep -qx '# mine' '$h/.agents/skills/fleet/SKILL.md' && grep -qx '# mine' '$h/.cursor/skills/fleet/SKILL.md'"
+  refute "no nested or leftover copy of the built-in skill" bash -c "[ -d '$h/.claude/skills/fleet/fleet' ] || grep -q 'Operate the user' '$h/.claude/skills/fleet/SKILL.md'"
+  rm -rf "$cfg/skills/fleet"
+  HOME="$h" "$r2/fleet" apply >"$WORK/apply-skill4.log" 2>&1
+  assert "without the config repo skill the built-in one is back" cmp -s "$h/.claude/skills/fleet/SKILL.md" "$SRC/skills/fleet/SKILL.md"
+  # targets: a harness dir in $HOME or its tool in FLEET_TOOLS enables a skill dir; nothing else does
+  h2="$WORK/homes/skilltargets"; rm -rf "$h2"; mkdir -p "$h2"
+  # shellcheck disable=SC2329  # invoked through assert
+  tg() { HOME="$1" FLEET_TOOLS="$2" FLEET_ROOT="$r2" FLEET_HOME="$1/.config/fleet" bash -c '. "$FLEET_ROOT/lib/common.sh"; . "$FLEET_ROOT/lib/harness.sh"; harness_skill_targets | tr "\n" " "'; }
+  assert "empty home, FLEET_TOOLS='base claude' -> .claude/skills only" [ "$(tg "$h2" 'base claude')" = ".claude/skills " ]
+  assert "empty home, no harness tools -> no target" [ -z "$(tg "$h2" 'base')" ]
+  mkdir -p "$h2/.cursor"
+  assert "a .cursor dir in HOME -> .cursor/skills added" [ "$(tg "$h2" 'base claude')" = ".claude/skills .cursor/skills " ]
+  assert "codex in FLEET_TOOLS -> .agents/skills" [ "$(tg "$h2" 'base codex')" = ".agents/skills .cursor/skills " ]
+  mkdir -p "$h2/.codex"
+  assert "a .codex dir in HOME -> .agents/skills too" [ "$(tg "$h2" 'base')" = ".agents/skills .cursor/skills " ]
+  unset -f tg
+  # fleet skill install (what the master runs): only the enabled dirs, idempotent, foreign dir kept once
+  h2=$(mk_home skill2 "base")
+  mkdir -p "$h2/.cursor/skills/fleet"; echo "someone else's" >"$h2/.cursor/skills/fleet/SKILL.md"
+  out=$(HOME="$h2" "$r2/fleet" skill install 2>&1); rc=$?
+  assert "skill install exits 0 and names the one enabled dir" bash -c "[ '$rc' -eq 0 ] && printf '%s' \"\$0\" | grep -q 'skill fleet: 1 dir(s) (.cursor/skills; 1 changed)'" "$out"
+  assert "installed into ~/.cursor/skills only" bash -c "cmp -s '$h2/.cursor/skills/fleet/SKILL.md' '$SRC/skills/fleet/SKILL.md' && [ ! -e '$h2/.claude/skills' ] && [ ! -e '$h2/.agents/skills' ]"
+  assert "the foreign fleet skill dir was kept as .pre-fleet" grep -q "someone else" "$h2/.cursor/skills/fleet.pre-fleet/SKILL.md"
+  assert "recorded in manifest and harness.manifest" bash -c "grep -qx '$h2/.cursor/skills/fleet' '$h2/.config/fleet/manifest' && grep -qx '$h2/.cursor/skills/fleet' '$h2/.config/fleet/harness.manifest'"
+  out=$(HOME="$h2" "$r2/fleet" skill install 2>&1); rc=$?
+  assert "second skill install: exit 0, 0 changed, manifest has the path once" bash -c "[ '$rc' -eq 0 ] && printf '%s' \"\$0\" | grep -q '0 changed' && [ \"\$(grep -cx '$h2/.cursor/skills/fleet' '$h2/.config/fleet/manifest')\" = 1 ]" "$out"
+  out=$(HOME="$h2" "$r2/fleet" skill install --help 2>&1); rc=$?
+  assert "skill install --help prints the synopsis" bash -c "[ '$rc' -eq 0 ] && [ \"\$0\" = 'fleet skill install' ]" "$out"
+  out=$(HOME="$h2" "$r2/fleet" skill frob 2>&1); rc=$?
+  assert "skill frob exits 2 with usage" bash -c "[ '$rc' -eq 2 ] && printf '%s' \"\$0\" | grep -q 'usage:'" "$out"
+  end
+}
+
 case_build_index() {
   begin "templates/memory: build_index.py lists notes grouped by node"
   local v="$WORK/vault" out
@@ -1120,6 +1180,7 @@ case_chrome_wrapper
 case_base_status
 case_harness_toml
 case_entrypoint_invite
+case_skill
 case_build_index
 echo "==> $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

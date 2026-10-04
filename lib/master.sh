@@ -174,6 +174,26 @@ repo_rev() {
   git -C "$1" rev-parse HEAD 2>/dev/null || sha256_tree "$1"
 }
 code_rev()   { repo_rev "$FLEET_ROOT"; }
+
+# revs_pushed DIR — true when DIR's HEAD is contained in its upstream branch,
+# i.e. a node can actually pull it. No upstream or not a git repo: false.
+revs_pushed() {
+  local dir=$1
+  [ -d "$dir/.git" ] || return 1
+  git -C "$dir" rev-parse --verify --quiet '@{u}' >/dev/null 2>&1 || return 1
+  git -C "$dir" merge-base --is-ancestor HEAD '@{u}' 2>/dev/null
+}
+
+# node_behind_pushed ID — the node recorded older code/config revs than this
+# checkout, and this checkout's revs are pushed (so a provision would help).
+node_behind_pushed() {
+  local acc want
+  acc=$(registry_get "$1" applied_commit)
+  want="$(code_rev)+$(config_rev)"
+  [ -n "$acc" ] && [ "$acc" != "$want" ] || return 1
+  revs_pushed "$FLEET_ROOT" || return 1
+  [ ! -d "$FLEET_CONFIG_DIR" ] || revs_pushed "$FLEET_CONFIG_DIR"
+}
 config_rev() { if [ -d "$FLEET_CONFIG_DIR" ]; then repo_rev "$FLEET_CONFIG_DIR"; else echo none; fi; }
 
 # desired_digest PROFILE — sha256 over the code rev + config rev and, for the
@@ -1850,7 +1870,9 @@ reconcile_run() {
     digest=$(desired_digest "$profile")
     if [ "$state" = provisioned ] && [ "$(registry_get "$pid" provisioned_digest)" = "$digest" ]; then
       applied=$(node_ssh "$pid" 'cat ~/.config/fleet/applied 2>/dev/null' </dev/null 2>/dev/null || true)
-      [ "$applied" = "$digest" ] && continue
+      # Same digest is not enough: a node provisioned while the master had
+      # unpushed commits applied older revs. Once those revs are pushed, try again.
+      if [ "$applied" = "$digest" ] && ! node_behind_pushed "$pid"; then continue; fi
     fi
     lock_acquire "$lock" || continue
     provision_locked "$pid" || true

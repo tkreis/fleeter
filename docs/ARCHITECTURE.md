@@ -224,7 +224,11 @@ All jobs run as the user, never root: macOS `~/Library/LaunchAgents/dev.fleet.<j
 Linux systemd user timers `fleet-<job>.timer` (`loginctl enable-linger`
 attempted during join), or crontab lines when there is no user session;
 containers run `fleet daemon` in the foreground (PID 1 safe, TERM → `leave`).
-Jobs: `pull`, `memory`, `update`; the master adds `reconcile`.
+Jobs: `pull`, `memory`, `update`; the master adds `reconcile` (every 2 min, fast
+enrolment) and `sync` (every 30 min: fast-forward its own code and config
+checkouts when clean and behind, reconcile, and once a day `fleet update` on
+the online nodes). Both master jobs share `vault/locks/.sync`, so they never
+run at the same time.
 
 ## Docker nodes
 

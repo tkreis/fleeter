@@ -16,9 +16,10 @@ database.
                    ▼
  ┌──────────── master ─────────────┐        GitHub (private repos, per-node deploy keys)
  │ fleet reconcile  (timer, 2 min) │        ┌─ fleeter       code       (RO, or public https)
- │ ~/.config/fleet/vault  0700     │        ├─ fleet-config  your layer (RO)
- │   secrets/ files/ nodes/ ssh/   │        └─ fleet-memory  shared vault (RW, nodes/<name>/ only; optional)
- └──────────┬──────────────────────┘                 ▲  pull every 15 min / sync every 5 min
+ │ fleet sync       (timer, 30 min)│◀──────▶├─ fleet-config  your layer (RO)
+ │ ~/.config/fleet/vault  0700     │        └─ fleet-memory  shared vault (RW, nodes/<name>/ only; optional)
+ │   secrets/ files/ nodes/ ssh/   │                 ▲  pull every 15 min / sync every 5 min
+ └──────────┬──────────────────────┘                 │
             │ OpenSSH, master → node only            │
    ┌────────┼─────────┬──────────────┐               │
    ▼        ▼         ▼              ▼               │
@@ -75,7 +76,8 @@ fleet init master --config-dir ~/fleet-config
 #   checks Tailscale login, git identity, GitHub access; then asks for one short-lived
 #   Tailscale API access token (opens the keys page; revoked at the end), the typed word
 #   `apply` to merge the fleet rules into your tailnet policy, and one `gh auth login --web`
-#   approval if gh is not logged in. Installs the reconcile timer (every 2 min).
+#   approval if gh is not logged in. Installs the reconcile (2 min) and sync (30 min) timers,
+#   the `fleeter` command alias and the `fleet` agent skill for your coding agents.
 claude setup-token                                      # prints a 1-year token
 fleet secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal
 fleet config publish --no-capture                       # push the example config as it is (see "Push new skills")
@@ -85,7 +87,7 @@ fleet doctor
 cd ~/fleeter && docker build -f docker/Dockerfile -t fleet-node:local .
 docker/spawn.sh 1                                       # mints an invite, starts fleet-dock-<rand>
 fleet reconcile                                         # or wait for the timer; first provision takes a few minutes
-fleet nodes                                             # STATE provisioned when done
+fleet list                                              # STATE provisioned, SYNCED yes when done
 
 # 5. the first agent command on the node
 fleet ssh fleet-dock-ab12cd claude -p 'say hello and tell me which machine you are on'
@@ -201,7 +203,7 @@ missing, enables Remote Login (key-only, verified with `sshd -T`), adds the
 master's key, generates the deploy keys and writes `~/.config/fleet/enrol.json`.
 Then it waits. Within two minutes the master's `reconcile` timer enrols the
 node, registers its deploy keys, pushes code, config, secrets and files, and
-runs `fleet apply` remotely. Check with `fleet nodes`. Rerunning the one-liner
+runs `fleet apply` remotely. Check with `fleet list`. Rerunning the one-liner
 is safe.
 
 ### Add a Linux box
@@ -232,13 +234,78 @@ environment variable. Ephemeral nodes vanish from the tailnet when the
 container stops; a node absent for an hour has its deploy keys revoked by the
 next reconcile. See `docker/README.md`.
 
-### See what is running
+### See the whole fleet
 
 ```sh
-fleet nodes                 # registry: name, id, online, state, profile, age
-fleet nodes --live          # plus each node's tool states (claude:ok codex:login …), fetched over SSH
-fleet ssh studio fleet status   # on a node: versions, logins, revs, memory state, timers, token ages
+fleet list                  # one line per node, the command to run first
+fleet list --json           # the same as a stable JSON array (schema: docs/CONTRACT.md)
+fleet list --offline        # registry + tailnet only, no SSH (fast; works with every node asleep)
 ```
+
+```
+NAME    HOST          ONLINE  STATE        SYNCED  LAST PROVISION  TOOLS                   MEMORY  PROXY  FLEET
+mac2    fleet-mac2    yes     provisioned  yes     3h              9 ok, 1 login: cursor   ok      ok     0.3.0
+build   fleet-build   yes     provisioned  behind  2d              unreachable             -       -      -
+dock-7  fleet-dock-7  no      provisioned  ?       -               -                       -       -      -
+fleet-x fleet-x       yes     unknown      -       -               -                       -       -      -
+```
+
+`fleet list` joins the registry, the tailnet peer list and, for every online
+node, its `fleet status --json` (fetched in parallel, 10 s cap each,
+`FLEET_LIST_SECS`). SYNCED compares what the node applied (code and config
+revisions, digest) with what this master wants: `behind` means the next
+`reconcile`/`sync` will provision it. A node on the tailnet that did not answer
+shows `unreachable`; a tagged device the master never enrolled shows `unknown`.
+The exit code is 0 either way. `fleet nodes [--live]` is the older compact
+registry table and still works; `fleet ssh NODE fleet status` is the detailed
+view of one node (versions, logins, revs, memory, timers, token ages).
+
+### Let agents drive fleet
+
+fleeter ships an [Agent Skill](skills/fleet/SKILL.md) that tells Claude Code,
+Codex and Cursor when and how to use `fleet`: the read-only commands to start
+with, the exact command for each job, what needs the user's confirmation
+(`kick`, `leave`, `policy apply`, `config publish`, overwriting a secret), that
+secret values never go into argv or a transcript, and how to read the `list`
+columns. `fleet init master` installs it into `~/.claude/skills/fleet`,
+`~/.agents/skills/fleet` (Codex) and `~/.cursor/skills/fleet` for every harness
+present on the master or listed in `FLEET_TOOLS`; `fleet skill install` repeats
+that any time; `fleet apply` does the same on every node (a `skills/fleet/`
+directory in your config repo replaces it). Then, in any agent:
+
+```
+> which of my machines are behind, and why?
+> run the test suite of ~/projects/app on build and summarise the failures
+> cursor on mac2 needs a login — what do I do?
+```
+
+The agent runs `fleet list --json`, `fleet ssh NODE …` and the rest for you.
+
+### Automatic updates
+
+Nothing has to be pushed by hand. Every `FLEET_SYNC_EVERY` (30) minutes the
+master runs `fleet sync`:
+
+1. fast-forwards its own fleeter checkout and the config checkout from their
+   upstream branch, **only** when the working tree is clean and the branch is
+   strictly behind (never a stash, reset or merge; a dirty or diverged checkout
+   is reported and left alone; after a code update sync re-executes itself
+   from the new code);
+2. runs `reconcile`: enrols waiting nodes and provisions every node whose
+   desired state (code, config, secrets, files) changed, which is what carries a
+   `git push` to your config repo, a `fleet secrets set` or a new fleeter
+   release to the nodes;
+3. every `FLEET_PUSH_TOOLS_EVERY` (1440) minutes runs `fleet update` on the
+   online provisioned nodes in parallel (`0` = never; the nodes keep their own
+   daily update timer either way).
+
+`fleet sync` by hand runs the same once; it is quiet when nothing happened and
+logs to `~/.config/fleet/sync.log` when run from the timer. The 2-minute
+`reconcile` timer stays for fast enrolment; the two share a master-wide lock
+(`vault/locks/.sync`), so they never overlap. `fleet schedule install` (re)writes
+both timers, e.g. after changing the intervals in `fleet.conf`. Nodes still
+pull the repos themselves every `FLEET_PULL_EVERY` minutes, so a master that is
+asleep only delays secrets and tool pushes, not code or config.
 
 ### Run something on a node
 
@@ -270,8 +337,9 @@ included, so install it on the master if you want to keep it (or publish with
 config checkout (`FLEET_CONFIG_DIR`) and pushes to **that checkout's `origin`**;
 the diff it shows is `git diff --cached` (stat plus the first 200 lines,
 `FLEET_PUBLISH_DIFF_LINES`). Nodes pull the config repo every
-`FLEET_PULL_EVERY` (15) minutes and re-apply; `fleet reconcile` or
-`fleet provision NODE` does it right away.
+`FLEET_PULL_EVERY` (15) minutes and re-apply; the master's `fleet sync` timer
+(30 min) provisions them with it too; `fleet reconcile` or `fleet provision
+NODE` does it right away.
 
 ### Add or rotate a secret
 
@@ -434,16 +502,20 @@ and kick).
 
 | Command | Flags | What it does |
 |---|---|---|
-| `fleet init master` | `--config-dir DIR`, `--reconfigure` | Preflight (commands, Tailscale logged in, git identity, how GitHub is reached), then: records the config dir in `~/.config/fleet/fleet.conf` (offers to clone `FLEET_CONFIG_REPO` into it when missing), creates the vault, master SSH key, digest key (and the T3 client key with `FLEET_T3_REMOTE=1`); Tailscale: bootstrap token → policy check/merge-apply → scoped OAuth client (token revoked; init stops if the policy step is skipped); GitHub: `gh auth login --web` or token; installs the reconcile timer. `--reconfigure` redoes the Tailscale/GitHub steps. Idempotent. |
+| `fleet init master` | `--config-dir DIR`, `--reconfigure` | Preflight (commands, Tailscale logged in, git identity, how GitHub is reached), then: records the config dir in `~/.config/fleet/fleet.conf` (offers to clone `FLEET_CONFIG_REPO` into it when missing), creates the vault, master SSH key, digest key (and the T3 client key with `FLEET_T3_REMOTE=1`); Tailscale: bootstrap token → policy check/merge-apply → scoped OAuth client (token revoked; init stops if the policy step is skipped); GitHub: `gh auth login --web` or token; installs the reconcile and sync timers, the `~/.local/bin/fleeter` alias and the `fleet` agent skill. `--reconfigure` redoes the Tailscale/GitHub steps. Idempotent. |
 | `fleet secrets set NAME` | `--profile minimal\|full` (default full) | Stores one secret from a hidden prompt or stdin into `vault/secrets/<profile>.env`. |
 | `fleet secrets list` | | Names and profiles only. |
 | `fleet files add PATH` | `--profile minimal\|full` | Mirrors a file under `$HOME` into the vault; recreated at the same relative path on nodes. |
 | `fleet proxy import [DIR]` | | Copies CLIProxyAPI `conf/config.yaml` and `auth/*.json` from DIR (default `FLEET_CLIPROXY_DIR`) into the full profile. |
 | `fleet invite` | `--ephemeral`, `--profile P`, `--name N`, `--user U`, `--code-only` | Mints a single-use, pre-authorized, tagged Tailscale key (1 h), records a pending invite (nonce), prints the join one-liner and the invite code (which also carries `FLEET_TOOLS`). `--ephemeral` = ephemeral device + minimal profile. `--user` = login the master will SSH to. `--code-only` prints just the code. |
-| `fleet nodes` | `--live` | Registry table; `--live` adds each node's tool states over SSH (10 s timeout each). Unregistered tagged peers show as `unknown`. |
+| `fleet list` | `--json`, `--offline` | The fleet overview: registry + tailnet peers + each online node's `fleet status --json` (parallel, `FLEET_LIST_SECS` = 10 s each). Columns NAME, HOST, ONLINE, STATE, SYNCED, LAST PROVISION, TOOLS, MEMORY, PROXY, FLEET; `--json` a stable array (`docs/CONTRACT.md`); `--offline` skips SSH. Unknown tagged peers listed as `unknown`, nodes that did not answer as `unreachable`; exit 0 regardless. Never writes the vault. |
+| `fleet nodes` | `--live` | Compact registry table (name, id, online, state, profile, age); `--live` adds each node's tool states over SSH. Kept for scripts; `fleet list` supersedes it. |
 | `fleet ssh NODE [COMMAND...]` | | Shell on NODE, or run COMMAND there with the node's fleet environment (`env.sh`) loaded; name resolved through the registry, master key, pinned host key. `fleet ssh NODE --help` is help; anything longer after NODE is the remote command. |
 | `fleet provision NODE` | `--refresh-proxy-auth` | Takes the node lock, ships code and config (when the node has no git checkout of them, or no repo URL is set), secrets, files (via a staging dir), the T3 key line (only when the T3 key exists), runs `fleet pull --no-apply` on the node, then `fleet apply --from-master <digest>`; records the `<code>+<config>` the node reports it applied. NODE = registered name or Tailscale id, never a guessed hostname. |
-| `fleet reconcile` | | Expires old invites, enrols new tagged peers (nonce check, claims the invite atomically, registers the deploy keys), provisions nodes whose digest differs, retries pending cleanups, tracks missing devices and revokes them after the grace period. Convergent; quiet when nothing to do. Runs every `FLEET_RECONCILE_EVERY` minutes. |
+| `fleet reconcile` | | Expires old invites, enrols new tagged peers (nonce check, claims the invite atomically, registers the deploy keys), provisions nodes whose digest differs, retries pending cleanups, tracks missing devices and revokes them after the grace period. Convergent; quiet when nothing to do. Runs every `FLEET_RECONCILE_EVERY` minutes; skips (exit 0) while a `fleet sync` holds the master lock. |
+| `fleet sync` | | The periodic push (timer: `FLEET_SYNC_EVERY`): fast-forward the fleeter and config checkouts from their upstream when clean and behind, `reconcile`, and every `FLEET_PUSH_TOOLS_EVERY` minutes `fleet update` on the online provisioned nodes (parallel, `FLEET_SYNC_UPDATE_SECS` cap each; last run in `vault/sync.json`). Quiet when nothing happened; see "Automatic updates". |
+| `fleet schedule install` | | (Re)install the `reconcile` and `sync` timers (LaunchAgents `dev.fleet.reconcile`/`dev.fleet.sync`, or systemd user timers `fleet-reconcile`/`fleet-sync`) with the intervals from `fleet.conf`. Idempotent; `FLEET_NO_SCHEDULER=1` writes without loading. |
+| `fleet skill install` | | Copy fleeter's `fleet` agent skill (`skills/fleet`) into `~/.claude/skills`, `~/.agents/skills` and `~/.cursor/skills`, each only when that harness exists here or its tool is in `FLEET_TOOLS`. Idempotent; a foreign `fleet` skill dir is kept once as `.pre-fleet`. `fleet init master` runs it; nodes get the skill from `fleet apply`. |
 | `fleet kick NODE` | `--yes` | Revoke: see "Kick a node". |
 | `fleet t3 setup [NODE]` | | Creates `vault/ssh/t3_client` if missing, pins the node's host key, puts the restricted key line into the node's `authorized_keys`, regenerates `~/.ssh/config.d/fleet` and the `Include` at the top of `~/.ssh/config`, prints what to click in T3 Code. Without NODE: every registered node. Re-enables a node after `t3 revoke`. |
 | `fleet t3 status [NODE]` | | Per node: pinned host key, the alias as `ssh -G` resolves it, a BatchMode connection with the client key running T3's discovery, and the node's T3 sessions and pairing tokens (metadata only). |
@@ -461,7 +533,7 @@ and kick).
 | `fleet status` | `--json` | Writes and prints `~/.config/fleet/status.json`. |
 | `fleet leave` | | Stops the daemon/timers, harness processes and the proxy, `tailscale logout`. Files stay (see "Uninstall"). |
 | `fleet daemon` | | Foreground scheduler for containers (PID 1 safe): runs pull/memory/update on their intervals through `~/.local/bin/fleet`, re-executes itself after a code update, handles TERM with `leave`. |
-| `fleet --version`, `fleet --help` | | |
+| `fleet --version`, `fleet --help` | | `fleeter` is the same command under the project's name (`~/.local/bin/fleeter`, written by `init master` and node `apply`). |
 | `docker/spawn.sh N` | `--image IMG`, `--profile P`, `--dry-run`, `-- DOCKER_ARGS` | On the master: N ephemeral containers, one invite each (`--user fleet`), invite via bind-mounted file. No arguments → usage, exit 2. |
 
 ## Config reference
@@ -499,7 +571,9 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_CAPTURE_AGENT_EXCLUDE` | `""` | Claude agent files (basename without `.md`) not captured. |
 | `FLEET_CAPTURE_AGENT_MARKERS` | `""` | `;`-separated text markers; an agent file containing one is not captured. |
 | `FLEET_CAPTURE_RULE_DROP` | `""` | Extra words that drop a Codex `prefix_rule` on capture. |
-| `FLEET_PULL_EVERY` / `FLEET_MEMORY_EVERY` / `FLEET_UPDATE_EVERY` / `FLEET_RECONCILE_EVERY` | `15` / `5` / `1440` / `2` | Timer intervals in minutes. |
+| `FLEET_PULL_EVERY` / `FLEET_MEMORY_EVERY` / `FLEET_UPDATE_EVERY` / `FLEET_RECONCILE_EVERY` | `15` / `5` / `1440` / `2` | Timer intervals in minutes (nodes: pull, memory, update; master: reconcile). |
+| `FLEET_SYNC_EVERY` | `30` | Minutes between `fleet sync` runs on the master (fast-forward checkouts, reconcile, tool push). `fleet schedule install` applies a change. |
+| `FLEET_PUSH_TOOLS_EVERY` | `1440` | Minutes between `fleet update` pushes to the online nodes from `fleet sync`; `0` = never push tool updates from the master. |
 | `FLEET_MISSING_GRACE_HOURS` | `24` | Hours a non-ephemeral node may be gone from the device list before its keys are revoked (ephemeral: 1 h fixed). |
 | `FLEET_DEFAULT_PROFILE` / `FLEET_EPHEMERAL_PROFILE` | `full` / `minimal` | Secret profile for normal / `--ephemeral` invites. |
 
@@ -514,6 +588,7 @@ Environment knobs (not config keys; all optional):
 | `FLEET_HEADLESS=0\|1`, `FLEET_CHROME_PROFILE` | Browser MCP wrappers: force headed/headless; profile dir (default `~/.cache/fleet/chrome-profile`). |
 | `FLEET_HARNESS_NO_CLI=1` | Skip `claude plugin` calls during apply. |
 | `FLEET_APPLY_LOCK_WAIT`, `FLEET_STATUS_SECS`, `FLEET_PUBLISH_DIFF_LINES` | Seconds to wait for the apply lock (600); cap per tool status check (20); diff lines shown by publish (200). |
+| `FLEET_LIST_SECS`, `FLEET_SYNC_UPDATE_SECS` | `fleet list`: seconds to wait for each node's status (10); `fleet sync`: seconds for each node's `fleet update` (900). |
 | `FLEET_INVITE_CODE`, `FLEET_INVITE_FILE` | `fleet join` without the prompt (containers); the file form never shows in `docker inspect`. |
 | `FLEET_LOCAL_CONF`, `FLEET_TOOLS`, `FLEET_FAKE_TAILSCALE` | Container entrypoint: content for the node's local `fleet.conf`; a tool-list shortcut; test mode without tailscaled. |
 | `FLEET_NODE_IMAGE` | Image used by `docker/spawn.sh` (default `fleet-node:local`). |
@@ -537,10 +612,13 @@ tailscale.json                          OAuth client (auth_keys, devices:core, p
 github.json                             fallback token (only without gh)
 nodes/<ts-id>.json                      registry; nodes/pending/, nodes/claimed/, rollback-* tombstones
 policy-backups/<timestamp>.hujson       the live policy as it was before each `policy apply`
-locks/<ts-id>/{pid,token}, locks/.registry
+sync.json                               last `fleet update` push to the nodes (fleet sync)
+locks/<ts-id>/{pid,token}, locks/.registry, locks/.sync (sync and reconcile never overlap)
 audit.log                               one line per action
-~/.config/fleet/fleet.conf              FLEET_CONFIG_DIR + local overrides; reconcile.log
-~/Library/LaunchAgents/dev.fleet.reconcile.plist   or ~/.config/systemd/user/fleet-reconcile.{service,timer}
+~/.config/fleet/fleet.conf              FLEET_CONFIG_DIR + local overrides; reconcile.log, sync.log; logs/update-<node>.log (failed pushes)
+~/Library/LaunchAgents/dev.fleet.{reconcile,sync}.plist   or ~/.config/systemd/user/fleet-{reconcile,sync}.{service,timer}
+~/.local/bin/fleeter                    alias of ~/.local/bin/fleet (same target)
+~/.claude/skills/fleet, ~/.agents/skills/fleet, ~/.cursor/skills/fleet   fleeter's agent skill (for the harnesses present here)
 ~/.ssh/config.d/fleet                   `Host fleet-<name>` blocks for T3 Code, regenerated from the registry (0600).
 ~/.ssh/config                           gets `Include ~/.ssh/config.d/fleet` as its first line (original: config.pre-fleet) — written
                                         only when the T3 client key exists AND at least one node has T3 access; never otherwise
@@ -551,7 +629,8 @@ Node:
 ```
 ~/.local/share/fleet/            fleeter code (tar copy, then a checkout of FLEET_CODE_REPO)
 ~/.local/share/fleet-config/     your config repo (tar copy, then a checkout)
-~/.local/bin/fleet               symlink; ~/.local/bin/fleet-chrome-mcp, fleet-playwright-mcp wrappers (chrome plug-in)
+~/.local/bin/fleet, fleeter      symlinks; ~/.local/bin/fleet-chrome-mcp, fleet-playwright-mcp wrappers (chrome plug-in)
+~/.claude/skills/fleet, ~/.agents/skills/fleet, ~/.cursor/skills/fleet   fleeter's agent skill (unless your config repo ships its own skills/fleet)
 ~/.config/fleet/enrol.json       nonce, name, user, os, arch (written by join, 0600)
 ~/.config/fleet/secrets.env      from the master (0600); env.sh sources it, exports PATH, FLEET_NODE, ANTHROPIC_* (proxy enabled only)
 ~/.config/fleet/applied, applied_at, applied_commit (<code>+<config>), status.json, memory.state (ok|conflict|missing|off)
@@ -578,7 +657,7 @@ stay so a later re-join is cheap. To remove them too:
 
 ```sh
 rm -rf ~/.local/share/fleet ~/.local/share/fleet-config ~/.config/fleet
-rm -f ~/.local/bin/fleet ~/.local/bin/fleet-chrome-mcp ~/.local/bin/fleet-playwright-mcp
+rm -f ~/.local/bin/fleet ~/.local/bin/fleeter ~/.local/bin/fleet-chrome-mcp ~/.local/bin/fleet-playwright-mcp
 rm -f ~/.ssh/fleet_code ~/.ssh/fleet_code.pub ~/.ssh/fleet_config ~/.ssh/fleet_config.pub ~/.ssh/fleet_memory ~/.ssh/fleet_memory.pub
 # ~/.ssh/config, ~/.zshrc, ~/.bashrc, ~/.profile, …: delete the `# >>> fleet >>> … # <<< fleet <<<` block, or restore <file>.pre-fleet
 # ~/.ssh/authorized_keys: delete the master's `fleet-master@…` line and any `fleet-t3-client` line
@@ -590,22 +669,23 @@ Timers are already gone after `fleet leave` (`dev.fleet.*` LaunchAgents, `fleet-
 systemd user units or the `# fleet:` crontab lines). Installed tools (mise, the
 agent CLIs, Chrome, Docker) are left alone.
 
-**The master.** Kick every node first (`fleet nodes`, `fleet kick NODE`), then:
+**The master.** Kick every node first (`fleet list`, `fleet kick NODE`), then:
 
 ```sh
-# the reconcile timer
-launchctl bootout "gui/$(id -u)/dev.fleet.reconcile"; rm -f ~/Library/LaunchAgents/dev.fleet.reconcile.plist     # macOS
-systemctl --user disable --now fleet-reconcile.timer; rm -f ~/.config/systemd/user/fleet-reconcile.{service,timer}  # Linux
+# the reconcile and sync timers
+for j in reconcile sync; do launchctl bootout "gui/$(id -u)/dev.fleet.$j"; rm -f ~/Library/LaunchAgents/dev.fleet.$j.plist; done      # macOS
+for j in reconcile sync; do systemctl --user disable --now fleet-$j.timer; rm -f ~/.config/systemd/user/fleet-$j.{service,timer}; done  # Linux
 # keep a copy of the vault if you may come back (secrets, keys, the OAuth client, the registry, audit log, policy backups)
 (umask 077; tar -C ~/.config/fleet -czf ~/fleet-vault-backup.tgz vault)        # restore: tar -C ~/.config/fleet -xzf ~/fleet-vault-backup.tgz
 # the T3 ssh include (only if fleet t3 setup was used)
 sed -i.bak '/^Include ~\/.ssh\/config.d\/fleet$/d' ~/.ssh/config; rm -rf ~/.ssh/config.d/fleet   # or restore ~/.ssh/config.pre-fleet
 # Tailscale: delete the OAuth client "fleet master" (admin console → Settings → OAuth clients) and, if you want the
 # fleet rules out of your policy, paste the newest vault/policy-backups/*.hujson back into the policy editor
-rm -rf ~/.config/fleet ~/.local/bin/fleet ~/fleeter
+rm -rf ~/.config/fleet ~/.local/bin/fleet ~/.local/bin/fleeter ~/fleeter
+rm -rf ~/.claude/skills/fleet ~/.agents/skills/fleet ~/.cursor/skills/fleet    # the agent skill
 ```
 
-Deploy keys of kicked nodes are already deleted; `fleet nodes` showing
+Deploy keys of kicked nodes are already deleted; `fleet list` showing
 `cleanup-pending` means a delete is still being retried (`fleet reconcile`).
 
 ## FAQ
@@ -657,7 +737,17 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
 - **`fleet init master` says Tailscale is not logged in** — `tailscale status`
   must list your tailnet (macOS: the Tailscale app; Linux: `sudo tailscale up`).
   **…git has no identity** — `git config --global user.name …` / `user.email …`.
-- **`fleet nodes` shows a peer as `unknown`** — tagged device the master has not
+- **`fleet list` shows a node as `behind`** — the node's applied code/config
+  revisions or digest differ from this master's: `fleet provision NODE`, or
+  wait for `fleet sync`. If it stays behind, the master's own checkout is
+  ahead of what is pushed (nodes only pull what is on the remote): `git push`
+  / `fleet config publish`. **…`unreachable`** — on the tailnet but SSH did
+  not answer within 10 s: `fleet ssh NODE true`; `FLEET_LIST_SECS=30 fleet list`
+  for a slow node.
+- **`fleet sync` warns `uncommitted changes` or `diverged`** — it never
+  touches such a checkout; commit/push or `git pull --rebase` by hand in
+  `$FLEET_ROOT` or the config dir and the next run fast-forwards again.
+- **`fleet list` shows a peer as `unknown`** — tagged device the master has not
   enrolled: the nonce did not match a pending invite (expired? reused?), or SSH
   failed. Check `ssh -i ~/.config/fleet/vault/ssh/fleet_master <user>@<dnsname>`;
   mint a new invite and rerun the one-liner (`FLEET_VERBOSE=1 fleet reconcile`
@@ -685,8 +775,8 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
 - **`fleet config publish` removed `skills/fleet-notes`** — capture mirrors the
   master; install the skill there or publish with `--no-capture`.
 - **Node joined, but `~/.local/bin/fleet` is missing on it** — the master is
-  still setting it up. `fleet nodes` shows `provisioning`; follow it with
-  `tail -f ~/.config/fleet/reconcile.log` on the master.
+  still setting it up. `fleet list` shows `provisioning`; follow it with
+  `tail -f ~/.config/fleet/reconcile.log` (or `sync.log`) on the master.
 - **Hostname got a `-1` suffix (`fleet-mac2-1`)** — Tailscale already had a
   device with that name. Fleet uses the real name from the registry, so nothing
   breaks; delete the stale device in the admin console for the plain name.
@@ -710,8 +800,8 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
   rotate.
 - **No GUI logins.** Claude desktop, ChatGPT desktop, Cursor IDE, the Chrome
   extension: fleeter opens them (macOS) and reports the manual step.
-- **No control panel.** Use `fleet nodes --live`, `fleet kick`, and the
-  Tailscale admin console from the phone.
+- **No control panel.** Use `fleet list`, `fleet kick`, and the Tailscale
+  admin console from the phone (or let an agent run them: "Let agents drive fleet").
 - **No protection from processes already running as your user on the master**;
   the vault is 0700 on a disk you should encrypt.
 - **`launchctl setenv` argv note (macOS):** with a local CLIProxyAPI,

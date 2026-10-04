@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.3.0 — 2026-10-04
+
+The fleet becomes visible in one command, drivable by agents, and keeps itself
+current from the master.
+
+### Added
+- `fleet list [--json] [--offline]`: the one-shot overview. Registry + tailnet
+  peers + each online node's `fleet status --json` (parallel, 10 s cap each,
+  `FLEET_LIST_SECS`). Columns NAME, HOST, ONLINE, STATE, SYNCED (applied revs
+  and digest against the master's), LAST PROVISION, TOOLS (`9 ok, 1 login:
+  cursor`), MEMORY, PROXY, FLEET. Nodes that do not answer show `unreachable`,
+  tagged peers never enrolled `unknown`; exit 0 regardless. `--json` is a
+  stable array documented in `docs/CONTRACT.md`; `--offline` skips SSH.
+  `fleet nodes [--live]` stays as the compact registry table.
+- `fleeter` as a second name for the command: `fleet init master` and node
+  `apply` write `~/.local/bin/fleeter` next to `~/.local/bin/fleet`.
+- `skills/fleet/SKILL.md`: an Agent Skill that tells Claude Code, Codex and
+  Cursor when and how to use `fleet` (read-only first, exact commands, what
+  needs the user's confirmation, secrets never in argv or transcripts, shared
+  memory rules, a troubleshooting table). Installed by `fleet init master` and
+  the new `fleet skill install` into `~/.claude/skills`, `~/.agents/skills`,
+  `~/.cursor/skills` (each only for a harness present here or in
+  `FLEET_TOOLS`), and on nodes by `fleet apply` (a `skills/fleet/` in the config
+  repo wins). Paths are recorded in the manifests for cleanup.
+- `fleet sync`: the periodic master push, every `FLEET_SYNC_EVERY` (30) minutes
+  from a new `dev.fleet.sync` LaunchAgent / `fleet-sync` systemd user timer.
+  One run fast-forwards the master's fleeter and config checkouts from their
+  upstream (only when clean and strictly behind; dirty, diverged, detached or
+  offline checkouts are reported and left alone; a code update re-executes
+  sync from the new code), runs `reconcile`, and every `FLEET_PUSH_TOOLS_EVERY`
+  (1440) minutes runs `fleet update` on the online provisioned nodes (parallel,
+  `FLEET_SYNC_UPDATE_SECS` cap, last run in `vault/sync.json`; `0` = off).
+  Quiet when nothing happened; logs to `~/.config/fleet/sync.log`.
+- `fleet schedule install`: (re)installs the reconcile and sync timers,
+  idempotently (files rewritten and reloaded only when their content changed).
+  `fleet doctor` checks both.
+
+### Changed
+- `fleet sync` and `fleet reconcile` share a master-wide lock
+  (`vault/locks/.sync`); the one that finds it held skips with one line.
+- The Docker node image carries `skills/`; `fleet doctor` points at
+  `fleet schedule install` for a missing timer; the Linux `reconcile` unit logs
+  to `~/.config/fleet/reconcile.log` like the macOS agent.
+- README: "See the whole fleet", "Let agents drive fleet", "Automatic updates";
+  command and config references, files on disk and uninstall updated.
+
 ## 0.2.0 — 2026-10-03
 
 The first release meant for other people. Everything author-specific is now

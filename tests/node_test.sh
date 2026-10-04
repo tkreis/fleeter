@@ -1059,6 +1059,187 @@ case_schedules_noload() {
   end
 }
 
+# Keep awake (FLEET_KEEP_AWAKE): on a macOS node `fleet apply` installs the
+# dev.fleet.awake LaunchAgent (caffeinate -i -m -s), FLEET_KEEP_AWAKE=0 and
+# `fleet leave` remove it, the master and containers never get it, and status
+# reports awake on|off|n/a. macOS is faked with a `uname` on PATH; launchctl and
+# pmset are fakes that record argv (print succeeds while "loaded"). This test
+# itself runs in a container, so the container check is overridden where a
+# real node is meant.
+case_awake() {
+  begin "keep awake: dev.fleet.awake agent on macOS nodes; removed by FLEET_KEEP_AWAKE=0 and leave; master/containers skip; status awake"
+  local h d="$WORK/awake-bin" plist out rc N_ENV=""
+  h=$(mk_home awake "")
+  mkdir -p "$d"
+  export FAKE_LAUNCHCTL_LOG="$WORK/awake-launchctl.log" FAKE_LAUNCHCTL_LOADED="$WORK/awake-loaded" FAKE_PMSET_LOG="$WORK/awake-pmset.log" FAKE_PMSET_AC_SLEEP=1
+  printf '#!/usr/bin/env bash\necho Darwin\n' >"$d/uname"
+  cat >"$d/launchctl" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$FAKE_LAUNCHCTL_LOG"
+case "$1" in
+  bootstrap|load) touch "$FAKE_LAUNCHCTL_LOADED" ;;
+  bootout|unload) rm -f "$FAKE_LAUNCHCTL_LOADED" ;;
+  print) [ -f "$FAKE_LAUNCHCTL_LOADED" ] || exit 113 ;;
+esac
+exit 0
+EOF
+  cat >"$d/pmset" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$FAKE_PMSET_LOG"
+case "$*" in "-g custom") printf 'Battery Power:\n sleep                1\n displaysleep         2\nAC Power:\n displaysleep         10\n sleep                %s\n' "$FAKE_PMSET_AC_SLEEP" ;; esac
+exit 0
+EOF
+  chmod 755 "$d/uname" "$d/launchctl" "$d/pmset"
+  : >"$FAKE_LAUNCHCTL_LOG"; : >"$FAKE_PMSET_LOG"; rm -f "$FAKE_LAUNCHCTL_LOADED"
+  plist="$h/Library/LaunchAgents/dev.fleet.awake.plist"
+  n() {   # n FUNC [ARGS] — a node.sh function on the fake Mac as a real node (not a container); extra env in N_ENV
+    # shellcheck disable=SC2086,SC2016  # N_ENV is a list of VAR=VALUE words for env; the inner script expands on its own
+    env HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_ROOT="$ROOT" FLEET_BIN="$h/.local/bin" PATH="$d:$PATH" $N_ENV \
+      bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/node.sh"; fleet_in_container() { return 1; }; "$@"' bash "$@"
+  }
+  out=$(n node_awake_apply 2>&1)
+  assert "apply writes the plist" [ -f "$plist" ]
+  assert "plist: Label, ProgramArguments /usr/bin/caffeinate -i -m -s, KeepAlive, RunAtLoad" python3 -c '
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+assert d["Label"] == "dev.fleet.awake" and d["ProgramArguments"] == ["/usr/bin/caffeinate", "-i", "-m", "-s"]
+assert d["KeepAlive"] is True and d["RunAtLoad"] is True' "$plist"
+  assert "plist is 0644" [ "$(file_mode "$plist")" = 644 ]
+  assert "agent bootstrapped into the gui domain" grep -qx "bootstrap gui/$(id -u) $plist" "$FAKE_LAUNCHCTL_LOG"
+  assert "apply says so" bash -c "printf '%s' '$out' | grep -q 'keep awake: dev.fleet.awake loaded'"
+  assert "plist recorded in the manifest" grep -qxF "$plist" "$h/.config/fleet/manifest"
+  assert "awake state on while the agent is loaded" [ "$(n node_awake_state)" = on ]
+  : >"$FAKE_LAUNCHCTL_LOG"
+  n node_awake_apply >/dev/null 2>&1
+  refute "second apply: converged, no bootout/bootstrap" grep -Eq '^(bootout|bootstrap|load)' "$FAKE_LAUNCHCTL_LOG"
+  n node_write_status >/dev/null 2>&1
+  assert "status.json awake=on" [ "$(jget "$h/.config/fleet/status.json" awake)" = on ]
+  out=$(n cmd_status 2>/dev/null)
+  assert "status table prints awake on" bash -c "printf '%s' '$out' | grep -q '^awake *on\$'"
+  # FLEET_NO_SCHEDULER: written, not loaded; state falls back to pmset (AC sleep 1 -> off)
+  rm -f "$plist" "$FAKE_LAUNCHCTL_LOADED"; : >"$FAKE_LAUNCHCTL_LOG"
+  N_ENV="FLEET_NO_SCHEDULER=1"; out=$(n node_awake_apply 2>&1); N_ENV=""
+  assert "FLEET_NO_SCHEDULER: plist written, nothing loaded, says so" bash -c "[ -f '$plist' ] && ! grep -Eq '^(bootstrap|load)' '$FAKE_LAUNCHCTL_LOG' && printf '%s' '$out' | grep -q 'not loaded (FLEET_NO_SCHEDULER)'"
+  assert "awake state off: agent not loaded, pmset AC sleep 1" [ "$(n node_awake_state)" = off ]
+  N_ENV="FAKE_PMSET_AC_SLEEP=0"; out=$(n node_awake_state); N_ENV=""
+  assert "awake state on from pmset alone (AC sleep 0)" [ "$out" = on ]
+  assert "state asked pmset -g custom" grep -qx -- '-g custom' "$FAKE_PMSET_LOG"
+  # FLEET_KEEP_AWAKE=0 on the next apply removes the agent
+  n node_awake_apply >/dev/null 2>&1
+  assert "agent loaded again" [ "$(n node_awake_state)" = on ]
+  printf 'FLEET_TOOLS=""\nFLEET_KEEP_AWAKE=0\n' >"$h/.config/fleet/fleet.conf"
+  : >"$FAKE_LAUNCHCTL_LOG"
+  out=$(n node_awake_apply 2>&1)
+  assert "FLEET_KEEP_AWAKE=0: plist removed, agent booted out, says so" bash -c "[ ! -f '$plist' ] && grep -qx 'bootout gui/$(id -u)/dev.fleet.awake' '$FAKE_LAUNCHCTL_LOG' && printf '%s' '$out' | grep -q 'dev.fleet.awake removed'"
+  assert "awake state off after removal" [ "$(n node_awake_state)" = off ]
+  : >"$FAKE_LAUNCHCTL_LOG"
+  n node_awake_apply >/dev/null 2>&1
+  refute "FLEET_KEEP_AWAKE=0 with no plist: no launchctl call at all" [ -s "$FAKE_LAUNCHCTL_LOG" ]
+  # leave removes it
+  printf 'FLEET_TOOLS=""\n' >"$h/.config/fleet/fleet.conf"
+  n node_awake_apply >/dev/null 2>&1
+  assert "agent back with FLEET_KEEP_AWAKE=1" [ -f "$plist" ]
+  echo "fleet-awake" >"$TS_STATE"; : >"$FAKE_LAUNCHCTL_LOG"
+  out=$(n cmd_leave 2>&1); rc=$?
+  assert "leave exits 0, removes the plist and boots the agent out" bash -c "[ '$rc' -eq 0 ] && [ ! -f '$plist' ] && grep -qx 'bootout gui/$(id -u)/dev.fleet.awake' '$FAKE_LAUNCHCTL_LOG'"
+  # the master never gets it (vault present, no enrol.json), even on a Mac
+  mkdir -p "$h/.config/fleet/vault/nodes"; mv "$h/.config/fleet/enrol.json" "$h/enrol.json.away"
+  : >"$FAKE_LAUNCHCTL_LOG"
+  out=$(n node_awake_apply 2>&1)
+  assert "master: no plist, no launchctl call" bash -c "[ ! -f '$plist' ] && [ ! -s '$FAKE_LAUNCHCTL_LOG' ]"
+  assert "master: state n/a" [ "$(n node_awake_state)" = n/a ]
+  rm -rf "$h/.config/fleet/vault"; mv "$h/enrol.json.away" "$h/.config/fleet/enrol.json"
+  # containers skip (the real detection, this test runs in one): nothing written, n/a everywhere
+  : >"$FAKE_LAUNCHCTL_LOG"
+  out=$(HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_ROOT="$ROOT" FLEET_BIN="$h/.local/bin" PATH="$d:$PATH" \
+    bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/node.sh"; node_awake_apply; node_awake_state' 2>&1)
+  assert "container: apply installs nothing, state n/a" bash -c "[ '$out' = n/a ] && [ ! -f '$plist' ] && [ ! -s '$FAKE_LAUNCHCTL_LOG' ]"
+  fleet_as "$h" status --json >"$WORK/status-awake.json" 2>/dev/null
+  assert "fleet status --json on a container node: awake n/a" [ "$(jget "$WORK/status-awake.json" awake)" = n/a ]
+  unset -f n
+  end
+}
+
+# join's keep-awake step (join_power), with fake pmset/systemctl/sudo on PATH
+# that record argv: the exact pmset -c line on macOS, the mask command on Linux,
+# the power_done marker, FLEET_KEEP_AWAKE=0 (environment or invite) skipping
+# both, a failure that only warns.
+case_join_power() {
+  begin "join: keep awake — pmset -c on macOS, masked sleep targets on Linux, FLEET_KEEP_AWAKE=0 skips, failures warn"
+  local d="$WORK/power-bin" h="$WORK/homes/power" b out rc code
+  mkdir -p "$d" "$h"
+  export FAKE_POWER_LOG="$WORK/power.log"
+  for b in pmset systemctl; do
+    cat >"$d/$b" <<EOF
+#!/usr/bin/env bash
+echo "$b \$*" >>"\$FAKE_POWER_LOG"
+[ -z "\${FAKE_POWER_FAIL:-}" ] || exit 1
+exit 0
+EOF
+  done
+  # sudo (only reached when the test user is not root): records and runs the command
+  cat >"$d/sudo" <<'EOF'
+#!/usr/bin/env bash
+echo "sudo $*" >>"$FAKE_POWER_LOG"
+exec "$@"
+EOF
+  chmod 755 "$d/pmset" "$d/systemctl" "$d/sudo"
+  jp() {   # jp OS CMD... — run a join.sh function as a non-container node of OS with the fakes on PATH
+    HOME="$h" TMPDIR="$WORK/tmp" PATH="$d:$PATH" FLEET_ROOT="$ROOT" \
+      bash -c '. "$FLEET_ROOT/lib/join.sh"; JOIN_OS=$1; JOIN_CONTAINER=0; shift; "$@"' bash "$@"
+  }
+  : >"$FAKE_POWER_LOG"
+  out=$(jp macos join_power 2>&1); rc=$?
+  assert "macOS: exits 0" [ "$rc" -eq 0 ]
+  assert "macOS: exactly pmset -c sleep 0 disksleep 0 womp 1 autorestart 1" [ "$(grep '^pmset' "$FAKE_POWER_LOG")" = "pmset -c sleep 0 disksleep 0 womp 1 autorestart 1" ]
+  refute "macOS: displaysleep never touched" grep -q displaysleep "$FAKE_POWER_LOG"
+  refute "macOS: systemctl not called" grep -q '^systemctl' "$FAKE_POWER_LOG"
+  assert "macOS: power_done written (0600) and records macos:pmset" bash -c "[ \"\$(stat -c %a '$h/.config/fleet/power_done')\" = 600 ] && grep -q ' macos:pmset\$' '$h/.config/fleet/power_done'"
+  assert "macOS: says done" bash -c "printf '%s' '$out' | grep -q 'keep awake: macos pmset done'"
+  out=$(jp macos join_power 2>&1)
+  assert "rerun: already done, pmset not called again" bash -c "[ \"\$(grep -c '^pmset' '$FAKE_POWER_LOG')\" = 1 ] && printf '%s' '$out' | grep -q 'already done'"
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(jp linux join_power 2>&1); rc=$?
+  assert "Linux: exits 0" [ "$rc" -eq 0 ]
+  assert "Linux: exactly systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" [ "$(grep '^systemctl' "$FAKE_POWER_LOG")" = "systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" ]
+  refute "Linux: pmset not called" grep -q '^pmset' "$FAKE_POWER_LOG"
+  assert "Linux: power_done records linux:mask" grep -q ' linux:mask$' "$h/.config/fleet/power_done"
+  # FLEET_KEEP_AWAKE=0 from the environment, and from the invite (JOIN_KEEP_AWAKE), skips both
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(FLEET_KEEP_AWAKE=0 jp macos join_power 2>&1); rc=$?
+  assert "FLEET_KEEP_AWAKE=0 (env), macOS: nothing run, no marker, says skipped" bash -c "[ '$rc' -eq 0 ] && [ ! -s '$FAKE_POWER_LOG' ] && [ ! -e '$h/.config/fleet/power_done' ] && printf '%s' '$out' | grep -q 'skipped (FLEET_KEEP_AWAKE=0)'"
+  out=$(FLEET_KEEP_AWAKE=0 jp linux join_power 2>&1)
+  assert "FLEET_KEEP_AWAKE=0 (env), Linux: nothing run" [ ! -s "$FAKE_POWER_LOG" ]
+  out=$(jp linux eval 'JOIN_KEEP_AWAKE=0; join_power' 2>&1)
+  assert "keep_awake 0 from the invite: nothing run" bash -c "[ ! -s '$FAKE_POWER_LOG' ] && printf '%s' '$out' | grep -q 'skipped'"
+  out=$(FLEET_KEEP_AWAKE=1 jp linux eval 'JOIN_KEEP_AWAKE=0; join_power' 2>&1)
+  assert "FLEET_KEEP_AWAKE=1 in the environment beats keep_awake 0 from the invite" grep -q '^systemctl mask' "$FAKE_POWER_LOG"
+  # containers: nothing
+  rm -f "$h/.config/fleet/power_done"; : >"$FAKE_POWER_LOG"
+  out=$(jp macos eval 'JOIN_CONTAINER=1; join_power' 2>&1)
+  assert "container: nothing run, no marker" bash -c "[ ! -s '$FAKE_POWER_LOG' ] && [ ! -e '$h/.config/fleet/power_done' ]"
+  # a failing pmset/systemctl warns, exits 0, writes no marker
+  out=$(FAKE_POWER_FAIL=1 jp macos join_power 2>&1); rc=$?
+  assert "macOS pmset failure: exit 0, warning names the agent fallback, no marker" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'warn.*pmset failed.*dev.fleet.awake' && [ ! -e '$h/.config/fleet/power_done' ]"
+  out=$(FAKE_POWER_FAIL=1 jp linux join_power 2>&1); rc=$?
+  assert "Linux mask failure: exit 0, warning with the manual command, no marker" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'warn.*mask failed.*systemctl mask' && [ ! -e '$h/.config/fleet/power_done' ]"
+  # the invite carries keep_awake; an older master's code without it means 1
+  code=$(python3 -c 'import base64,json
+print(base64.b64encode(json.dumps({"v":1,"ts_auth_key":"tskey-auth-test-FAKE","nonce":"n-power","name":"power",
+  "master_pubkey":"ssh-ed25519 AAAA fleet-master","master_user":"root","tag":"tag:fleet-node","keep_awake":"0"}).encode()).decode())')
+  # shellcheck disable=SC2016  # the eval'd string expands inside join's bash
+  out=$(JC="$code" jp linux eval 'JOIN_CODE=$JC; join_decode >/dev/null 2>&1; echo "$JOIN_KEEP_AWAKE"')
+  assert "join_decode: keep_awake 0 from the invite" [ "$out" = 0 ]
+  code=$(python3 -c 'import base64,json
+print(base64.b64encode(json.dumps({"v":1,"ts_auth_key":"tskey-auth-test-FAKE","nonce":"n-power","name":"power",
+  "master_pubkey":"ssh-ed25519 AAAA fleet-master","master_user":"root","tag":"tag:fleet-node"}).encode()).decode())')
+  # shellcheck disable=SC2016
+  out=$(JC="$code" jp linux eval 'JOIN_CODE=$JC; join_decode >/dev/null 2>&1; echo "$JOIN_KEEP_AWAKE"')
+  assert "join_decode: no keep_awake field (older master) means 1" [ "$out" = 1 ]
+  unset -f jp
+  end
+}
+
 # fleeter's own `fleet` agent skill (skills/fleet): harness_apply installs it
 # into the skill dir of every harness present, records the paths, and a skill
 # of the same name in the config repo replaces it. `fleet skill install` does
@@ -1300,9 +1481,11 @@ case_pull_concurrent
 case_daemon
 case_daemon_reexec
 case_schedules_noload
+case_awake
 case_leave
 case_leave_tree
 case_sshd
+case_join_power
 case_chrome_wrapper
 case_base_status
 case_harness_toml

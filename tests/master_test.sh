@@ -391,6 +391,7 @@ assert "code carries the nonce" printf '%s' "$decoded" | grep -q "\"nonce\":\"$n
 assert "code carries master pubkey + user + tag" printf '%s' "$decoded" | grep -q '"master_pubkey":"ssh-ed25519 .*"master_user":"fleetuser","tag":"tag:fleet-node"'
 assert "code carries the hostname prefix (FLEET_HOSTNAME_PREFIX)" printf '%s' "$decoded" | grep -q '"hostname_prefix":"fleet-"'
 assert "code carries the fleet's tool list (join skips privileged installs it does not need)" printf '%s' "$decoded" | grep -q '"tools":"base devtools claude"'
+assert "code carries keep_awake (FLEET_KEEP_AWAKE, default 1)" printf '%s' "$decoded" | grep -q '"keep_awake":"1"'
 assert "invite says single-use + expiry" printf '%s' "$out" | grep -q 'single use, expires'
 # shellcheck disable=SC2016  # literal match of the one-liner's prefix
 line=$(printf '%s\n' "$out" | grep -F '( d=$(mktemp -d)' | head -1)
@@ -727,7 +728,7 @@ tools = {n: {"state": "ok", "detail": "1.0"} for n in ("base", "devtools", "clau
 tools["cursor"] = {"state": "login", "detail": "run: fleet login cursor"}
 json.dump({"fleet": "0.3.0", "name": "alpha", "os": "linux", "container": True, "applied": sys.argv[3], "applied_at": "2026-10-03T10:00:00Z",
            "applied_commit": sys.argv[2], "tools": tools, "memory": {"state": "ok", "last_sync": "2026-10-03T10:00:00Z"},
-           "timers": {"pull": True}, "token_age_days": {}, "updated": "2026-10-03T10:00:00Z"}, open(sys.argv[1], "w"))
+           "timers": {"pull": True}, "awake": "on", "token_age_days": {}, "updated": "2026-10-03T10:00:00Z"}, open(sys.argv[1], "w"))
 EOF
 : >"$SSH_LOG"
 out=$(bash "$FLEET" list 2>"$T/list.err"); rc=$?
@@ -753,11 +754,12 @@ assert a[\"desired\"][\"code\"]==a[\"applied\"][\"code\"]==\"$want_code\" and a[
 assert a[\"desired\"][\"digest\"]==a[\"applied\"][\"digest\"] and a[\"applied\"][\"source\"]==\"node\"
 assert a[\"tools\"][\"cursor\"][\"state\"]==\"login\" and a[\"memory\"]==\"ok\" and a[\"proxy\"]==\"ok\" and a[\"fleet\"]==\"0.3.0\"
 assert a[\"provisioned\"] and a[\"provisioned_age\"] and a[\"cleanup_pending\"]==[] and a[\"missing_since\"]==\"\"
+assert a[\"awake\"]==\"on\"
 '" "$out"
 assert "list --json: unreachable and offline nodes (reachable false / null, synced behind from the registry, empty tools), unknown peer" bash -c "printf '%s' \"\$0\" | python3 -c '
 import json,sys
 d={x[\"name\"]: x for x in json.load(sys.stdin)}
-u=d[\"unr\"]; assert u[\"online\"] is True and u[\"reachable\"] is False and u[\"synced\"]==\"behind\" and u[\"tools\"]=={} and u[\"applied\"][\"source\"]==\"registry\" and u[\"memory\"] is None and u[\"fleet\"] is None
+u=d[\"unr\"]; assert u[\"online\"] is True and u[\"reachable\"] is False and u[\"synced\"]==\"behind\" and u[\"tools\"]=={} and u[\"applied\"][\"source\"]==\"registry\" and u[\"memory\"] is None and u[\"fleet\"] is None and u[\"awake\"] is None
 o=d[\"off\"]; assert o[\"online\"] is False and o[\"reachable\"] is None and o[\"synced\"]==\"behind\" and o[\"tools\"]=={}
 b=d[\"fleet-beta\"]; assert b[\"state\"]==\"unknown\" and b[\"id\"]==\"nBBBBCNTRL\" and b[\"online\"] is True and b[\"synced\"] is None and b[\"profile\"] is None
 '" "$out"

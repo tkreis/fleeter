@@ -248,10 +248,17 @@ vault_age_items() {
 }
 
 # vault_encrypt_item REL — encrypt one plaintext item in place: write REL.age,
-# decrypt it again and compare byte for byte, only then remove REL.
+# decrypt it again and compare byte for byte, only then remove REL. A
+# plaintext next to an identical REL.age (a writer interrupted before its
+# rm) is just dropped; one that differs is never guessed about.
 vault_encrypt_item() {
   local rel=$1 f
   f="$FLEET_VAULT/$rel"
+  if [ -f "$f.age" ]; then
+    if vault_cat "$f.age" | cmp -s - "$f"; then rm -f "$f"; return 0; fi
+    die "$rel and $rel.age both exist and differ" \
+      "keep one: rm \"$f\" (keep the encrypted version) or rm \"$f.age\" (encrypt the plaintext), then rerun: fleet vault encrypt"
+  fi
   vault_write "$f.age" <"$f"
   if ! vault_cat "$f.age" | cmp -s - "$f"; then
     rm -f "$f.age"
@@ -294,6 +301,8 @@ for d, dirs, fs in os.walk(root):
     for n in fs:
         if n in skip or n.startswith(".fleet.") or n.endswith(".rotating"):
             continue
+        if mode == "export" and rel_d == "." and n in ("recipient.txt", "digest.key"):
+            continue        # bound to the key of this machine; a restore gets a fresh one from fleet vault encrypt
         p = os.path.join(d, n)
         rel = os.path.relpath(p, root)
         if n.endswith(".age"):

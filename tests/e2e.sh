@@ -45,10 +45,11 @@ die() { printf 'error %s\n' "$*" >&2; exit 1; }
 
 # ---------- docker helpers ----------
 
+# the master's vault key backend is `file` (no keychain / secret service in a container)
 mexec()   { docker exec -u fleet -e HOME=$MHOME -e PATH="$UPATH" -e FLEET_TS_API=$API -e FLEET_GH_API=$API \
-              -e FLEET_TS_STATUS_JSON=$MHOME/ts-status.json -e FLEET_NO_SCHEDULER=1 "$MASTER" "$@"; }
+              -e FLEET_TS_STATUS_JSON=$MHOME/ts-status.json -e FLEET_NO_SCHEDULER=1 -e FLEET_VAULT_KEY_BACKEND=file "$MASTER" "$@"; }
 mexec_i() { docker exec -i -u fleet -e HOME=$MHOME -e PATH="$UPATH" -e FLEET_TS_API=$API -e FLEET_GH_API=$API \
-              -e FLEET_TS_STATUS_JSON=$MHOME/ts-status.json -e FLEET_NO_SCHEDULER=1 "$MASTER" "$@"; }
+              -e FLEET_TS_STATUS_JSON=$MHOME/ts-status.json -e FLEET_NO_SCHEDULER=1 -e FLEET_VAULT_KEY_BACKEND=file "$MASTER" "$@"; }
 mroot()   { docker exec "$MASTER" "$@"; }
 nexec()   { local c=$1; shift; docker exec -u fleet -e HOME=$MHOME -e PATH="$UPATH" "$c" "$@"; }
 nexec_i() { local c=$1; shift; docker exec -i -u fleet -e HOME=$MHOME -e PATH="$UPATH" "$c" "$@"; }
@@ -170,10 +171,16 @@ assert "vault 0700" [ "$(mexec stat -c %a $VAULT)" = 700 ]
 assert "master ssh key generated" mexec test -f $VAULT/ssh/fleet_master.pub
 assert "init minted the OAuth client and revoked the bootstrap token" bash -c "mfile $MHOME/api.log | grep -q '\"keyType\": \"client\"' && mfile $MHOME/api.log | grep -q '^DELETE /api/v2/tailnet/-/keys/kboot'"
 refute "init never echoes secrets" grep -Eq 'kboot-FAKE|tskey-client|ghtok' "$WORK/init.log"
+assert "init created the vault key (file backend, 0600, outside vault/) and the public recipient" bash -c "[ \"\$(mexec stat -c %a $MHOME/.config/fleet/vault.key)\" = 600 ] && mfile $VAULT/recipient.txt | grep -q '^age1'"
 printf 'fake-oauth-token-e2e\n' | mexec_i fleet secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal >/dev/null 2>&1
 printf 'fake-openai-key-e2e\n' | mexec_i fleet secrets set OPENAI_API_KEY --profile full >/dev/null 2>&1
 assert "secrets stored (names only listed)" bash -c "mexec fleet secrets list | grep -Eq '^CLAUDE_CODE_OAUTH_TOKEN +minimal' && ! mexec fleet secrets list | grep -q fake-"
-assert "minimal.env 0600" [ "$(mexec stat -c %a $VAULT/secrets/minimal.env)" = 600 ]
+assert "secrets are age ciphertexts: minimal.env.age 0600, no plaintext env file" bash -c "[ \"\$(mexec stat -c %a $VAULT/secrets/minimal.env.age)\" = 600 ] && mexec sh -c '! test -e $VAULT/secrets/minimal.env && ! test -e $VAULT/secrets/full.env'"
+assert "tailscale.json and github.json are encrypted too" mexec sh -c "test -f $VAULT/tailscale.json.age && test -f $VAULT/github.json.age && ! test -e $VAULT/tailscale.json && ! test -e $VAULT/github.json"
+mexec sh -c "mkdir -p $MHOME/repositories/app && printf 'E2E_FILE_SECRET=canary-file-e2e\n' > $MHOME/repositories/app/.env"
+assert "files add stores only a .age ciphertext" bash -c "mexec fleet files add $MHOME/repositories/app/.env >/dev/null 2>&1 && mexec test -f $VAULT/files/full/repositories/app/.env.age && ! mexec test -e $VAULT/files/full/repositories/app/.env"
+assert "vault status: key reachable, nothing plaintext" bash -c "o=\$(mexec fleet vault status); printf '%s' \"\$o\" | grep -q '^key:        reachable' && printf '%s' \"\$o\" | grep -q '^plaintext:  none'"
+assert "vault encrypt on an encrypted vault is a no-op" bash -c "mexec fleet vault encrypt 2>&1 | grep -q 'nothing to encrypt'"
 
 # ======================================================================
 step "invite x2 (alpha: full, beta: ephemeral/minimal)"
@@ -324,6 +331,11 @@ done
 id_digest() { mfile "$VAULT/nodes/$1.json" | jget provisioned_digest; }
 assert "alpha: applied digest equals registry digest" [ "$(nfile $NA $MHOME/.config/fleet/applied)" = "$(id_digest $IDA)" ]
 assert "alpha (full) got OPENAI_API_KEY, beta (minimal) did not" bash -c "nfile $NA $MHOME/.config/fleet/secrets.env | grep -q '^OPENAI_API_KEY=' && ! nfile $NB $MHOME/.config/fleet/secrets.env | grep -q '^OPENAI_API_KEY='"
+assert "alpha (full) got the mirrored file decrypted, 0600; beta (minimal) did not" bash -c "[ \"\$(nmode $NA $MHOME/repositories/app/.env)\" = 600 ] && nfile $NA $MHOME/repositories/app/.env | grep -qx 'E2E_FILE_SECRET=canary-file-e2e' && ! nexec $NB test -e $MHOME/repositories/app/.env"
+# the encrypted vault never left a plaintext behind on the master: nothing on its
+# filesystem holds a canary (the only copies are inside the ssh streams to the nodes)
+refute "master filesystem holds no decrypted secret (canary grep over / minus proc/sys/dev)" mroot sh -c 'grep -rlF -e fake-oauth-token-e2e -e canary-file-e2e / --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev 2>/dev/null | grep -q .'
+assert "vault rotate-key re-encrypts everything, the nodes stay in sync after one provision" bash -c "mexec fleet vault rotate-key 2>&1 | grep -q 'vault key rotated: [0-9]* file(s)' && mexec fleet secrets list | grep -q '^OPENAI_API_KEY' && mexec fleet reconcile >/dev/null 2>&1 && mexec fleet list --offline --json | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"alpha\"][\"synced\"]==\"yes\" and d[\"beta\"][\"synced\"]==\"yes\"'"
 nexec "$NA" fleet status --json >"$WORK/status-a.json" 2>/dev/null
 assert "alpha: fleet status --json: name, memory ok, daemon timers on" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["name"]=="alpha" and d["container"] and d["memory"]["state"]=="ok" and d["timers"]["pull"] and d["applied"]' "$WORK/status-a.json"
 assert "alpha: token age reported for CLAUDE_CODE_OAUTH_TOKEN" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "CLAUDE_CODE_OAUTH_TOKEN" in d["token_age_days"]' "$WORK/status-a.json"

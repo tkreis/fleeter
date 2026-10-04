@@ -29,6 +29,8 @@ fail() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
 assert() { local d=$1; shift; if "$@" >/dev/null 2>&1; then pass "$d"; else fail "$d"; fi; }
 refute() { local d=$1; shift; if "$@" >/dev/null 2>&1; then fail "$d"; else pass "$d"; fi; }
 mode_of() { if stat -f %Lp "$1" >/dev/null 2>&1; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
+sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
+export -f sha256
 jget() { python3 -c 'import json,sys
 v=json.load(open(sys.argv[1]))
 for k in sys.argv[2].split("."): v=v[k]
@@ -52,6 +54,7 @@ export GIT_CONFIG_GLOBAL="$T/gitconfig"
 printf '[user]\n\tname = fleet tester\n\temail = tester@example.invalid\n' >"$GIT_CONFIG_GLOBAL"
 export FLEET_HOME="$HOME/.config/fleet"
 export FLEET_VAULT="$FLEET_HOME/vault"
+export FLEET_VAULT_KEY_BACKEND=file   # never the real keychain / secret service; fakes on PATH test those paths below
 export FLEET_NO_SCHEDULER=1
 export FLEET_NO_OPEN=1
 export FLEET_NODE_USER=fleetuser
@@ -68,7 +71,9 @@ mkdir -p "$HOME" "$NODES" "$T/bin" "$T/ghbin" "$GH_STATE"
 FLEET="$ROOT/fleet"            # invoked via bash: the checkout may not be chmod +x yet
 
 # fake ssh: ssh -i key -o ... user@host CMD...  → run CMD with HOME=<fake node>
-#   $T/slow-secrets  → sleep 30 before the secrets step (kick race)
+#   $T/slow-secrets  → sleep before the secrets step (kick race): the file's content is the
+#                      number of seconds, default 30
+#   $T/slow-files    → same before unpacking the mirrored files (plaintext snapshot)
 #   $T/slow-enrol    → sleep 2 before serving enrol.json (double-claim race)
 #   $T/nc-open       → `nc -z` probes "succeed" (isolation negative test)
 #   $T/nc-missing    → `nc` is not installed on the node (exit 127)
@@ -88,7 +93,8 @@ nh="$NODES/$host"
 [ -n "$nh" ] && [ -d "$nh" ] || exit 255      # unreachable host
 host=$(basename "$nh")
 [ "${SSH_FAIL:-}" = "$host" ] && exit 255
-case "$cmd" in *secrets.env.tmp*) [ -f "$T/slow-secrets" ] && sleep 30 ;; esac
+case "$cmd" in *secrets.env.tmp*) [ -f "$T/slow-secrets" ] && { s=$(cat "$T/slow-secrets"); sleep "${s:-30}"; } ;; esac
+case "$cmd" in *stage.XXXXXX*) [ -f "$T/slow-files" ] && { s=$(cat "$T/slow-files"); sleep "${s:-3}"; } ;; esac
 case "$cmd" in *enrol.json*) [ -f "$T/slow-enrol" ] && sleep 2 ;; esac
 case "$cmd" in
   "cat /etc/ssh/ssh_host_ed25519_key.pub") cat "$nh/.hostkey.pub"; exit $? ;;   # the node's host key (pinning)
@@ -162,7 +168,25 @@ mk_node() {  # mk_node DNSNAME NONCE
   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEhost$(printf '%s' "$1" | tr -cd 'a-z0-9') root@$1" >"$nh/.hostkey.pub"
 }
 # digest_of PROFILE — desired_digest as the master computes it.
-digest_of() { FLEET_ROOT=$ROOT bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/master.sh"; desired_digest "$1"' _ "$1" 2>/dev/null; }
+digest_of() { FLEET_ROOT=$ROOT bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/vault.sh"; . "$FLEET_ROOT/lib/master.sh"; desired_digest "$1"' _ "$1" 2>/dev/null; }
+# vcat FILE.age — decrypt a vault file the way fleet does (key from the backend, through a pipe).
+# Exported for the `bash -c` assertions, hence its own exported root variable.
+VCAT_ROOT=$ROOT; export VCAT_ROOT
+vcat() { FLEET_ROOT=$VCAT_ROOT bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/vault.sh"; vault_cat "$1"' _ "$1"; }
+export -f vcat
+# mk_plain_vault VAULT — a vault as fleet wrote it before encryption at rest (plaintext files, digest.key).
+mk_plain_vault() {
+  local v=$1
+  mkdir -p "$v/secrets" "$v/files/full/projects/app" "$v/files/minimal" "$v/ssh" "$v/nodes/pending" "$v/nodes/claimed" "$v/locks"
+  chmod -R go-rwx "$v"
+  printf "CLAUDE_CODE_OAUTH_TOKEN='plain-oauth-FAKE'\n" >"$v/secrets/minimal.env"
+  printf "OPENAI_API_KEY='plain-openai-FAKE'\nQUOTED='it'\\\\''s'\n" >"$v/secrets/full.env"
+  printf 'DB_URL=postgres://plain-db-FAKE\n' >"$v/files/full/projects/app/.env"
+  printf '{"oauth_client_id": "kclientCNTRL", "oauth_client_secret": "tskey-client-kclientCNTRL-FAKE", "tailnet": "-"}\n' >"$v/tailscale.json"
+  printf '{"token": "ghtok"}\n' >"$v/github.json"
+  od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$v/digest.key"
+  chmod 0600 "$v"/secrets/* "$v"/files/full/projects/app/.env "$v/tailscale.json" "$v/github.json" "$v/digest.key"
+}
 
 # the master's config repo: the shipped example with example repo URLs, committed.
 # This fleet opts in to T3 Code remote access (the default is off; tested below).
@@ -200,7 +224,9 @@ assert "vault dir 0700" [ "$(mode_of "$FLEET_VAULT")" = 700 ]
 assert "nodes/pending + nodes/claimed dirs 0700" bash -c "[ \"\$(mode_of '$FLEET_VAULT/nodes/pending')\" = 700 ] && [ \"\$(mode_of '$FLEET_VAULT/nodes/claimed')\" = 700 ]"
 assert "master ssh key generated" [ -f "$FLEET_VAULT/ssh/fleet_master.pub" ]
 assert "master ssh key 0600" [ "$(mode_of "$FLEET_VAULT/ssh/fleet_master")" = 600 ]
-assert "digest.key created, 0600, 32 bytes hex" bash -c "[ \"\$(mode_of '$FLEET_VAULT/digest.key')\" = 600 ] && grep -Eqx '[0-9a-f]{64}' '$FLEET_VAULT/digest.key'"
+assert "vault key created in the file backend (0600, outside vault/), public recipient 0644 in the vault, no digest.key" bash -c "[ \"\$(mode_of '$FLEET_HOME/vault.key')\" = 600 ] && grep -q '^AGE-SECRET-KEY-1' '$FLEET_HOME/vault.key' && [ \"\$(mode_of '$FLEET_VAULT/recipient.txt')\" = 644 ] && grep -Eq '^age1[0-9a-z]+$' '$FLEET_VAULT/recipient.txt' && grep -q '^# fleet vault: backend=file' '$FLEET_VAULT/recipient.txt' && [ ! -e '$FLEET_VAULT/digest.key' ]"
+assert "init reported the vault key and warned about the file backend" bash -c "printf '%s' \"\$0\" | grep -q 'vault key: file' && printf '%s' \"\$0\" | grep -q \"vault key backend 'file'\"" "$out"
+refute "the private key never enters the vault directory" grep -rq 'AGE-SECRET-KEY' "$FLEET_VAULT"
 assert "init asked for an API access token (keys page URL shown)" printf '%s' "$out" | grep -q 'login.tailscale.com/admin/settings/keys'
 assert "live policy fetched with the bootstrap token" grep -q '^GET /api/v2/tailnet/-/acl' "$API_LOG"
 assert "init reported the allow-all finding" printf '%s' "$out" | grep -q 'policy: grants rule lets \* reach the tailnet'
@@ -210,11 +236,12 @@ assert "live policy now isolates the fleet tag (merged, not replaced)" python3 "
 assert "merge kept the owner's allow-all as autogroup:member -> *" python3 -c 'import json,sys; g=json.load(open(sys.argv[1]))["grants"]; assert {"src":["autogroup:member"],"dst":["*"],"ip":["*"]} in g' "$ACL"
 assert "previous policy backed up into the vault (0600)" bash -c "ls '$FLEET_VAULT'/policy-backups/*.hujson >/dev/null 2>&1 && [ \"\$(mode_of \$(ls '$FLEET_VAULT'/policy-backups/*.hujson | head -1))\" = 600 ]"
 assert "OAuth client created: keyType client, scopes, tag" grep -q '^POST /api/v2/tailnet/-/keys {"keyType": "client", "description": "fleet master", "scopes": \["auth_keys", "devices:core", "policy_file:read"\], "tags": \["tag:fleet-node"\]}' "$API_LOG"
-assert "tailscale.json 0600 with client id + secret" bash -c "[ \"\$(mode_of '$FLEET_VAULT/tailscale.json')\" = 600 ] && grep -q '\"oauth_client_id\": \"kclientCNTRL\"' '$FLEET_VAULT/tailscale.json' && grep -q '\"oauth_client_secret\": \"tskey-client-kclientCNTRL-FAKE\"' '$FLEET_VAULT/tailscale.json'"
+assert "tailscale.json.age 0600, no plaintext copy, decrypts to client id + secret" bash -c "[ \"\$(mode_of '$FLEET_VAULT/tailscale.json.age')\" = 600 ] && [ ! -e '$FLEET_VAULT/tailscale.json' ] && vcat '$FLEET_VAULT/tailscale.json.age' | grep -q '\"oauth_client_id\": \"kclientCNTRL\"' && vcat '$FLEET_VAULT/tailscale.json.age' | grep -q '\"oauth_client_secret\": \"tskey-client-kclientCNTRL-FAKE\"'"
+refute "the OAuth client secret is not readable anywhere under FLEET_HOME without the key" grep -rq 'tskey-client' "$FLEET_HOME"
 assert "bootstrap token revoked by its embedded id" grep -q '^DELETE /api/v2/tailnet/-/keys/kboot$' "$API_LOG"
 refute "bootstrap token never stored in the vault" grep -rq 'tskey-api' "$FLEET_VAULT"
 refute "no bootstrap temp file left" bash -c "ls '$FLEET_VAULT'/.bootstrap.* 2>/dev/null | grep -q ."
-assert "github.json has token (gh unavailable → fallback)" grep -q '"token": "ghtok"' "$FLEET_VAULT/github.json"
+assert "github.json.age has the token (gh unavailable → fallback), no plaintext copy" bash -c "vcat '$FLEET_VAULT/github.json.age' | grep -q '\"token\": \"ghtok\"' && [ ! -e '$FLEET_VAULT/github.json' ] && ! grep -rq ghtok '$FLEET_HOME'"
 refute "init output never echoes secrets" printf '%s' "$out" | grep -Eq 'kboot-FAKE|tskey-client|ghtok'
 case "$(uname -s)" in
   Darwin) assert "LaunchAgent written" [ -f "$HOME/Library/LaunchAgents/dev.fleet.reconcile.plist" ]
@@ -227,10 +254,10 @@ case "$(uname -s)" in
   Darwin) assert "init master wrote the sync LaunchAgent too" [ -f "$HOME/Library/LaunchAgents/dev.fleet.sync.plist" ] ;;
   *)      assert "init master wrote the sync systemd timer too" [ -f "$HOME/.config/systemd/user/fleet-sync.timer" ] ;;
 esac
-key1=$(cat "$FLEET_VAULT/ssh/fleet_master.pub"); ts1=$(cat "$FLEET_VAULT/tailscale.json"); dk1=$(cat "$FLEET_VAULT/digest.key")
+key1=$(cat "$FLEET_VAULT/ssh/fleet_master.pub"); ts1=$(cat "$FLEET_VAULT/tailscale.json.age" | sha256); rc1=$(cat "$FLEET_VAULT/recipient.txt"); vk1=$(cat "$FLEET_HOME/vault.key")
 out=$(bash "$FLEET" init master </dev/null 2>&1); rc=$?
 assert "init master idempotent (no prompts second time)" [ "$rc" = 0 ]
-assert "init master keeps existing key, client and digest key" bash -c "[ \"\$(cat '$FLEET_VAULT/ssh/fleet_master.pub')\" = '$key1' ] && [ \"\$(cat '$FLEET_VAULT/tailscale.json')\" = '$ts1' ] && [ \"\$(cat '$FLEET_VAULT/digest.key')\" = '$dk1' ]"
+assert "init master keeps existing key, client, recipient and vault key" bash -c "[ \"\$(cat '$FLEET_VAULT/ssh/fleet_master.pub')\" = '$key1' ] && [ \"\$(cat '$FLEET_VAULT/tailscale.json.age' | sha256)\" = '$ts1' ] && [ \"\$(cat '$FLEET_VAULT/recipient.txt')\" = \"\$0\" ] && [ \"\$(cat '$FLEET_HOME/vault.key')\" = '$vk1' ]" "$rc1"
 assert "rerun checks policy with the OAuth client, quietly ok" printf '%s' "$out" | grep -q 'policy: live tailnet policy isolates tag:fleet-node'
 # a missing config dir with a known FLEET_CONFIG_REPO is cloned after confirmation
 git -c init.defaultBranch=main init -q --bare "$T/cfg-remote.git"; git -C "$CFG" push -q "$T/cfg-remote.git" HEAD:main
@@ -254,13 +281,13 @@ mkdir -p "$T/tsbin"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"\nexit 0\n' "$T/ts.log" >"$T/tsbin/tailscale"; chmod +x "$T/tsbin/tailscale"
 : >"$T/ts.log"; : >"$SSH_LOG"
 vault_snap() { (cd "$FLEET_VAULT" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$f" "$(cat "$f" | sha256)"; done); }
-sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
-export -f vault_snap sha256
+export -f vault_snap
 snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
 HELP_OK=1; HELP_BAD=""
 for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" \
          "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" "schedule install" doctor join apply pull update "memory sync" login status leave daemon \
-         init secrets files proxy t3 config policy memory skill schedule; do
+         "vault status" "vault encrypt" "vault rotate-key" "vault export $T/never.age" \
+         init secrets files proxy t3 config policy memory skill schedule vault; do
   for h in --help -h; do
     # shellcheck disable=SC2086  # $c is meant to split into words
     out=$(printf 'tskey-api-FAKE\n' | PATH="$T/tsbin:$PATH" bash "$FLEET" $c $h 2>&1); rc=$?
@@ -269,12 +296,13 @@ for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy
 done
 assert "every command with -h/--help exits 0 and prints its synopsis${HELP_BAD}" [ "$HELP_OK" = 1 ]
 assert "--help ran nothing: vault unchanged, no API call, no ssh, no tailscale logout, no daemon.pid" bash -c "[ \"\$(vault_snap)\" = \"\$0\" ] && [ \"\$(grep -c '' '$API_LOG')\" = $api0 ] && [ ! -s '$SSH_LOG' ] && [ ! -s '$T/ts.log' ] && [ ! -f '$FLEET_HOME/daemon.pid' ]" "$snap0"
-assert "fleet secrets set --help did not consume stdin into the vault" bash -c "! grep -q 'tskey-api-FAKE' '$FLEET_VAULT'/secrets/*.env 2>/dev/null"
+assert "fleet secrets set --help did not consume stdin into the vault; vault export --help wrote nothing" bash -c "[ -z \"\$(ls '$FLEET_VAULT/secrets')\" ] && [ ! -e '$T/never.age' ]"
 BAD_OK=1; BAD_BAD=""
 for c in "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
          "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "list --bogus" "list extra" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
          "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" \
-         "sync --bogus" "sync extra" "skill frob" "skill install --bogus" "schedule frob" "schedule install extra" nosuch; do
+         "sync --bogus" "sync extra" "skill frob" "skill install --bogus" "schedule frob" "schedule install extra" \
+         "vault frob" "vault status --bogus" "vault status extra" "vault encrypt --bogus" "vault rotate-key extra" "vault export a b" nosuch; do
   # shellcheck disable=SC2086
   out=$(PATH="$T/tsbin:$PATH" bash "$FLEET" $c </dev/null 2>&1); rc=$?
   if [ "$rc" != 2 ] || ! printf '%s' "$out" | grep -qi 'usage'; then BAD_OK=0; BAD_BAD="$BAD_BAD [$c -> rc $rc]"; fi
@@ -289,14 +317,16 @@ echo "== secrets"
 out=$(printf "s3cr3t'one\n" | bash "$FLEET" secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal 2>&1); rc=$?
 assert "secrets set exits 0" [ "$rc" = 0 ]
 refute "secrets set never prints value" printf '%s' "$out" | grep -q 's3cr3t'
-assert "minimal.env 0600" [ "$(mode_of "$FLEET_VAULT/secrets/minimal.env")" = 600 ]
-assert "value single-quoted with quote escaped" grep -Fxq "CLAUDE_CODE_OAUTH_TOKEN='s3cr3t'\\''one'" "$FLEET_VAULT/secrets/minimal.env"
-assert "stored value round-trips through the shell" bash -c ". '$FLEET_VAULT/secrets/minimal.env'; [ \"\$CLAUDE_CODE_OAUTH_TOKEN\" = \"s3cr3t'one\" ]"
+assert "minimal.env.age 0600, no plaintext env file" bash -c "[ \"\$(mode_of '$FLEET_VAULT/secrets/minimal.env.age')\" = 600 ] && [ ! -e '$FLEET_VAULT/secrets/minimal.env' ]"
+assert "the ciphertext is an age file and the value is nowhere under FLEET_HOME in plaintext" bash -c "head -c 20 '$FLEET_VAULT/secrets/minimal.env.age' | grep -q '^age-encryption.org/' && ! grep -rq s3cr3t '$FLEET_HOME'"
+assert "value single-quoted with quote escaped (decrypted)" bash -c "vcat '$FLEET_VAULT/secrets/minimal.env.age' | grep -Fxq \"CLAUDE_CODE_OAUTH_TOKEN='s3cr3t'\\\\''one'\""
+assert "stored value round-trips through the shell" bash -c "eval \"\$(vcat '$FLEET_VAULT/secrets/minimal.env.age')\"; [ \"\$CLAUDE_CODE_OAUTH_TOKEN\" = \"s3cr3t'one\" ]"
 printf 'v2\n' | bash "$FLEET" secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal >/dev/null 2>&1
-assert "secrets set replaces existing" [ "$(grep -c '^CLAUDE_CODE_OAUTH_TOKEN=' "$FLEET_VAULT/secrets/minimal.env")" = 1 ]
-assert "replaced value is the new one" grep -Fxq "CLAUDE_CODE_OAUTH_TOKEN='v2'" "$FLEET_VAULT/secrets/minimal.env"
+assert "secrets set replaces existing" [ "$(vcat "$FLEET_VAULT/secrets/minimal.env.age" | grep -c '^CLAUDE_CODE_OAUTH_TOKEN=')" = 1 ]
+assert "replaced value is the new one" bash -c "vcat '$FLEET_VAULT/secrets/minimal.env.age' | grep -Fxq \"CLAUDE_CODE_OAUTH_TOKEN='v2'\""
 printf 'fullsecret\n' | bash "$FLEET" secrets set OPENAI_API_KEY >/dev/null 2>&1
-assert "default profile is full" grep -q '^OPENAI_API_KEY=' "$FLEET_VAULT/secrets/full.env"
+assert "default profile is full" bash -c "vcat '$FLEET_VAULT/secrets/full.env.age' | grep -q '^OPENAI_API_KEY='"
+refute "no decrypted temp file is left in the vault" bash -c "ls '$FLEET_VAULT'/secrets/.fleet.* 2>/dev/null | grep -q ."
 refute "invalid name rejected" bash -c "printf 'x\n' | bash '$FLEET' secrets set 'bad name'"
 out=$(bash "$FLEET" secrets list 2>&1)
 assert "secrets list shows name + profile" printf '%s' "$out" | grep -Eq '^CLAUDE_CODE_OAUTH_TOKEN +minimal$'
@@ -307,13 +337,13 @@ refute "secrets list never prints values" printf '%s' "$out" | grep -Eq 'v2|full
 echo "== files add"
 mkdir -p "$HOME/repositories/x"; printf 'DB=1\n' >"$HOME/repositories/x/.env"
 assert "files add exits 0" bash "$FLEET" files add "$HOME/repositories/x/.env"
-assert "file mirrored under files/full" [ -f "$FLEET_VAULT/files/full/repositories/x/.env" ]
-assert "mirrored file 0600" [ "$(mode_of "$FLEET_VAULT/files/full/repositories/x/.env")" = 600 ]
+assert "file mirrored under files/full as a ciphertext only" bash -c "[ -f '$FLEET_VAULT/files/full/repositories/x/.env.age' ] && [ ! -e '$FLEET_VAULT/files/full/repositories/x/.env' ]"
+assert "mirrored file 0600 and decrypts to the source" bash -c "[ \"\$(mode_of '$FLEET_VAULT/files/full/repositories/x/.env.age')\" = 600 ] && vcat '$FLEET_VAULT/files/full/repositories/x/.env.age' | cmp -s - '$HOME/repositories/x/.env'"
 printf 'x\n' >"$T/outside.txt"
 refute "files add refuses paths outside HOME" bash "$FLEET" files add "$T/outside.txt"
 
 # ======================================================================
-echo "== digest (HMAC over secret values + file contents, key never printed)"
+echo "== digest (sha256 over the ciphertexts: changes with values and files, needs no key)"
 d1=$(digest_of full)
 assert "digest is a sha256" printf '%s' "$d1" | grep -Eqx '[0-9a-f]{64}'
 assert "digest is stable" [ "$(digest_of full)" = "$d1" ]
@@ -324,12 +354,16 @@ d1=$d1b
 printf 'v3\n' | bash "$FLEET" secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal >/dev/null 2>&1
 d2=$(digest_of full)
 assert "digest changes when a secret VALUE changes (names unchanged)" [ "$d2" != "$d1" ]
-assert "secret names unchanged" [ "$(grep -c '=' "$FLEET_VAULT/secrets/minimal.env")" = 1 ]
+assert "secret names unchanged" [ "$(vcat "$FLEET_VAULT/secrets/minimal.env.age" | grep -c '=')" = 1 ]
 printf 'DB=2\n' >"$HOME/repositories/x/.env"; bash "$FLEET" files add "$HOME/repositories/x/.env" >/dev/null 2>&1
 d3=$(digest_of full)
 assert "digest changes when a mirrored file's content changes (path unchanged)" [ "$d3" != "$d2" ]
 assert "minimal and full digests differ" [ "$(digest_of minimal)" != "$d3" ]
-refute "digest does not leak the key" printf '%s' "$d3" | grep -q "$(cut -c1-16 "$FLEET_VAULT/digest.key")"
+mv "$FLEET_HOME/vault.key" "$T/vault.key.away"
+assert "digest needs no key: identical with the vault key unreachable" [ "$(digest_of full)" = "$d3" ]
+mv "$T/vault.key.away" "$FLEET_HOME/vault.key"
+printf 'v3\n' | bash "$FLEET" secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal >/dev/null 2>&1
+assert "re-encrypting an unchanged value changes the digest once (fresh age file key)" [ "$(digest_of full)" != "$d3" ]
 
 # ======================================================================
 echo "== invite"
@@ -431,7 +465,7 @@ assert "code shipped to node" bash -c "[ -f '$NH/.local/share/fleet/fleet' ] && 
 refute "shipped code excludes .git" [ -e "$NH/.local/share/fleet/.git" ]
 assert "config repo shipped to node (git archive HEAD)" bash -c "[ -f '$NH/.local/share/fleet-config/AGENTS.md' ] && [ -f '$NH/.local/share/fleet-config/fleet.conf' ] && [ ! -e '$NH/.local/share/fleet-config/.git' ]"
 refute "vault never shipped with the code" bash -c "find '$NH/.local/share' -name vault -o -name 'tailscale.json' | grep -q ."
-refute "digest.key never shipped" bash -c "find '$NH' -name digest.key | grep -q ."
+refute "digest.key, vault.key, recipient.txt and no ciphertext ever shipped" bash -c "find '$NH' -name digest.key -o -name vault.key -o -name recipient.txt -o -name '*.age' | grep -q ."
 assert "mirrored file landed on node" [ -f "$NH/repositories/x/.env" ]
 assert "mirrored file 0600 on node" [ "$(mode_of "$NH/repositories/x/.env")" = 600 ]
 assert "mirrored files went through a private staging dir under ~/.config/fleet, removed afterwards" bash -c "grep -q 'stage.XXXXXX' '$SSH_LOG' && ! ls -d '$NH'/.config/fleet/stage.* 2>/dev/null | grep -q ."
@@ -602,6 +636,77 @@ out=$(bash "$FLEET" nodes --live 2>&1)
 assert "nodes --live shows tool states" printf '%s\n' "$out" | grep -q 'claude:ok codex:login'
 
 # ======================================================================
+echo "== vault: nothing decrypted touches disk during a provision; status; rotate-key; unreachable key; export"
+CANARY=canary-7f3a9c-value; FCANARY=canary-file-5d2e
+printf '%s\n' "$CANARY" | bash "$FLEET" secrets set CANARY_SECRET --profile minimal >/dev/null 2>&1
+mkdir -p "$HOME/repositories/c" "$T/tmp"; printf 'FILE_CANARY=%s\n' "$FCANARY" >"$HOME/repositories/c/.env"
+bash "$FLEET" files add "$HOME/repositories/c/.env" >/dev/null 2>&1
+# canary_hits — files under FLEET_HOME or this run's TMPDIR that hold a canary value (the fake node homes are elsewhere)
+canary_hits() { grep -rlF -e "$CANARY" -e "$FCANARY" "$FLEET_HOME" "$T/tmp" 2>/dev/null || true; }
+assert "after secrets set + files add: the canaries exist only as ciphertext" bash -c "[ -z \"\$0\" ] && [ -f '$FLEET_VAULT/files/full/repositories/c/.env.age' ]" "$(canary_hits)"
+echo 3 >"$T/slow-secrets"; echo 3 >"$T/slow-files"
+: >"$SSH_LOG"
+TMPDIR="$T/tmp" bash "$FLEET" provision alpha >"$T/prov-canary.log" 2>&1 &
+PROV_PID=$!
+assert "provision reached the secrets step (env decrypted into memory, piped into ssh)" wait_for 20 grep -q 'secrets.env.tmp' "$SSH_LOG"
+snap1=$(canary_hits)
+assert "while the secrets stream is open: no plaintext canary under FLEET_HOME or TMPDIR" [ -z "$snap1" ]
+assert "provision reached the files step (tar built in memory)" wait_for 20 grep -q 'stage.XXXXXX' "$SSH_LOG"
+snap2=$(canary_hits)
+assert "while the files stream is open: no plaintext canary under FLEET_HOME or TMPDIR" [ -z "$snap2" ]
+wait "$PROV_PID" 2>/dev/null; prc=$?; PROV_PID=""
+rm -f "$T/slow-secrets" "$T/slow-files"
+assert "provision exits 0" [ "$prc" = 0 ] || cat "$T/prov-canary.log"
+assert "node received the canary secret and the mirrored canary file (0600, plain name)" bash -c "grep -q \"^CANARY_SECRET='$CANARY'\" '$NH/.config/fleet/secrets.env' && grep -qx 'FILE_CANARY=$FCANARY' '$NH/repositories/c/.env' && [ \"\$(mode_of '$NH/repositories/c/.env')\" = 600 ] && [ ! -e '$NH/repositories/c/.env.age' ]"
+assert "the earlier mirrored file arrives through the same in-memory tar" grep -qx 'DB=2' "$NH/repositories/x/.env"
+assert "afterwards: nothing decrypted under FLEET_HOME or TMPDIR, no temp files in the vault" bash -c "[ -z \"\$0\" ] && ! find '$FLEET_VAULT' -name '.fleet.*' | grep -q ." "$(canary_hits)"
+assert "registry files_sent lists node paths, never .age" bash -c "jget '$FLEET_VAULT/nodes/nAAAACNTRL.json' files_sent | grep -q '\"repositories/c/.env\"' && ! jget '$FLEET_VAULT/nodes/nAAAACNTRL.json' files_sent | grep -q '\\.age'"
+out=$(bash "$FLEET" vault status 2>&1); rc=$?
+assert "vault status: exit 0; backend file, recipient, key reachable, encrypted count, no plaintext" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q '^backend:    file ' && printf '%s' \"\$0\" | grep -Eq '^recipient:  age1[0-9a-z]+ ' && printf '%s' \"\$0\" | grep -q '^key:        reachable' && printf '%s' \"\$0\" | grep -Eq '^encrypted:  [1-9][0-9]* file' && printf '%s' \"\$0\" | grep -q '^plaintext:  none'" "$out"
+refute "vault status prints no private key and no value" printf '%s' "$out" | grep -Eq "AGE-SECRET-KEY|$CANARY"
+# rotate-key: new recipient + key, every value identical, old key useless, digest changed once
+rcpt_old=$(grep -v '^#' "$FLEET_VAULT/recipient.txt"); key_old=$(cat "$FLEET_HOME/vault.key"); d_before=$(digest_of full)
+vals_before=$(vcat "$FLEET_VAULT/secrets/minimal.env.age"; vcat "$FLEET_VAULT/secrets/full.env.age"; vcat "$FLEET_VAULT/files/full/repositories/c/.env.age"; vcat "$FLEET_VAULT/tailscale.json.age")
+out=$(bash "$FLEET" vault rotate-key 2>&1); rc=$?
+assert "vault rotate-key exits 0 and reports the count" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -Eq 'vault key rotated: [1-9][0-9]* file'" "$out"
+assert "recipient and key changed, no incoming key and no .rotating file left, backend still recorded" bash -c "[ \"\$(grep -v '^#' '$FLEET_VAULT/recipient.txt')\" != '$rcpt_old' ] && [ \"\$(cat '$FLEET_HOME/vault.key')\" != '$key_old' ] && [ ! -e '$FLEET_HOME/vault.key.next' ] && ! find '$FLEET_VAULT' -name '*.rotating' | grep -q . && grep -q '^# fleet vault: backend=file' '$FLEET_VAULT/recipient.txt'"
+assert "every value decrypts to the same bytes with the new key" [ "$(vcat "$FLEET_VAULT/secrets/minimal.env.age"; vcat "$FLEET_VAULT/secrets/full.env.age"; vcat "$FLEET_VAULT/files/full/repositories/c/.env.age"; vcat "$FLEET_VAULT/tailscale.json.age")" = "$vals_before" ]
+refute "the old key no longer decrypts" bash -c "printf '%s\n' '$key_old' | age -d -i - '$FLEET_VAULT/secrets/minimal.env.age' >/dev/null 2>&1"
+d_after=$(digest_of full)
+assert "rotation changed the digest (fresh ciphertexts)" [ "$d_after" != "$d_before" ]
+: >"$SSH_LOG"; bash "$FLEET" reconcile >/dev/null 2>&1
+assert "the next reconcile re-provisions alpha once; the node keeps the canary" bash -c "grep -q 'fleet apply' '$SSH_LOG' && [ \"\$(cat '$NH/.config/fleet/applied')\" = '$d_after' ] && grep -q \"^CANARY_SECRET='$CANARY'\" '$NH/.config/fleet/secrets.env'"
+assert "audit records the rotation" grep -q ' vault.rotate - ok' "$FLEET_VAULT/audit.log"
+assert "the master lock is free after the rotation" [ ! -d "$FLEET_VAULT/locks/.sync" ]
+# the key becomes unreachable (file backend: the key file is gone; keychain: locked)
+mv "$FLEET_HOME/vault.key" "$T/vault.key.away"
+full_sum=$(sha256 <"$FLEET_VAULT/secrets/full.env.age")
+out=$(bash "$FLEET" secrets list 2>&1); rc=$?
+assert "key unreachable: secrets list dies with the next step and prints no name" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'cannot decrypt' && printf '%s' \"\$0\" | grep -q 'vault.key is missing' && ! printf '%s' \"\$0\" | grep -q CANARY_SECRET" "$out"
+out=$(printf 'x\n' | bash "$FLEET" secrets set FOO 2>&1); rc=$?
+assert "key unreachable: secrets set dies before touching the file" bash -c "[ $rc != 0 ] && [ \"\$(sha256 <'$FLEET_VAULT/secrets/full.env.age')\" = '$full_sum' ]"
+assert "vault status reports the key UNREACHABLE (exit 0)" bash -c "bash '$FLEET' vault status 2>&1 | grep -q '^key:        UNREACHABLE'"
+printf 'stale' >"$NH/.config/fleet/applied"; : >"$SSH_LOG"
+out=$(bash "$FLEET" reconcile 2>&1); rc=$?
+assert "reconcile with the key unreachable: exit 0, skips alpha with a clear warning before shipping anything" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'alpha: provision skipped, the vault key is unreachable' && ! grep -q 'secrets.env.tmp' '$SSH_LOG' && ! grep -q 'fleet apply' '$SSH_LOG' && ! grep -q 'tar -x' '$SSH_LOG' && [ \"\$(cat '$NH/.config/fleet/applied')\" = stale ]" "$out"
+assert "the skip is audited; registry state untouched" bash -c "grep -q ' provision alpha skip vault-locked' '$FLEET_VAULT/audit.log' && [ \"\$(jget '$FLEET_VAULT/nodes/nAAAACNTRL.json' state)\" = provisioned ]"
+assert "fleet list works without the key: the desired digest comes from the ciphertexts" bash -c "bash '$FLEET' list --offline --json 2>/dev/null | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"alpha\"][\"desired\"][\"digest\"] == \"$d_after\"'"
+out=$(bash "$FLEET" doctor 2>&1); rc=$?
+assert "doctor fails and names the unreachable key" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'vault key: UNREACHABLE'" "$out"
+refute "vault encrypt refuses while the key is unreachable" bash "$FLEET" vault encrypt
+refute "vault rotate-key refuses while the key is unreachable" bash "$FLEET" vault rotate-key
+assert "nothing changed while the key was away" [ "$(sha256 <"$FLEET_VAULT/secrets/full.env.age")" = "$full_sum" ]
+mv "$T/vault.key.away" "$FLEET_HOME/vault.key"
+: >"$SSH_LOG"; bash "$FLEET" reconcile >/dev/null 2>&1
+assert "key back: the next reconcile provisions alpha again" bash -c "grep -q 'fleet apply' '$SSH_LOG' && [ \"\$(cat '$NH/.config/fleet/applied')\" = '$d_after' ]"
+# export: age -p needs a terminal; the tar itself is checked without the passphrase step
+out=$(bash "$FLEET" vault export "$T/export.age" </dev/null 2>&1); rc=$?
+assert "vault export without a terminal dies with the hint and writes nothing" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'needs a terminal' && [ ! -e '$T/export.age' ]" "$out"
+export_list() { FLEET_ROOT=$ROOT bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/vault.sh"; vault_identity | vault_tar export "$FLEET_VAULT"' | tar -tf - 2>/dev/null; }
+assert "the export tar: decrypted members under their plain names, ssh keys and registry included, no .age, no locks/, no recipient" bash -c "printf '%s\n' \"\$0\" | grep -qx 'secrets/minimal.env' && printf '%s\n' \"\$0\" | grep -qx 'files/full/repositories/c/.env' && printf '%s\n' \"\$0\" | grep -qx 'ssh/fleet_master' && printf '%s\n' \"\$0\" | grep -qx 'nodes/nAAAACNTRL.json' && ! printf '%s\n' \"\$0\" | grep -q '\\.age\$' && ! printf '%s\n' \"\$0\" | grep -q '^locks/' && ! printf '%s\n' \"\$0\" | grep -qx 'recipient.txt'" "$(export_list)"
+assert "the export tar carries the decrypted value" bash -c "FLEET_ROOT='$ROOT' bash -c '. \"\$FLEET_ROOT/lib/common.sh\"; fleet_load_config; . \"\$FLEET_ROOT/lib/vault.sh\"; vault_identity | vault_tar export \"\$FLEET_VAULT\"' | tar -xOf - secrets/minimal.env | grep -q \"^CANARY_SECRET='$CANARY'\""
+
+# ======================================================================
 echo "== list (registry + tailnet + fleet status --json per node; unreachable, offline and unknown peers; --json; --offline)"
 # two extra registry entries: unr is online on the tailnet but has no fake home (ssh exits 255);
 # off is registered but absent from the tailnet
@@ -763,9 +868,11 @@ write_status ',"k8":{"ID":"'"$DUP_ID"'","HostName":"fleet-dup","DNSName":"fleet-
 out=$(bash "$FLEET" doctor 2>&1)
 assert "with two online nodes doctor also probes the other node on 22 (exactly once per node)" bash -c "[ \"\$(grep -c 'nc -z -w 3 100.64.0.15 22$' '$SSH_LOG')\" = 1 ] && [ \"\$(grep -c 'nc -z -w 3 100.64.0.11 22$' '$SSH_LOG')\" = 1 ] && printf '%s' \"\$0\" | grep -q 'isolation: 6 probe(s) from 2 node(s)'" "$out"
 write_status ""
-chmod 0644 "$FLEET_VAULT/secrets/full.env"
+chmod 0644 "$FLEET_VAULT/secrets/full.env.age"
 refute "doctor fails on loose file mode" bash "$FLEET" doctor
-chmod 0600 "$FLEET_VAULT/secrets/full.env"
+chmod 0600 "$FLEET_VAULT/secrets/full.env.age"
+out=$(bash "$FLEET" doctor 2>&1)
+assert "doctor reports the vault key reachable and every secret encrypted" bash -c "printf '%s' \"\$0\" | grep -q 'vault key: reachable' && printf '%s' \"\$0\" | grep -q 'vault: every secret is encrypted'" "$out"
 
 # ======================================================================
 echo "== expired invite + ephemeral cleanup (tombstone → forget)"
@@ -803,7 +910,7 @@ bash "$FLEET" reconcile >/dev/null 2>&1
 out=$(FLEET_NOW_EPOCH=$(( $(date +%s) + 7200 )) bash "$FLEET" reconcile 2>&1)
 refute "ephemeral node absent >1h: revoked, cleaned, forgotten" [ -f "$FLEET_VAULT/nodes/nEEEECNTRL.json" ]
 assert "forgotten node's deploy keys deleted (code, config, memory)" bash -c "grep -q '^DELETE /repos/example/fleeter/keys/$EKD' '$API_LOG' && grep -q '^DELETE /repos/example/fleet-config/keys/$EKC' '$API_LOG' && grep -q '^DELETE /repos/example/fleet-memory/keys/$EKM' '$API_LOG'"
-assert "revoke + forget audited, secrets to rotate named" bash -c "grep -q ' revoke eph gone' '$FLEET_VAULT/audit.log' && grep -q ' forget eph gone' '$FLEET_VAULT/audit.log' && printf '%s' \"\$0\" | grep -q 'rotate the secrets it held: CLAUDE_CODE_OAUTH_TOKEN'" "$out"
+assert "revoke + forget audited, secrets to rotate named" bash -c "grep -q ' revoke eph gone' '$FLEET_VAULT/audit.log' && grep -q ' forget eph gone' '$FLEET_VAULT/audit.log' && printf '%s' \"\$0\" | grep -q 'rotate the secrets it held: .*CLAUDE_CODE_OAUTH_TOKEN'" "$out"
 assert "non-ephemeral dup node (gone 2h < 24h) untouched" [ "$(jget "$FLEET_VAULT/nodes/$DUP_ID.json" state)" = provisioned ]
 assert "non-ephemeral alpha untouched" [ "$(jget "$FLEET_VAULT/nodes/nAAAACNTRL.json" state)" = provisioned ]
 
@@ -962,6 +1069,144 @@ rm -rf "$L2"
 refute "lock_break on a missing lock returns 1 (caller acquires instead)" bash -c ". '$ROOT/lib/common.sh'; lock_break '$L2'"
 
 # ======================================================================
+echo "== vault encrypt: migration of a plaintext vault (values identical, plaintext gone, digest.key removed, idempotent); api.py on both"
+HOMEM="$T/master-plain"; VM="$HOMEM/.config/fleet/vault"
+mkdir -p "$HOMEM/.config/fleet"; chmod 0700 "$HOMEM/.config/fleet"
+mk_plain_vault "$VM"
+mfleet() { HOME="$HOMEM" FLEET_HOME="$HOMEM/.config/fleet" FLEET_VAULT="$VM" bash "$FLEET" "$@"; }
+mvcat() { HOME="$HOMEM" FLEET_HOME="$HOMEM/.config/fleet" FLEET_VAULT="$VM" vcat "$1"; }
+mdigest() { HOME="$HOMEM" FLEET_HOME="$HOMEM/.config/fleet" FLEET_VAULT="$VM" digest_of "$1"; }
+mapi() { FLEET_HOME="$HOMEM/.config/fleet" FLEET_VAULT="$VM" python3 "$ROOT/lib/api.py" "$@"; }
+plain_sum=$( (cd "$VM" && cat secrets/minimal.env secrets/full.env files/full/projects/app/.env tailscale.json github.json) | sha256)
+out=$(mfleet vault status 2>&1); rc=$?
+assert "status on a plaintext vault: exit 0, no recipient, the 5 plaintext files listed, legacy digest.key" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q '^recipient:  none' && printf '%s' \"\$0\" | grep -q '^plaintext:  5 file(s): files/full/projects/app/.env github.json secrets/full.env secrets/minimal.env tailscale.json' && printf '%s' \"\$0\" | grep -q '^digest.key: present'" "$out"
+out=$(mfleet secrets list 2>&1)
+assert "a plaintext vault is still read (secrets list)" printf '%s' "$out" | grep -Eq '^OPENAI_API_KEY +full'
+dm0=$(mdigest full)
+assert "the digest of a plaintext vault is computed (legacy HMAC with digest.key)" printf '%s' "$dm0" | grep -Eqx '[0-9a-f]{64}'
+out=$(printf 'x\n' | mfleet secrets set NEW_ONE 2>&1); rc=$?
+assert "writers refuse on a vault that is not encrypted yet and point at fleet vault encrypt" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'not encrypted yet' && printf '%s' \"\$0\" | grep -q 'fleet vault encrypt' && ! grep -q NEW_ONE '$VM/secrets/full.env'" "$out"
+assert "api.py reads the plaintext tailscale.json (legacy vault)" [ "$(mapi ts check)" = ok ]
+out=$(mfleet doctor 2>&1)
+assert "doctor on a plaintext vault warns: not encrypted at rest, run fleet vault encrypt" printf '%s' "$out" | grep -q 'vault: not encrypted at rest.*fleet vault encrypt'
+out=$(mfleet vault encrypt 2>&1); rc=$?
+assert "vault encrypt exits 0: creates the key, encrypts 5 files, removes digest.key" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'vault key: file' && printf '%s' \"\$0\" | grep -q 'vault: 5 file(s) encrypted' && printf '%s' \"\$0\" | grep -q 'digest.key removed' && [ ! -e '$VM/digest.key' ]" "$out"
+assert "plaintext gone, ciphertexts present (0600), recipient 0644" bash -c "cd '$VM' && [ ! -e secrets/minimal.env ] && [ ! -e secrets/full.env ] && [ ! -e files/full/projects/app/.env ] && [ ! -e tailscale.json ] && [ ! -e github.json ] && [ -f secrets/minimal.env.age ] && [ -f secrets/full.env.age ] && [ -f files/full/projects/app/.env.age ] && [ -f tailscale.json.age ] && [ -f github.json.age ] && [ \"\$(mode_of secrets/full.env.age)\" = 600 ] && [ \"\$(mode_of recipient.txt)\" = 644 ]"
+assert "values identical byte for byte after the migration" [ "$( (mvcat "$VM/secrets/minimal.env.age"; mvcat "$VM/secrets/full.env.age"; mvcat "$VM/files/full/projects/app/.env.age"; mvcat "$VM/tailscale.json.age"; mvcat "$VM/github.json.age") | sha256)" = "$plain_sum" ]
+refute "no plaintext value remains anywhere under the migrated master's home" grep -rq -e plain-oauth-FAKE -e plain-openai-FAKE -e plain-db-FAKE -e tskey-client -e ghtok "$HOMEM"
+out=$(mfleet secrets list 2>&1)
+assert "secrets list on the migrated vault (quoted value survived)" printf '%s' "$out" | grep -Eq '^QUOTED +full'
+assert "api.py reads the encrypted tailscale.json and github.json through vault_cat (token exchange, gh user)" bash -c "[ \"\$(FLEET_HOME='$HOMEM/.config/fleet' FLEET_VAULT='$VM' python3 '$ROOT/lib/api.py' ts check)\" = ok ] && [ \"\$(FLEET_HOME='$HOMEM/.config/fleet' FLEET_VAULT='$VM' python3 '$ROOT/lib/api.py' gh user)\" = example ]"
+dm1=$(mdigest full)
+mv "$HOMEM/.config/fleet/vault.key" "$T/vk.away"
+assert "the migrated digest differs from the legacy one and needs no key" bash -c "[ '$dm1' != '$dm0' ] && [ \"\$0\" = '$dm1' ]" "$(mdigest full)"
+out=$(mfleet vault encrypt 2>&1); rc=$?
+assert "vault encrypt refuses when the key backend is unreachable" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'unreachable'" "$out"
+out=$(mapi ts check 2>&1); rc=$?
+assert "api.py fails loudly (no silent fallback) when the key is unreachable" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'cannot decrypt'" "$out"
+mv "$T/vk.away" "$HOMEM/.config/fleet/vault.key"
+out=$(mfleet vault encrypt 2>&1); rc=$?
+assert "vault encrypt is idempotent" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'nothing to encrypt'" "$out"
+assert "audit records the migration" grep -q ' vault.encrypt - ok 5' "$VM/audit.log"
+# a plaintext left next to its ciphertext: identical -> dropped; different -> refused, nothing changed
+mvcat "$VM/secrets/minimal.env.age" >"$VM/secrets/minimal.env"
+out=$(mfleet vault encrypt 2>&1); rc=$?
+assert "an identical plaintext copy next to the ciphertext is removed" bash -c "[ $rc = 0 ] && [ ! -e '$VM/secrets/minimal.env' ]"
+printf "CLAUDE_CODE_OAUTH_TOKEN='other-FAKE'\n" >"$VM/secrets/minimal.env"; chmod 0600 "$VM/secrets/minimal.env"; msum=$(sha256 <"$VM/secrets/minimal.env.age")
+out=$(mfleet vault encrypt 2>&1); rc=$?
+assert "a differing plaintext next to the ciphertext is refused with both options named; neither file touched" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'both exist and differ' && [ -f '$VM/secrets/minimal.env' ] && [ \"\$(sha256 <'$VM/secrets/minimal.env.age')\" = '$msum' ]" "$out"
+rm -f "$VM/secrets/minimal.env"
+
+# ======================================================================
+echo "== key backend keychain (fake security): identity on stdin only, never argv; -w reads; locked keychain"
+SEC="$T/secbin"; mkdir -p "$SEC" "$T/secstate" "$T/ststate"
+export SEC_ARGV="$T/security.argv" SEC_STDIN="$T/security.stdin" SEC_STATE="$T/secstate" SEC_LOCKED="$T/keychain-locked"
+export ST_ARGV="$T/secret-tool.argv" ST_STDIN="$T/secret-tool.stdin" ST_STATE="$T/ststate"
+ACC=${USER:-$(id -un)}
+# fake macOS `security`: argv and stdin recorded separately; items in $SEC_STATE/<service>.<account>
+cat >"$SEC/security" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SEC_ARGV"
+svc=""; acc=""; pw=""; w=0
+parse() { while [ $# -gt 0 ]; do case "$1" in -s) svc=$2; shift ;; -a) acc=$2; shift ;; -w) if [ $# -gt 1 ]; then pw=$2; shift; else w=1; fi ;; esac; shift; done; }
+case "$1" in
+  -i)
+    while IFS= read -r line; do
+      printf '%s\n' "$line" >>"$SEC_STDIN"
+      # shellcheck disable=SC2086
+      set -- $line
+      [ "$1" = add-generic-password ] || { echo "fake security: unsupported: $line" >&2; exit 1; }
+      shift; parse "$@"
+      printf '%s' "$pw" >"$SEC_STATE/$svc.$acc"
+    done ;;
+  find-generic-password)
+    shift; parse "$@"
+    [ -f "$SEC_LOCKED" ] && { echo "security: SecKeychainSearchCopyNext: User interaction is not allowed." >&2; exit 36; }
+    [ -f "$SEC_STATE/$svc.$acc" ] || { echo "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." >&2; exit 44; }
+    [ "$w" = 1 ] && { cat "$SEC_STATE/$svc.$acc"; echo; } ;;
+  delete-generic-password)
+    shift; parse "$@"; rm -f "$SEC_STATE/$svc.$acc" ;;
+  *) echo "fake security: unsupported: $*" >&2; exit 2 ;;
+esac
+EOF
+# fake `secret-tool`: store reads the secret from stdin; lookup prints it without a newline
+cat >"$SEC/secret-tool" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$ST_ARGV"
+cmd=$1; shift; attrs=""
+case "$cmd" in
+  store)  while [ $# -gt 0 ]; do case "$1" in --label=*) ;; *) attrs="$attrs.$1" ;; esac; shift; done
+          IFS= read -r pw || true; printf '%s\n' "$pw" >>"$ST_STDIN"; printf '%s' "$pw" >"$ST_STATE/$attrs" ;;
+  lookup) while [ $# -gt 0 ]; do attrs="$attrs.$1"; shift; done; [ -f "$ST_STATE/$attrs" ] || exit 1; cat "$ST_STATE/$attrs" ;;
+  clear)  while [ $# -gt 0 ]; do attrs="$attrs.$1"; shift; done; rm -f "$ST_STATE/$attrs" ;;
+  *) echo "fake secret-tool: unsupported: $cmd $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$SEC/security" "$SEC/secret-tool"
+HOMEK="$T/master-keychain"; VK="$HOMEK/.config/fleet/vault"; mkdir -p "$HOMEK/.config/fleet"
+mk_plain_vault "$VK"
+kfleet() { PATH="$SEC:$PATH" FLEET_VAULT_KEY_BACKEND=keychain HOME="$HOMEK" FLEET_HOME="$HOMEK/.config/fleet" FLEET_VAULT="$VK" bash "$FLEET" "$@"; }
+out=$(kfleet vault encrypt 2>&1); rc=$?
+assert "keychain backend: vault encrypt exits 0; key stored under service fleet-vault for this user; no key file; recipient records the backend" bash -c "[ $rc = 0 ] && grep -q '^AGE-SECRET-KEY-1' '$SEC_STATE/fleet-vault.$ACC' && [ ! -e '$HOMEK/.config/fleet/vault.key' ] && grep -q '^# fleet vault: backend=keychain account=$ACC' '$VK/recipient.txt' && printf '%s' \"\$0\" | grep -q 'vault key: keychain (login keychain, service fleet-vault, account $ACC)'" "$out"
+assert "the identity reached security on stdin (-i add-generic-password -U -s fleet-vault -a USER -w ...), never in argv" bash -c "grep -q '^add-generic-password -U -s fleet-vault -a $ACC -w AGE-SECRET-KEY-1' '$SEC_STDIN' && grep -qx -- '-i' '$SEC_ARGV' && ! grep -q 'AGE-SECRET-KEY' '$SEC_ARGV'"
+assert "reads use find-generic-password -s fleet-vault -a USER -w (stdout)" grep -qx -- "find-generic-password -s fleet-vault -a $ACC -w" "$SEC_ARGV"
+printf 'kc-value-FAKE\n' | kfleet secrets set KC_SECRET --profile minimal >/dev/null 2>&1
+out=$(kfleet secrets list 2>&1)
+assert "secrets set + list work through the keychain" printf '%s' "$out" | grep -Eq '^KC_SECRET +minimal'
+refute "the value is nowhere on disk under that home" grep -rq 'kc-value-FAKE' "$HOMEK"
+out=$(kfleet vault rotate-key 2>&1); rc=$?
+assert "rotate-key through the keychain: exit 0; incoming key went in as fleet-vault-next (stdin) and was deleted afterwards; argv still clean" bash -c "[ $rc = 0 ] && [ ! -e '$SEC_STATE/fleet-vault-next.$ACC' ] && grep -q '^add-generic-password -U -s fleet-vault-next -a $ACC -w AGE-SECRET-KEY-1' '$SEC_STDIN' && grep -qx -- 'delete-generic-password -s fleet-vault-next -a $ACC' '$SEC_ARGV' && ! grep -q 'AGE-SECRET-KEY' '$SEC_ARGV'"
+out=$(kfleet secrets list 2>&1)
+assert "secrets readable after the keychain rotation" printf '%s' "$out" | grep -Eq '^KC_SECRET +minimal'
+touch "$SEC_LOCKED"
+out=$(kfleet secrets list 2>&1); rc=$?
+assert "locked keychain: secrets list dies with the unlock hint" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'unlock the login keychain'" "$out"
+out=$(kfleet vault status 2>&1)
+assert "locked keychain: vault status names the keychain and says UNREACHABLE" bash -c "printf '%s' \"\$0\" | grep -q '^backend:    keychain (login keychain, service fleet-vault, account $ACC)' && printf '%s' \"\$0\" | grep -q '^key:        UNREACHABLE'" "$out"
+rm -f "$SEC_LOCKED"
+out=$(kfleet vault status 2>&1)
+assert "unlocked again: key reachable" printf '%s' "$out" | grep -q '^key:        reachable'
+assert "a recipient created under another backend is flagged by vault status" bash -c "HOME='$HOMEK' FLEET_HOME='$HOMEK/.config/fleet' FLEET_VAULT='$VK' bash '$FLEET' vault status 2>&1 | grep -q 'WARNING: the key was created with backend keychain'"
+
+# ======================================================================
+echo "== key backend secret-tool (fake): identity on stdin only; backend auto-detection"
+HOMES="$T/master-secret-tool"; VS="$HOMES/.config/fleet/vault"; mkdir -p "$HOMES/.config/fleet"
+mk_plain_vault "$VS"
+sfleet() { PATH="$SEC:$PATH" FLEET_VAULT_KEY_BACKEND=secret-tool HOME="$HOMES" FLEET_HOME="$HOMES/.config/fleet" FLEET_VAULT="$VS" bash "$FLEET" "$@"; }
+out=$(sfleet vault encrypt 2>&1); rc=$?
+assert "secret-tool backend: vault encrypt exits 0; store with label + attributes, identity on stdin only; lookup by attributes; no key file" bash -c "[ $rc = 0 ] && grep -qx -- 'store --label=fleet-vault service fleet-vault account $ACC' '$ST_ARGV' && grep -q '^AGE-SECRET-KEY-1' '$ST_STDIN' && ! grep -q 'AGE-SECRET-KEY' '$ST_ARGV' && grep -qx -- 'lookup service fleet-vault account $ACC' '$ST_ARGV' && [ ! -e '$HOMES/.config/fleet/vault.key' ]"
+out=$(sfleet secrets list 2>&1)
+assert "secrets list works through secret-tool" printf '%s' "$out" | grep -Eq '^OPENAI_API_KEY +full'
+# shellcheck disable=SC2016  # the sourcing happens in the child shell
+backend_of() { env -u FLEET_VAULT_KEY_BACKEND PATH="$1" FLEET_ROOT="$ROOT" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/vault.sh"; vault_backend'; }
+plain_want="file"; PATH=/usr/bin:/bin command -v secret-tool >/dev/null 2>&1 && plain_want="secret-tool"
+case "$(uname -s)" in
+  Darwin) assert "unset backend on macOS: keychain" bash -c "[ \"\$0\" = keychain ] && [ \"\$1\" = keychain ]" "$(backend_of "$SEC:/usr/bin:/bin")" "$(backend_of /usr/bin:/bin)" ;;
+  *)      assert "unset backend on Linux: secret-tool when installed, else file" bash -c "[ \"\$0\" = secret-tool ] && [ \"\$1\" = $plain_want ]" "$(backend_of "$SEC:/usr/bin:/bin")" "$(backend_of /usr/bin:/bin)" ;;
+esac
+refute "an unknown backend name is rejected" bash -c "FLEET_VAULT_KEY_BACKEND=vaultx FLEET_ROOT='$ROOT' bash -c '. \"\$FLEET_ROOT/lib/common.sh\"; fleet_load_config; . \"\$FLEET_ROOT/lib/vault.sh\"; vault_backend'"
+
+# ======================================================================
 echo "== GitHub CLI path (gh on PATH, no FLEET_GH_API): login, repo check, deploy keys via gh api; https code repo -> no code key"
 HOME2="$T/master2"; mkdir -p "$HOME2/.config/fleet"
 printf "FLEET_CODE_REPO='https://github.com/example/fleeter.git'\n" >"$HOME2/.config/fleet/fleet.conf"
@@ -1075,7 +1320,7 @@ git -c init.defaultBranch=main init -q --bare "$T/sync-code.git"
 git -C "$SYNC_SRC" push -q "$T/sync-code.git" HEAD:main
 git clone -q "$T/sync-code.git" "$T/sync-wt"
 SFLEET="$T/sync-wt/fleet"
-sync_digest_of() { FLEET_ROOT="$T/sync-wt" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/master.sh"; desired_digest "$1"' _ "$1" 2>/dev/null; }
+sync_digest_of() { FLEET_ROOT="$T/sync-wt" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/vault.sh"; . "$FLEET_ROOT/lib/master.sh"; desired_digest "$1"' _ "$1" 2>/dev/null; }
 git -C "$CFG" remote add origin "$T/cfg-remote.git"; git -C "$CFG" push -q -u origin main 2>/dev/null
 git clone -q "$T/cfg-remote.git" "$T/cfg-other"
 printf '\nsync marker\n' >>"$T/cfg-other/AGENTS.md"; git -C "$T/cfg-other" commit -qam "config via sync"; git -C "$T/cfg-other" push -q origin main

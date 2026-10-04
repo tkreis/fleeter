@@ -848,6 +848,8 @@ cmd_init_master() {
   github_setup "$reconfigure"
   install_reconcile_schedule
   install_sync_schedule
+  master_memory_setup
+  install_memory_schedule
   master_bin_link
   harness_skill_install
   audit "init.master" "-" ok
@@ -908,13 +910,17 @@ _master_write_if_changed() {
   chmod 0644 "$1"; mv -f "$1" "$2"; echo 1
 }
 
-# install_master_schedule JOB EVERY_MIN — `fleet JOB` every EVERY_MIN minutes
-# as the user: LaunchAgent dev.fleet.JOB (macOS) or systemd user timer
-# fleet-JOB (Linux), output in $FLEET_HOME/JOB.log. Idempotent: the files are
-# rewritten only when their content changed, and (re)loaded only then or when
-# the job is not loaded; FLEET_NO_SCHEDULER writes without loading.
+# install_master_schedule JOB EVERY_MIN [CMD...] — `fleet CMD...` (default
+# `fleet JOB`) every EVERY_MIN minutes as the user: LaunchAgent dev.fleet.JOB
+# (macOS) or systemd user timer fleet-JOB (Linux), output in $FLEET_HOME/JOB.log.
+# Idempotent: the files are rewritten only when their content changed, and
+# (re)loaded only then or when the job is not loaded; FLEET_NO_SCHEDULER writes
+# without loading.
 install_master_schedule() {
-  local job=$1 every_min=$2 every plist unit tmp changed="" label uid
+  local job=$1 every_min=$2 every plist unit tmp changed="" label uid args a xml_args=""
+  shift 2
+  args=${*:-$job}
+  for a in $args; do xml_args="$xml_args<string>$a</string>"; done
   every=$((every_min * 60))
   case "$(fleet_os)" in
     macos)
@@ -928,7 +934,7 @@ install_master_schedule() {
 <dict>
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array><string>$FLEET_ROOT/fleet</string><string>$job</string></array>
+  <array><string>$FLEET_ROOT/fleet</string>$xml_args</array>
   <key>StartInterval</key><integer>$every</integer>
   <key>RunAtLoad</key><true/>
   <key>EnvironmentVariables</key>
@@ -960,7 +966,7 @@ Description=fleet $job
 [Service]
 Type=oneshot
 Environment=FLEET_HOME=$FLEET_HOME
-ExecStart=$FLEET_ROOT/fleet $job
+ExecStart=$FLEET_ROOT/fleet $args
 StandardOutput=append:$FLEET_HOME/$job.log
 StandardError=inherit
 EOF
@@ -991,11 +997,48 @@ EOF
 install_reconcile_schedule() { install_master_schedule reconcile "${FLEET_RECONCILE_EVERY:-2}"; }
 install_sync_schedule()      { install_master_schedule sync "${FLEET_SYNC_EVERY:-30}"; }
 
-# fleet schedule install — (re)install both master timers. Idempotent.
+# remove_master_schedule JOB — unload and delete a master job's plist / units
+# (a job switched off since it was installed). Quiet when there is nothing.
+remove_master_schedule() {
+  local job=$1 f unit
+  f=$(master_schedule_file "$job")
+  [ -e "$f" ] || return 0
+  case "$(fleet_os)" in
+    macos) [ -n "${FLEET_NO_SCHEDULER:-}" ] || launchctl bootout "gui/$(id -u)/dev.fleet.$job" >/dev/null 2>&1 || true
+           rm -f "$f" ;;
+    linux) unit="$HOME/.config/systemd/user"
+           [ -n "${FLEET_NO_SCHEDULER:-}" ] || systemctl --user disable --now "fleet-$job.timer" >/dev/null 2>&1 || true
+           rm -f "$unit/fleet-$job.service" "$unit/fleet-$job.timer"
+           [ -n "${FLEET_NO_SCHEDULER:-}" ] || systemctl --user daemon-reload >/dev/null 2>&1 || true ;;
+  esac
+  ok "$job schedule removed (shared memory is off)"
+}
+
+# install_memory_schedule — `fleet memory sync` on the master every
+# FLEET_MEMORY_EVERY minutes (dev.fleet.memory / fleet-memory.timer), so the
+# master's own agent memories reach the vault like every node's. Only while a
+# memory repo is configured; otherwise an existing schedule is removed.
+install_memory_schedule() {
+  if [ -n "$(node_memory_remote)" ]; then install_master_schedule memory "${FLEET_MEMORY_EVERY:-5}" memory sync
+  else remove_master_schedule memory; fi
+}
+
+# master_memory_setup — clone the memory repo into FLEET_MEMORY_DIR with the
+# master's own git credentials (no deploy key) and create nodes/<master name>;
+# lib/node.sh does the work, so the master is just another writer of the vault.
+master_memory_setup() {
+  [ -n "$(node_memory_remote)" ] || return 0
+  node_memory_setup "$(node_name)"
+}
+
+# fleet schedule install — (re)install the master timers (reconcile, sync and,
+# with a memory repo, memory) and make sure the vault is cloned. Idempotent.
 cmd_schedule_install() {
   vault_require
   install_reconcile_schedule
   install_sync_schedule
+  master_memory_setup
+  install_memory_schedule
 }
 
 # ---------- sync: the periodic master push ----------
@@ -1274,15 +1317,28 @@ list_collect_status() {
   wait
 }
 
+# master_memory_state — "<state> <last_sync>" of the master's own vault clone:
+# off (no memory repo), missing (not cloned), else memory.state like a node.
+master_memory_state() {
+  local st
+  if [ -z "$(node_memory_remote)" ]; then echo "off -"; return 0; fi
+  if [ ! -d "$FLEET_MEMORY_DIR/.git" ]; then echo "missing -"; return 0; fi
+  st=$(node_kv_get "$FLEET_HOME/memory.state" state); case "$st" in ""|off|missing) st=ok ;; esac
+  echo "$st $(node_kv_get "$FLEET_HOME/memory.state" last_sync | grep . || echo -)"
+}
+
 # list_render MODE NODES_DIR PEERS_FILE STATUS_DIR DIGESTS_FILE PROVISIONING_FILE
 # WANT_CODE WANT_CONFIG NOW OFFLINE — the table or the JSON array (CONTRACT
-# "fleet list --json"). STATUS_DIR may be empty (--offline).
+# "fleet list --json"). STATUS_DIR may be empty (--offline). The master itself
+# is the first row (state `master`, "master": true) with its memory state;
+# FLEET_LIST_MASTER = "<name> <host> <memory state> <last sync>".
 list_render() {
   python3 - "$@" <<'PY'
 import json, os, sys, calendar, time
 
 mode, nodes_dir, peers_f, status_dir, digests_f, prov_f, want_code, want_config, now, offline = sys.argv[1:11]
 now = int(now); offline = offline == "1"
+master = (os.environ.get("FLEET_LIST_MASTER") or "").split()
 
 def read_json(p):
     try:
@@ -1386,6 +1442,7 @@ for fn in sorted(os.listdir(nodes_dir)):
         "missing_since": r.get("missing_since") or "", "cleanup_pending": list(r.get("pending_cleanup") or []),
     })
 rows.sort(key=lambda x: (x["name"], x["id"]))
+for x in rows: x["master"] = False
 known = set(x["id"] for x in rows)
 for pid in sorted(peers, key=lambda k: peers[k]["host"]):
     if pid in known: continue
@@ -1397,7 +1454,19 @@ for pid in sorted(peers, key=lambda k: peers[k]["host"]):
         "synced": None, "provisioned": None, "provisioned_age": None,
         "desired": {"code": None, "config": None, "digest": None},
         "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
-        "tools": {}, "memory": None, "proxy": None, "fleet": None, "missing_since": "", "cleanup_pending": [],
+        "tools": {}, "memory": None, "proxy": None, "fleet": None, "missing_since": "", "cleanup_pending": [], "master": False,
+    })
+if len(master) >= 4:
+    mem_state, mem_sync = master[2], master[3]
+    rows.insert(0, {
+        "name": master[0], "id": "master", "host": master[1], "dnsname": None, "user": None,
+        "os": None, "arch": None, "container": False, "profile": None, "ephemeral": False,
+        "online": True, "reachable": None, "state": "master", "provisioning": False,
+        "synced": None, "provisioned": None, "provisioned_age": None,
+        "desired": {"code": want_code or None, "config": want_config or None, "digest": None},
+        "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
+        "tools": {}, "memory": mem_state, "memory_last_sync": None if mem_sync == "-" else mem_sync,
+        "proxy": None, "fleet": os.environ.get("FLEET_VERSION"), "missing_since": "", "cleanup_pending": [], "master": True,
     })
 
 if mode == "json":
@@ -1416,8 +1485,11 @@ for x in rows:
         tools = "unreachable"
     else:
         tools = tools_summary(x["tools"])
+    mem = dash(x["memory"])
+    if x["master"] and x.get("memory_last_sync"):
+        mem = "%s (%s)" % (mem, age(x["memory_last_sync"]) or "-")
     table.append([x["name"], dash(x["host"]), "yes" if x["online"] else "no", x["state"], dash(x["synced"]),
-                  dash(x["provisioned_age"]), tools, dash(x["memory"]), dash(x["proxy"]), dash(x["fleet"])])
+                  dash(x["provisioned_age"]), tools, mem, dash(x["proxy"]), dash(x["fleet"])])
 widths = [len(h) for h in head]
 for row in table:
     for i, c in enumerate(row):
@@ -1452,6 +1524,7 @@ cmd_list() {
     mkdir -p "$tmpd/status"
     list_collect_status "$tmpd/status" "$peers"
   fi
+  FLEET_LIST_MASTER="$(node_name) $(hostname -s 2>/dev/null || hostname) $(master_memory_state)" \
   list_render "$([ "$json" = 1 ] && echo json || echo table)" "$FLEET_VAULT/nodes" "$tmpd/peers" \
     "$([ "$offline" = 0 ] && echo "$tmpd/status")" "$tmpd/digests" "$tmpd/provisioning" \
     "$(code_rev)" "$(config_rev)" "$(now_epoch)" "$offline"
@@ -1775,21 +1848,26 @@ missing_grace() {
 }
 
 # memory_seed — make sure the memory repo has the vault scaffolding from
-# templates/memory (README, INDEX.md, index workflow, notes/, nodes/). Adds only
-# missing files, so it is safe on a repo nodes already write to. Uses the
-# master's own git credentials. At most once an hour (vault/memory.checked).
+# templates/memory (README, INDEX.md, index workflow, notes/, nodes/). Adds
+# missing files and refreshes the fleeter-owned ones (scripts/, the index
+# workflow) when a fleeter update changed them; README.md and INDEX.md are never
+# overwritten. Safe on a repo nodes already write to. Uses the master's own git
+# credentials. At most once an hour (vault/memory.checked).
 memory_seed() {
-  local mark="$FLEET_VAULT/memory.checked" tmpd f n=0
-  [ -n "${FLEET_MEMORY_REPO:-}" ] && [ "${FLEET_MEMORY_SEED:-1}" != 0 ] || return 0
+  local mark="$FLEET_VAULT/memory.checked" tmpd f n=0 remote
+  remote=$(node_memory_remote)
+  [ -n "$remote" ] && [ "${FLEET_MEMORY_SEED:-1}" != 0 ] || return 0
   if [ -f "$mark" ] && [ $(( $(now_epoch) - $(cat "$mark" 2>/dev/null || echo 0) )) -lt 3600 ]; then return 0; fi
   tmpd=$(mktemp -d "${TMPDIR:-/tmp}/fleet-memory.XXXXXX")
-  if ! GIT_TERMINAL_PROMPT=0 git clone --quiet "$FLEET_MEMORY_REPO" "$tmpd/m" >/dev/null 2>&1; then
-    warn "memory seed: cannot clone $FLEET_MEMORY_REPO with the master's git credentials; retrying in an hour"
+  if ! GIT_TERMINAL_PROMPT=0 git clone --quiet "$remote" "$tmpd/m" >/dev/null 2>&1; then
+    warn "memory seed: cannot clone $remote with the master's git credentials; retrying in an hour"
     now_epoch >"$mark"; rm -rf "$tmpd"; return 0
   fi
   (cd "$FLEET_ROOT/templates/memory" && find . -type f ! -name '.DS_Store' ! -path '*/__pycache__/*') | while IFS= read -r f; do
     f=${f#./}
-    [ -e "$tmpd/m/$f" ] && continue
+    if [ -e "$tmpd/m/$f" ]; then
+      case "$f" in scripts/*|.github/workflows/index.yml) cmp -s "$FLEET_ROOT/templates/memory/$f" "$tmpd/m/$f" && continue ;; *) continue ;; esac
+    fi
     mkdir -p "$(dirname "$tmpd/m/$f")"
     cp -p "$FLEET_ROOT/templates/memory/$f" "$tmpd/m/$f"
   done
@@ -1797,7 +1875,7 @@ memory_seed() {
   if ! git -C "$tmpd/m" diff --cached --quiet; then
     n=$(git -C "$tmpd/m" diff --cached --name-only | wc -l | tr -d ' ')
     if git -C "$tmpd/m" -c user.name="fleet master" -c user.email="fleet-master@localhost" \
-         commit --quiet -m "add memory vault scaffolding" \
+         commit --quiet -m "update memory vault scaffolding" \
        && git -C "$tmpd/m" push --quiet origin HEAD:main >/dev/null 2>&1; then
       ok "memory seed: added $n template file(s) to the memory repo"; audit "memory.seed" "-" "ok $n"
     else
@@ -2291,6 +2369,12 @@ cmd_doctor() {
   if [ -f "$f" ]; then ok "reconcile schedule installed: $f"; else warn "reconcile schedule missing (run: fleet schedule install)"; fails=$((fails + 1)); fi
   f=$(master_schedule_file sync)
   if [ -f "$f" ]; then ok "sync schedule installed: $f"; else warn "sync schedule missing (run: fleet schedule install)"; fails=$((fails + 1)); fi
+  if [ -n "$(node_memory_remote)" ] && [ "${FLEET_MEMORY_SEED:-1}" != 0 ]; then
+    f=$(master_schedule_file memory)
+    if [ -f "$f" ]; then ok "memory schedule installed: $f"; else warn "memory schedule missing: this master's agent memories are not uploaded (run: fleet schedule install)"; fails=$((fails + 1)); fi
+    if [ -d "$FLEET_MEMORY_DIR/.git" ]; then ok "memory vault cloned: $FLEET_MEMORY_DIR (nodes/$(node_name))"
+    else warn "memory vault not cloned at $FLEET_MEMORY_DIR (run: fleet schedule install)"; fails=$((fails + 1)); fi
+  fi
   if [ -d "$FLEET_CONFIG_DIR/.git" ] && [ -z "$(git -C "$FLEET_CONFIG_DIR" config --get "branch.$(git -C "$FLEET_CONFIG_DIR" symbolic-ref --short -q HEAD 2>/dev/null || echo main).remote" 2>/dev/null)" ]; then
     log "config dir $FLEET_CONFIG_DIR has no upstream branch: fleet sync cannot fast-forward it (git branch --set-upstream-to=origin/main)"
   fi

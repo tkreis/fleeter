@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleeter — one bash tool, a personal fleet of coding-agent machines</title>
+<meta name="description" content="fleeter turns your Macs, Linux boxes and containers into a private fleet of machines that run Claude Code, Codex, Cursor and Grok with the same instructions, skills, tools and secrets as your laptop. Push-only over Tailscale, shared Markdown memory, MIT.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#eef2ee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1826" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="wrap top">
+  <a class="brand" href="#top" id="top">fleeter <small>0.3.0</small></a>
+  <nav aria-label="Sections">
+    <a href="#skills">Skills</a>
+    <a href="#how">How it works</a>
+    <a href="#join">Joining</a>
+    <a href="#memory">Shared memory</a>
+    <a href="#commands">Commands</a>
+    <a href="https://github.com/tkreis/fleeter">GitHub</a>
+  </nav>
+</header>
+
+<main id="main">
+
+<section class="wrap hero">
+  <div>
+    <h1>Your Macs, Linux boxes and containers, run as one fleet of coding agents.</h1>
+    <p class="lede">fleeter is one bash tool. Your laptop is the <b>master</b>: it enrols machines over Tailscale with single-use invites, pushes Claude Code, Codex, Cursor, Grok, a browser with MCP servers, your instructions, skills and secrets over SSH, and can kick any node out. Nodes keep working while the master is off and share one Markdown memory.</p>
+    <p class="actions">
+      <a class="btn btn-ghost" href="https://github.com/tkreis/fleeter#quickstart">Read the quickstart</a>
+      <a class="btn btn-ghost" href="https://github.com/tkreis/fleeter/blob/main/docs/ARCHITECTURE.md">Read the architecture</a>
+    </p>
+  </div>
+
+  <svg class="chart" viewBox="0 0 520 420" role="img" aria-labelledby="chart-t chart-d">
+    <title id="chart-t">Harbour chart of a fleet</title>
+    <desc id="chart-d">A nautical chart. The master, drawn as a light on the shore, reaches five named nodes on the water along dotted lines whose arrows point towards the nodes: studio, mini, buildbox, ci-1 and dock-a3f. The nodes sit inside a dashed boundary labelled your fleet, a private Tailscale network.</desc>
+    <defs>
+      <marker id="arrow-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--ink)"/>
+      </marker>
+    </defs>
+    <!-- neat line and ticks -->
+    <rect x="8.5" y="8.5" width="503" height="403" fill="none" stroke="var(--ink)" stroke-width="1"/>
+    <line x1="8" y1="11.5" x2="512" y2="11.5" stroke="var(--ink)" stroke-width="6" stroke-dasharray="1 39" stroke-dashoffset="-31"/>
+    <line x1="8" y1="408.5" x2="512" y2="408.5" stroke="var(--ink)" stroke-width="6" stroke-dasharray="1 39" stroke-dashoffset="-31"/>
+    <line x1="11.5" y1="8" x2="11.5" y2="412" stroke="var(--ink)" stroke-width="6" stroke-dasharray="1 39" stroke-dashoffset="-31"/>
+    <line x1="508.5" y1="8" x2="508.5" y2="412" stroke="var(--ink)" stroke-width="6" stroke-dasharray="1 39" stroke-dashoffset="-31"/>
+    <!-- land and depth contour -->
+    <path d="M9 262 C 80 252, 122 300, 152 332 C 182 362, 198 390, 206 411 L 9 411 Z" fill="var(--buff)" stroke="var(--ink)" stroke-width="1.2"/>
+    <path d="M9 236 C 92 228, 142 282, 172 314 C 184 328, 196 344, 206 360" fill="none" stroke="var(--sea)" stroke-width="1" stroke-dasharray="4 3"/>
+    <!-- light sectors from the master -->
+    <path d="M132.8 127.1 A150 150 0 0 1 243.4 285.1" fill="none" stroke="var(--light)" stroke-width="1" stroke-dasharray="6 5" opacity="0.55"/>
+    <path d="M172.6 55.9 A230 230 0 0 1 324 272" fill="none" stroke="var(--light)" stroke-width="1" stroke-dasharray="6 5" opacity="0.35"/>
+    <!-- tailnet boundary -->
+    <ellipse cx="365" cy="210" rx="140" ry="165" fill="none" stroke="var(--sea)" stroke-width="1.2" stroke-dasharray="8 6"/>
+    <text class="sub" x="365" y="36" text-anchor="middle">your fleet (private Tailscale network)</text>
+    <!-- compass -->
+    <circle cx="62" cy="62" r="18" fill="none" stroke="var(--sea)" stroke-width="1"/>
+    <path d="M62 44 L66 62 L62 80 L58 62 Z" fill="var(--ink)"/>
+    <path d="M44 62 L62 58 L80 62 L62 66 Z" fill="none" stroke="var(--ink)" stroke-width="1"/>
+    <text class="sub" x="62" y="38" text-anchor="middle">N</text>
+    <!-- push lines, master to node -->
+    <g stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="2 4" marker-end="url(#arrow-ink)">
+      <line x1="107.2" y1="277.1" x2="269.9" y2="119.7"/>
+      <line x1="109.2" y1="279.5" x2="378.5" y2="93.9"/>
+      <line x1="109.6" y1="281.2" x2="406.6" y2="193.9"/>
+      <line x1="109.6" y1="286.9" x2="286.6" y2="340.9"/>
+      <line x1="109.9" y1="285.3" x2="366.1" y2="320.1"/>
+    </g>
+    <!-- master: the light -->
+    <circle class="flare" cx="94" cy="272" r="12" fill="var(--light)" opacity="0.3"/>
+    <path d="M84 318 L88 282 L100 282 L104 318 Z" fill="var(--paper)" stroke="var(--ink)" stroke-width="1.5"/>
+    <rect x="86" y="274" width="16" height="8" fill="var(--paper)" stroke="var(--ink)" stroke-width="1.5"/>
+    <circle cx="94" cy="272" r="4" fill="var(--light)"/>
+    <g stroke="var(--light)" stroke-width="1.2">
+      <line x1="94" y1="262" x2="94" y2="256"/>
+      <line x1="102" y1="265" x2="107" y2="261"/>
+      <line x1="86" y1="265" x2="81" y2="261"/>
+    </g>
+    <text class="label" x="94" y="336" text-anchor="middle">your master</text>
+    <!-- nodes: buoys -->
+    <g fill="var(--paper)" stroke="var(--ink)" stroke-width="1.5">
+      <circle cx="280" cy="110" r="7"/>
+      <circle cx="390" cy="86" r="7"/>
+      <circle cx="420" cy="190" r="7"/>
+      <circle cx="300" cy="345" r="7"/>
+      <circle cx="380" cy="322" r="7" stroke-dasharray="3 2"/>
+    </g>
+    <g stroke="var(--ink)" stroke-width="1.5">
+      <line x1="280" y1="103" x2="280" y2="94"/>
+      <line x1="390" y1="79" x2="390" y2="70"/>
+      <line x1="420" y1="183" x2="420" y2="174"/>
+      <line x1="300" y1="338" x2="300" y2="329"/>
+    </g>
+    <text class="label" x="292" y="100">studio</text>
+    <text class="sub" x="292" y="113">macOS</text>
+    <text class="label" x="402" y="78">mini</text>
+    <text class="sub" x="402" y="91">macOS</text>
+    <text class="label" x="432" y="182">buildbox</text>
+    <text class="sub" x="432" y="195">linux</text>
+    <text class="label" x="312" y="345">ci-1</text>
+    <text class="sub" x="312" y="358">linux</text>
+    <text class="label" x="392" y="318">dock-a3f</text>
+    <text class="sub" x="392" y="331">docker</text>
+    <!-- legend -->
+    <g transform="translate(24 104)">
+      <line x1="0" y1="0" x2="34" y2="0" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="2 4" marker-end="url(#arrow-ink)"/>
+      <text class="sub" x="42" y="4">master pushes to nodes</text>
+      <text class="sub" x="42" y="18">(one way)</text>
+    </g>
+  </svg>
+
+  <div class="install">
+    <span class="install-label">Get started on your laptop</span>
+    <pre class="term" aria-label="Install fleeter"><span class="p">$</span> curl -fsSL https://tkreis.github.io/fleeter/<wbr>install.sh | bash
+<span class="p">$</span> fleet init master</pre>
+  </div>
+</section>
+
+<section class="section" id="skills">
+  <div class="wrap">
+    <h2>Install a skill once, every machine has it</h2>
+    <pre class="term" aria-label="Adding a skill to the fleet"><span class="p">$</span> fleet skill add ~/my-skills/review
+<span class="ok">added</span> review to your fleet config
+<span class="ok">published</span> (secret scan clean)
+<span class="ok">pushed</span> to 4 nodes</pre>
+    <div class="prose after-term">
+      <p>Skills you install on the master are published to your private config repo and every node picks them up; <code>fleet skill add</code> also accepts a git URL, and <code>fleet skill list</code> shows what the fleet has. Skills you install by hand on the master are picked up automatically by <code>fleet sync</code>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="what">
+  <div class="wrap">
+    <h2>What you get on every node</h2>
+    <ul class="points">
+      <li>Coding agents installed and logged in: Claude Code, Codex, Cursor, Grok</li>
+      <li>Browsers installed, ready for the agents</li>
+      <li>Skills synced to every machine</li>
+      <li>Secrets encrypted</li>
+      <li>Auto-updates while your master is on</li>
+    </ul>
+  </div>
+</section>
+
+<section class="section" id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <div class="prose intro">
+      <p>Three git repos and one vault. The master pushes over OpenSSH inside your tailnet with its own key and pinned host keys; <code>fleet sync</code> does that on a schedule whenever the master is on. Nodes fetch code, config and memory themselves with per-node deploy keys, so they keep working while the master is off.</p>
+    </div>
+
+    <figure>
+      <svg class="diagram" viewBox="0 0 960 412" role="img" aria-labelledby="arch-t arch-d">
+        <title id="arch-t">Architecture: master, nodes and the three repos</title>
+        <desc id="arch-d">The master holds an encrypted vault and runs fleet sync on a schedule. Arrows go from the master to a Mac node, a Linux node and a Docker node over SSH on Tailscale. On the right are three GitHub repos: fleeter (code, read-only), fleet-config (yours, read-only) and fleet-memory (shared, read-write within each node's own folder). Nodes pull the first two every 15 minutes and sync the third every 5. The master pushes your config with fleet config publish.</desc>
+        <defs>
+          <marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink)"/></marker>
+          <marker id="a-sea" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--sea)"/></marker>
+          <marker id="a-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--light)"/></marker>
+        </defs>
+
+        <!-- master -->
+        <rect class="box" x="30" y="90" width="300" height="300" rx="2"/>
+        <text class="b" x="48" y="116">master</text>
+        <text class="s" x="110" y="116">your laptop, macOS or Linux</text>
+        <rect class="box-soft" x="48" y="130" width="264" height="80" rx="2"/>
+        <text class="t" x="60" y="152">vault</text>
+        <text class="s" x="110" y="152">encrypted with age</text>
+        <text class="s" x="60" y="174">key in your macOS Keychain</text>
+        <text class="s" x="60" y="192">secrets/   files/   ssh/   nodes/</text>
+        <rect class="box-soft" x="48" y="224" width="264" height="84" rx="2"/>
+        <text class="t" x="60" y="246">fleet sync</text>
+        <text class="s" x="148" y="246">scheduled push</text>
+        <text class="s" x="60" y="268">enrols new machines, then pushes</text>
+        <text class="s" x="60" y="284">tools, skills, config and secrets</text>
+        <text class="s" x="60" y="300">to every node that is online</text>
+        <rect class="box-soft" x="48" y="322" width="264" height="52" rx="2"/>
+        <text class="t" x="60" y="344">fleet invite, fleet kick</text>
+        <text class="s" x="60" y="364">one machine in, one machine out</text>
+
+        <!-- ssh trunk and branches -->
+        <line class="wire" x1="330" y1="235" x2="400" y2="235"/>
+        <line class="wire" x1="400" y1="135" x2="400" y2="335"/>
+        <line class="wire" x1="400" y1="135" x2="470" y2="135" marker-end="url(#a-ink)"/>
+        <line class="wire" x1="400" y1="235" x2="470" y2="235" marker-end="url(#a-ink)"/>
+        <line class="wire" x1="400" y1="335" x2="470" y2="335" marker-end="url(#a-ink)"/>
+        <text class="s" x="400" y="362" text-anchor="middle">SSH over Tailscale,</text>
+        <text class="s" x="400" y="378" text-anchor="middle">master to node</text>
+
+        <!-- nodes -->
+        <rect class="box" x="470" y="100" width="180" height="70" rx="2"/>
+        <text class="b" x="486" y="126">mac node</text>
+        <text class="s" x="486" y="146">macOS 13+, launchd</text>
+        <rect class="box" x="470" y="200" width="180" height="70" rx="2"/>
+        <text class="b" x="486" y="226">linux node</text>
+        <text class="s" x="486" y="246">systemd user timers</text>
+        <rect class="box" x="470" y="300" width="180" height="70" rx="2" stroke-dasharray="5 3"/>
+        <text class="b" x="486" y="326">docker node</text>
+        <text class="s" x="486" y="346">fleet daemon, ephemeral</text>
+
+        <!-- github -->
+        <text class="b" x="750" y="82">GitHub</text>
+        <text class="s" x="812" y="82">per-node deploy keys</text>
+        <rect class="box" x="750" y="95" width="190" height="70" rx="2"/>
+        <text class="t" x="764" y="118">fleeter</text>
+        <text class="s" x="764" y="136">code, upstream or a fork</text>
+        <text class="s" x="764" y="152">read-only, or public https</text>
+        <rect class="box" x="750" y="200" width="190" height="70" rx="2"/>
+        <text class="t" x="764" y="223">fleet-config</text>
+        <text class="s" x="764" y="241">yours, private: fleet.conf</text>
+        <text class="s" x="764" y="257">AGENTS.md, harness, skills</text>
+        <rect class="box" x="750" y="305" width="190" height="70" rx="2"/>
+        <text class="t" x="764" y="328">fleet-memory</text>
+        <text class="s" x="764" y="346">yours, optional, Markdown</text>
+        <text class="s" x="764" y="362">RW inside nodes/&lt;name&gt;/</text>
+
+        <!-- pulls: repo to node -->
+        <line class="wire-dash" x1="705" y1="130" x2="705" y2="340"/>
+        <line class="wire-dash" x1="750" y1="130" x2="705" y2="130"/>
+        <line class="wire-dash" x1="750" y1="235" x2="705" y2="235"/>
+        <line class="wire-dash" x1="705" y1="135" x2="660" y2="135" marker-end="url(#a-sea)"/>
+        <line class="wire-dash" x1="705" y1="235" x2="660" y2="235" marker-end="url(#a-sea)"/>
+        <line class="wire-dash" x1="705" y1="335" x2="660" y2="335" marker-end="url(#a-sea)"/>
+        <rect x="642" y="179" width="126" height="16" fill="var(--paper)"/>
+        <text class="s" x="705" y="191" text-anchor="middle">fleet pull, 15 min</text>
+        <line class="wire-dash" x1="660" y1="355" x2="750" y2="355" marker-start="url(#a-sea)" marker-end="url(#a-sea)"/>
+        <text class="s" x="705" y="394" text-anchor="middle">memory sync, 5 min</text>
+
+        <!-- publish: master to config repo -->
+        <path class="wire-light" d="M180 90 V 56 H 952 V 235 H 946" marker-end="url(#a-light)"/>
+        <text class="m" x="420" y="48" text-anchor="middle">fleet config publish: capture, secret scan, commit, push</text>
+      </svg>
+      <figcaption>Solid arrows are the master pushing. Dashed arrows are nodes fetching with their own read-only deploy keys; only the memory key can write, and only inside the node's folder.</figcaption>
+    </figure>
+    <p class="aside">How fleeter protects your machines and secrets: <a href="https://github.com/tkreis/fleeter/blob/main/docs/SECURITY.md">docs/SECURITY.md</a></p>
+
+    <h2 class="rule" id="join" style="margin-top:56px">Joining a machine</h2>
+    <div class="panes">
+      <div class="pane">
+        <span class="pane-title">your master</span>
+        <pre class="term"><span class="p">$</span> fleet invite --name mini
+Run this on the new machine:
+
+  bash <(…invite…)
+
+Invite code: XXXX-XXXX-…
+<span class="dim">valid for one machine, 1 hour</span></pre>
+      </div>
+      <div class="pane">
+        <span class="pane-title">new machine</span>
+        <pre class="term"><span class="p">$</span> &lt;paste the command&gt;
+invite code: ****
+<span class="ok">joined</span> as fleet-mini. Your master finishes the setup.</pre>
+      </div>
+    </div>
+    <div class="prose after-term">
+      <p><code>fleet list</code> on the master shows mini as <code>provisioned</code> a few minutes later.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="memory">
+  <div class="wrap split">
+    <div>
+      <h2 class="rule">Shared memory</h2>
+      <div class="prose">
+        <p>Optional, and worth it. A plain Markdown vault, Obsidian-compatible, in a private git repo. Every harness reads and writes files natively; git works headless and offline and keeps the history.</p>
+        <p>Each node commits only inside <code>nodes/&lt;name&gt;/</code>, its own folder, so every node's writes stay separate. Each node pulls the whole vault, so a fact learned on one machine is on every other within two sync cycles. <code>INDEX.md</code>, one line per note, is rebuilt by a GitHub Action on every push and read first.</p>
+        <p>The global instructions tell every agent to read <code>nodes/**</code> as reference material. What you promote into <code>notes/</code> is reviewed by you, on the master.</p>
+      </div>
+    </div>
+    <figure>
+      <svg class="diagram" viewBox="0 0 560 340" role="img" aria-labelledby="mem-t mem-d">
+        <title id="mem-t">Shared memory vault</title>
+        <desc id="mem-d">One git repo with INDEX.md, notes/ and one folder per node. You write notes/ from the master. Each of the nodes studio, mini and ci-1 writes only its own folder under nodes/, while a dashed line from INDEX.md shows that every node reads the whole vault.</desc>
+        <defs>
+          <marker id="m-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink)"/></marker>
+          <marker id="m-sea" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--sea)"/></marker>
+        </defs>
+        <rect class="box" x="60" y="30" width="440" height="120" rx="2"/>
+        <text class="b" x="74" y="54">fleet-memory</text>
+        <text class="s" x="192" y="54">one private git repo, Obsidian-compatible</text>
+        <g stroke="var(--rule)" stroke-width="1">
+          <line x1="60" y1="68" x2="500" y2="68"/>
+          <line x1="148" y1="68" x2="148" y2="150"/>
+          <line x1="236" y1="68" x2="236" y2="150"/>
+          <line x1="324" y1="68" x2="324" y2="150"/>
+          <line x1="412" y1="68" x2="412" y2="150"/>
+        </g>
+        <text class="t" x="104" y="100" text-anchor="middle">INDEX.md</text>
+        <text class="s" x="104" y="120" text-anchor="middle">generated,</text>
+        <text class="s" x="104" y="134" text-anchor="middle">read first</text>
+        <text class="t" x="192" y="100" text-anchor="middle">notes/</text>
+        <text class="s" x="192" y="120" text-anchor="middle">curated,</text>
+        <text class="s" x="192" y="134" text-anchor="middle">trusted</text>
+        <text class="t" x="280" y="96" text-anchor="middle">nodes/</text>
+        <text class="t" x="280" y="112" text-anchor="middle">studio/</text>
+        <text class="t" x="368" y="96" text-anchor="middle">nodes/</text>
+        <text class="t" x="368" y="112" text-anchor="middle">mini/</text>
+        <text class="t" x="456" y="96" text-anchor="middle">nodes/</text>
+        <text class="t" x="456" y="112" text-anchor="middle">ci-1/</text>
+
+        <!-- read bus from INDEX -->
+        <path class="wire-dash" d="M104 150 V 200 H 440"/>
+        <line class="wire-dash" x1="264" y1="200" x2="264" y2="248" marker-end="url(#m-sea)"/>
+        <line class="wire-dash" x1="352" y1="200" x2="352" y2="248" marker-end="url(#m-sea)"/>
+        <line class="wire-dash" x1="440" y1="200" x2="440" y2="248" marker-end="url(#m-sea)"/>
+        <text class="s" x="112" y="186">pull 5 min</text>
+
+        <!-- writes -->
+        <line class="wire" x1="192" y1="250" x2="192" y2="152" marker-end="url(#m-ink)"/>
+        <line class="wire" x1="296" y1="250" x2="296" y2="152" marker-end="url(#m-ink)"/>
+        <line class="wire" x1="384" y1="250" x2="384" y2="152" marker-end="url(#m-ink)"/>
+        <line class="wire" x1="472" y1="250" x2="472" y2="152" marker-end="url(#m-ink)"/>
+
+        <!-- writers -->
+        <rect class="box-soft" x="156" y="250" width="72" height="40" rx="2"/>
+        <text class="t" x="192" y="275" text-anchor="middle">you</text>
+        <rect class="box" x="244" y="250" width="72" height="40" rx="2"/>
+        <text class="t" x="280" y="275" text-anchor="middle">studio</text>
+        <rect class="box" x="332" y="250" width="72" height="40" rx="2"/>
+        <text class="t" x="368" y="275" text-anchor="middle">mini</text>
+        <rect class="box" x="420" y="250" width="72" height="40" rx="2"/>
+        <text class="t" x="456" y="275" text-anchor="middle">ci-1</text>
+        <text class="s" x="192" y="310" text-anchor="middle">on the master</text>
+
+        <text class="s" x="60" y="334">solid: commits, only to its own folder.  dashed: reads, the whole vault.</text>
+      </svg>
+    </figure>
+  </div>
+</section>
+<section class="section" id="commands">
+  <div class="wrap">
+    <h2>Commands</h2>
+    <div class="prose intro">
+      <p>Every command accepts <code>--help</code>. Destructive ones ask for <code>--yes</code> or a typed confirmation, and running anything twice gives the same result as running it once.</p>
+    </div>
+
+    <pre class="term" aria-label="Example output of fleet list"><span class="p">$</span> fleet list
+NAME      HOST            ONLINE  STATE         SYNCED  LAST PROVISION  TOOLS                  MEMORY  PROXY  FLEET
+studio    fleet-studio    yes     provisioned   yes     12m             9 ok                   ok      ok     0.3.0
+mini      fleet-mini      yes     provisioned   yes     12m             8 ok, <span class="hi">1 login: cursor</span>  ok      ok     0.3.0
+buildbox  fleet-buildbox  no      provisioned   yes     3d              -                      -       -      -
+ci-1      fleet-ci-1      yes     provisioned   <span class="hi">behind</span>  2h              6 ok                   ok      off    0.3.0
+dock-a3f  fleet-dock-a3f  yes     <span class="hi">provisioning</span>  ?       -               -                      -       -      -</pre>
+
+    <table class="cmds">
+      <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr class="group"><td colspan="2">On the master</td></tr>
+        <tr><td>fleet init master --config-dir DIR</td><td>Preflight, vault and keys, tailnet policy merge, sync schedule. Idempotent.</td></tr>
+        <tr><td>fleet invite --name N [--user U] [--ephemeral]</td><td>Single-use join one-liner and invite code, valid one hour.</td></tr>
+        <tr><td>fleet list [--json]</td><td>Every node in one table: online, state, synced, last provision, tools, memory, proxy, version.</td></tr>
+        <tr><td>fleet sync</td><td>Pull the master's repos, enrol new machines, push updates to every node. Runs on a schedule.</td></tr>
+        <tr><td>fleet ssh NODE [CMD]</td><td>Shell on a node, or run a command there with its fleet environment loaded.</td></tr>
+        <tr><td>fleet secrets set NAME [--profile P]</td><td>Store a secret from a hidden prompt or stdin. <code>secrets list</code> shows names only.</td></tr>
+        <tr><td>fleet config publish</td><td>Capture harness and skills from the master, secret scan, commit, push.</td></tr>
+        <tr><td>fleet skill add PATH | URL</td><td>Publish a skill to your config repo and push it to every node. <code>skill list</code> shows what the fleet has.</td></tr>
+        <tr><td>fleet kick NODE</td><td>Revoke: stop jobs, delete the device and deploy keys, list secrets to rotate.</td></tr>
+        <tr><td>fleet doctor</td><td>Vault, tokens, policy, GitHub access, schedule, and an isolation probe from every node.</td></tr>
+        <tr class="group"><td colspan="2">On a node</td></tr>
+        <tr><td>fleet status [--json]</td><td>Versions, logins, revisions, memory state, token ages.</td></tr>
+        <tr><td>fleet login [TOOL]</td><td>Device-code login for a tool whose status is <code>login</code>.</td></tr>
+      </tbody>
+    </table>
+
+    <p class="note">Every command and flag, including <code>provision</code>, <code>files</code>, <code>proxy</code>, <code>policy</code>, <code>t3</code> and <code>leave</code>, is in the <a href="https://github.com/tkreis/fleeter#command-reference">README command reference</a>.</p>
+  </div>
+</section>
+
+</main>
+
+<footer class="wrap foot">
+  <span>fleeter is MIT licensed. <a href="https://github.com/tkreis/fleeter">Source on GitHub</a></span>
+  <span>How fleeter protects your machines and secrets: <a href="https://github.com/tkreis/fleeter/blob/main/docs/SECURITY.md">docs/SECURITY.md</a></span>
+</footer>
+</body>
+</html>

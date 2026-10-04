@@ -35,6 +35,9 @@ Start read-only. `--json` output is stable (schema in `docs/CONTRACT.md`).
 | Fast-forward the master's checkouts, then reconcile (the scheduled job) | `fleet sync` |
 | Add a node | `fleet invite --name NAME` (`--user LOGIN` for a different login, `--ephemeral` for throwaway containers); the user pastes the printed one-liner and code on the new machine |
 | Publish config / skills / instructions to the fleet | `fleet config publish` (captures this machine's harness config first; `--no-capture` to publish hand edits only) |
+| Install a skill on every machine | `fleet skill add DIR` or `fleet skill add URL[#subdir][@ref]` (`--name N` to rename, `--yes` to skip the question / replace an existing one). Validates, secret-scans, commits, pushes, provisions the online nodes; say what it adds first |
+| List the fleet's skills | `fleet skill list` (`--json`): SOURCE `config` = in the config repo, `fleet` = fleeter's own, `local-only` = only on this machine, published by the next `fleet sync` |
+| Remove a skill from every machine | `fleet skill remove NAME` (needs the user's explicit confirmation; `--yes` only after they said so) |
 | List secret names | `fleet secrets list` (names and profiles, never values) |
 | Store or rotate a secret | `fleet secrets set NAME --profile minimal\|full < FILE` or let the user type it (hidden prompt); then `fleet reconcile` |
 | Mirror a file (e.g. a `.env`) to the nodes | `fleet files add PATH --profile full`, then `fleet reconcile` |
@@ -58,9 +61,10 @@ exit 2 before anything runs.
   from stdin or a hidden prompt; redirect from a file (`< FILE`) or let the
   user type it.
 - Ask the user before anything that changes other machines or revokes access:
-  `kick`, `leave`, `policy apply`, `config publish`, `secrets set` on an
-  existing name (it overwrites), `provision`/`reconcile`/`sync` are usually
-  fine but say what will be pushed.
+  `kick`, `leave`, `policy apply`, `config publish`, `skill remove`,
+  `skill add --yes` over an existing skill, `secrets set` on an existing name
+  (it overwrites); `provision`/`reconcile`/`sync` and `skill add` of a new
+  skill are usually fine but say what will be pushed.
 - Prefer read-only commands first (`list`, `list --json`, `status --json`,
   `secrets list`, `doctor`, `policy check`, `t3 status`).
 - Never edit `~/.config/fleet/vault` by hand; use the commands.

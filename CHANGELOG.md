@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.1 — 2026-10-04
+
+Skills become a first-class fleet object: one command puts a skill on every
+machine, and skills you install on the master follow on their own.
+
+### Added
+
+- `fleet skill add SOURCE [--name N] [--yes]`: SOURCE is a directory with a
+  `SKILL.md`, or a git URL (https/ssh) with optional `#subdir` and `@ref`,
+  cloned shallowly into a private temp dir. The skill is validated (frontmatter
+  `name` → directory name, `[a-z0-9][a-z0-9-]{0,63}`), secret-scanned before
+  anything is copied, put into `skills/N` of the config repo (an existing
+  different skill only with `--yes`; identical = no-op), installed into the
+  master's own skill dirs, committed (`add skill N` / `update skill N`), pushed,
+  and pushed to the online nodes (`reconcile`): `added N to your fleet config`,
+  `published (secret scan clean)`, `pushed to K nodes` (or `nodes pick it up on
+  their next pull`). `FLEET_SKILL_ADD_NO_SYNC=1` skips the node push.
+- `fleet skill list [--json]`: on the master NAME, SOURCE (`config` | `fleet` |
+  `local-only`), ON NODES? (`yes` | `not pushed` | `no`), DESCRIPTION
+  (truncated to the terminal); on a node what `fleet apply` installed.
+- `fleet skill remove N [--yes]`: out of the config repo (`remove skill N`,
+  pushed), out of the master's skill dirs, off the nodes on their next apply
+  (manifest cleanup) or right away through `reconcile`. Asks first.
+- `fleet sync` auto-publishes skills (`FLEET_SYNC_PUBLISH_SKILLS`, default 1):
+  skills installed in the master's `~/.claude/skills`, `~/.agents/skills`,
+  `~/.codex/skills`, `~/.cursor/skills` that the config repo lacks or has in
+  another version are copied in, secret-scanned (a hit skips that skill with a
+  warning), committed as `publish skills: a, b` and pushed, non-interactively.
+  `FLEET_SKILL_EXCLUDE`, the bundled `fleet` skill and vendor caches are left
+  alone; nothing is ever removed from the repo by sync; quiet when nothing
+  changed.
+- The `fleet` agent skill knows how to add, list and remove skills (remove
+  needs the user's confirmation).
+
 ## 0.3.0 — 2026-10-04
 
 The fleet becomes visible in one command, drivable by agents, and keeps itself

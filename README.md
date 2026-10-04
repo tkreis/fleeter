@@ -291,11 +291,14 @@ master runs `fleet sync`:
    strictly behind (never a stash, reset or merge; a dirty or diverged checkout
    is reported and left alone; after a code update sync re-executes itself
    from the new code);
-2. runs `reconcile`: enrols waiting nodes and provisions every node whose
+2. publishes skills installed in the master's skill dirs that the config repo
+   lacks or has in another version (`FLEET_SYNC_PUBLISH_SKILLS`, default on;
+   see "Install a skill on every machine");
+3. runs `reconcile`: enrols waiting nodes and provisions every node whose
    desired state (code, config, secrets, files) changed, which is what carries a
    `git push` to your config repo, a `fleet secrets set` or a new fleeter
    release to the nodes;
-3. every `FLEET_PUSH_TOOLS_EVERY` (1440) minutes runs `fleet update` on the
+4. every `FLEET_PUSH_TOOLS_EVERY` (1440) minutes runs `fleet update` on the
    online provisioned nodes in parallel (`0` = never; the nodes keep their own
    daily update timer either way).
 
@@ -319,10 +322,55 @@ fleet ssh studio fleet login codex       # device-code login for one tool (see b
 key, master key); the remote command runs after `~/.config/fleet/env.sh` is
 sourced, so PATH, secrets and proxy variables are what the agents see.
 
+### Install a skill on every machine
+
+```sh
+fleet skill add ~/my-skills/review                                  # a directory with a SKILL.md
+fleet skill add https://github.com/you/skills.git#review@v1         # a git repo: #subdir and @ref (tag, branch, commit) optional
+fleet skill add git@github.com:you/skills.git#skills/review --name pr-review   # under another name
+```
+
+One command does the whole round trip: the skill is validated (a `SKILL.md`
+with YAML frontmatter and a `name`, which becomes the directory name unless
+`--name` says otherwise), secret-scanned, copied into `skills/<name>/` of your
+config repo, installed into this machine's own skill dirs, committed (`add
+skill review`), pushed, and pushed to the online nodes right away:
+
+```
+ ok added review to your fleet config
+ ok published (secret scan clean)
+ ok pushed to 2 nodes
+```
+
+A git source is cloned shallowly into a private temp dir that is removed
+afterwards. A skill that already exists in the fleet with different content is
+only replaced with `--yes` (identical content is a no-op); a skill with a token
+or a home path in it is refused before anything is copied. `fleet skill add`
+asks once before it commits (`--yes` skips the question); with no node online
+it says `nodes pick it up on their next pull`. `FLEET_SKILL_ADD_NO_SYNC=1`
+skips the push to the nodes.
+
+```sh
+fleet skill list            # NAME  SOURCE (config | fleet | local-only)  ON NODES?  DESCRIPTION; --json for scripts
+fleet skill remove review   # out of the config repo, this machine and (next apply, or right away) every node; asks first
+```
+
+`local-only` in `fleet skill list` means a skill that is installed in one of this
+machine's skill dirs (`~/.claude/skills`, `~/.agents/skills`, `~/.codex/skills`,
+`~/.cursor/skills`) but not yet in the config repo. You do not have to add
+those by hand: every `fleet sync` (the 30-minute timer) publishes them —
+copied in, secret-scanned, committed as `publish skills: a, b`, pushed — and
+republishes a skill you changed locally. A skill with a scan hit is skipped with
+a warning until you fix it or list it in `FLEET_SKILL_EXCLUDE`; nothing is ever
+removed from the repo automatically (that is what `fleet skill remove` is for).
+Set `FLEET_SYNC_PUBLISH_SKILLS=0` in `fleet.conf` to turn the auto-publish off.
+On a node, `fleet skill list` shows what `fleet apply` installed there.
+
 ### Push new skills or instructions
 
 Install the skill on the master as you normally would (`~/.claude/skills`,
-`~/.agents/skills`, …), edit `AGENTS.md` in your config repo if needed, then:
+`~/.agents/skills`, …) or with `fleet skill add`, edit `AGENTS.md` in your
+config repo if needed, then:
 
 ```sh
 fleet config publish        # harness_capture → secret scan → shows the staged diff → commit → push (asks once; --yes skips)
@@ -339,7 +387,8 @@ the diff it shows is `git diff --cached` (stat plus the first 200 lines,
 `FLEET_PUBLISH_DIFF_LINES`). Nodes pull the config repo every
 `FLEET_PULL_EVERY` (15) minutes and re-apply; the master's `fleet sync` timer
 (30 min) provisions them with it too; `fleet reconcile` or `fleet provision
-NODE` does it right away.
+NODE` does it right away. Skills alone do not need a publish: `fleet skill add`
+and the sync auto-publish commit and push them on their own.
 
 ### Add or rotate a secret
 
@@ -513,8 +562,11 @@ and kick).
 | `fleet ssh NODE [COMMAND...]` | | Shell on NODE, or run COMMAND there with the node's fleet environment (`env.sh`) loaded; name resolved through the registry, master key, pinned host key. `fleet ssh NODE --help` is help; anything longer after NODE is the remote command. |
 | `fleet provision NODE` | `--refresh-proxy-auth` | Takes the node lock, ships code and config (when the node has no git checkout of them, or no repo URL is set), secrets, files (via a staging dir), the T3 key line (only when the T3 key exists), runs `fleet pull --no-apply` on the node, then `fleet apply --from-master <digest>`; records the `<code>+<config>` the node reports it applied. NODE = registered name or Tailscale id, never a guessed hostname. |
 | `fleet reconcile` | | Expires old invites, enrols new tagged peers (nonce check, claims the invite atomically, registers the deploy keys), provisions nodes whose digest differs, retries pending cleanups, tracks missing devices and revokes them after the grace period. Convergent; quiet when nothing to do. Runs every `FLEET_RECONCILE_EVERY` minutes; skips (exit 0) while a `fleet sync` holds the master lock. |
-| `fleet sync` | | The periodic push (timer: `FLEET_SYNC_EVERY`): fast-forward the fleeter and config checkouts from their upstream when clean and behind, `reconcile`, and every `FLEET_PUSH_TOOLS_EVERY` minutes `fleet update` on the online provisioned nodes (parallel, `FLEET_SYNC_UPDATE_SECS` cap each; last run in `vault/sync.json`). Quiet when nothing happened; see "Automatic updates". |
+| `fleet sync` | | The periodic push (timer: `FLEET_SYNC_EVERY`): fast-forward the fleeter and config checkouts from their upstream when clean and behind, publish local-only skills (`FLEET_SYNC_PUBLISH_SKILLS`), `reconcile`, and every `FLEET_PUSH_TOOLS_EVERY` minutes `fleet update` on the online provisioned nodes (parallel, `FLEET_SYNC_UPDATE_SECS` cap each; last run in `vault/sync.json`). Quiet when nothing happened; see "Automatic updates". |
 | `fleet schedule install` | | (Re)install the `reconcile` and `sync` timers (LaunchAgents `dev.fleet.reconcile`/`dev.fleet.sync`, or systemd user timers `fleet-reconcile`/`fleet-sync`) with the intervals from `fleet.conf`. Idempotent; `FLEET_NO_SCHEDULER=1` writes without loading. |
+| `fleet skill add SOURCE` | `--name N`, `--yes` | SOURCE = a directory with a `SKILL.md`, or a git URL (https/ssh) with optional `#subdir` and `@ref`, cloned shallowly into a private temp dir. Validates the frontmatter (`name` → directory name unless `--name`; `[a-z0-9][a-z0-9-]{0,63}`), secret-scans, copies into `$FLEET_CONFIG_DIR/skills/N` (an existing different skill only with `--yes`; identical = no-op), installs it into this machine's skill dirs, asks once, commits (`add skill N` / `update skill N`), pushes, then `reconcile` (`pushed to K nodes`; `FLEET_SKILL_ADD_NO_SYNC=1` skips it). |
+| `fleet skill list` | `--json` | Master: NAME, SOURCE (`config` = in the config repo, `fleet` = fleeter's bundled skill, `local-only` = installed here but not in the repo yet; the next sync publishes it), ON NODES? (`yes` / `not pushed` / `no`), DESCRIPTION. Node: the skills `fleet apply` installed (from `harness.manifest`). |
+| `fleet skill remove NAME` | `--yes` | Removes `skills/NAME` from the config repo (commit `remove skill NAME`, push), deletes this machine's copies (else the next sync would publish it again), then `reconcile`; nodes drop it on their next apply through the manifest cleanup. Asks first. |
 | `fleet skill install` | | Copy fleeter's `fleet` agent skill (`skills/fleet`) into `~/.claude/skills`, `~/.agents/skills` and `~/.cursor/skills`, each only when that harness exists here or its tool is in `FLEET_TOOLS`. Idempotent; a foreign `fleet` skill dir is kept once as `.pre-fleet`. `fleet init master` runs it; nodes get the skill from `fleet apply`. |
 | `fleet kick NODE` | `--yes` | Revoke: see "Kick a node". |
 | `fleet t3 setup [NODE]` | | Creates `vault/ssh/t3_client` if missing, pins the node's host key, puts the restricted key line into the node's `authorized_keys`, regenerates `~/.ssh/config.d/fleet` and the `Include` at the top of `~/.ssh/config`, prints what to click in T3 Code. Without NODE: every registered node. Re-enables a node after `t3 revoke`. |
@@ -574,6 +626,7 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_PULL_EVERY` / `FLEET_MEMORY_EVERY` / `FLEET_UPDATE_EVERY` / `FLEET_RECONCILE_EVERY` | `15` / `5` / `1440` / `2` | Timer intervals in minutes (nodes: pull, memory, update; master: reconcile). |
 | `FLEET_SYNC_EVERY` | `30` | Minutes between `fleet sync` runs on the master (fast-forward checkouts, reconcile, tool push). `fleet schedule install` applies a change. |
 | `FLEET_PUSH_TOOLS_EVERY` | `1440` | Minutes between `fleet update` pushes to the online nodes from `fleet sync`; `0` = never push tool updates from the master. |
+| `FLEET_SYNC_PUBLISH_SKILLS` | `1` | `fleet sync` publishes skills installed in the master's skill dirs that the config repo lacks or has in another version (secret-scanned, commit `publish skills: a, b`, pushed; `FLEET_SKILL_EXCLUDE` and the bundled `fleet` skill excepted; never removes). `0` = off. |
 | `FLEET_MISSING_GRACE_HOURS` | `24` | Hours a non-ephemeral node may be gone from the device list before its keys are revoked (ephemeral: 1 h fixed). |
 | `FLEET_DEFAULT_PROFILE` / `FLEET_EPHEMERAL_PROFILE` | `full` / `minimal` | Secret profile for normal / `--ephemeral` invites. |
 
@@ -594,6 +647,7 @@ Environment knobs (not config keys; all optional):
 | `FLEET_NODE_IMAGE` | Image used by `docker/spawn.sh` (default `fleet-node:local`). |
 | `FLEET_CODE_REMOTE`, `FLEET_CONFIG_REMOTE`, `FLEET_MEMORY_REMOTE` | Replace the derived `github-fleet-*` URLs on a node (local bare repos, tests). |
 | `FLEET_TS_API`, `FLEET_GH_API`, `FLEET_TS_STATUS_JSON`, `FLEET_MASTER_TS_IP` | Test/offline mode: base URLs for `lib/api.py` (see `tests/e2e/fake_api.py`); a file in place of `tailscale status --json`; the master's tailnet IP. `FLEET_GH_API` also forces the token path instead of `gh`. |
+| `FLEET_SKILL_ADD_NO_SYNC=1` | `fleet skill add` / `remove`: commit and push, but do not run `reconcile` afterwards (nodes get the change on their next pull). |
 | `FLEET_MEMORY_SEED=0`, `FLEET_NOW_EPOCH` | Never clone/seed the memory repo from the master; fake clock for the grace-period logic (tests). |
 | `FLEET_SSHD_CONFIG`, `FLEET_SSHD_CONFIG_DIR` | Paths `fleet join` hardens (tests redirect them). |
 
@@ -619,6 +673,7 @@ audit.log                               one line per action
 ~/Library/LaunchAgents/dev.fleet.{reconcile,sync}.plist   or ~/.config/systemd/user/fleet-{reconcile,sync}.{service,timer}
 ~/.local/bin/fleeter                    alias of ~/.local/bin/fleet (same target)
 ~/.claude/skills/fleet, ~/.agents/skills/fleet, ~/.cursor/skills/fleet   fleeter's agent skill (for the harnesses present here)
+~/.claude/skills/<name>, ~/.agents/skills/<name>, ~/.cursor/skills/<name>   skills added with `fleet skill add` (same dirs; recorded in ~/.config/fleet/manifest)
 ~/.ssh/config.d/fleet                   `Host fleet-<name>` blocks for T3 Code, regenerated from the registry (0600).
 ~/.ssh/config                           gets `Include ~/.ssh/config.d/fleet` as its first line (original: config.pre-fleet) — written
                                         only when the T3 client key exists AND at least one node has T3 access; never otherwise
@@ -631,6 +686,7 @@ Node:
 ~/.local/share/fleet-config/     your config repo (tar copy, then a checkout)
 ~/.local/bin/fleet, fleeter      symlinks; ~/.local/bin/fleet-chrome-mcp, fleet-playwright-mcp wrappers (chrome plug-in)
 ~/.claude/skills/fleet, ~/.agents/skills/fleet, ~/.cursor/skills/fleet   fleeter's agent skill (unless your config repo ships its own skills/fleet)
+~/.claude/skills/<name>, ~/.agents/skills/<name>, ~/.cursor/skills/<name>   every skills/<name> of the config repo (fleet skill list shows them)
 ~/.config/fleet/enrol.json       nonce, name, user, os, arch (written by join, 0600)
 ~/.config/fleet/secrets.env      from the master (0600); env.sh sources it, exports PATH, FLEET_NODE, ANTHROPIC_* (proxy enabled only)
 ~/.config/fleet/applied, applied_at, applied_commit (<code>+<config>), status.json, memory.state (ok|conflict|missing|off)

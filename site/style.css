@@ -193,28 +193,19 @@ h1, h2, h3 { font-weight: 400; margin: 0; letter-spacing: -0.005em; }
 figure { margin: 0; }
 figcaption { font-size: 14px; color: var(--sea); margin-top: 12px; max-width: var(--measure); }
 
-/* Feature grid */
+/* Five points */
 
-.features {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 36px 40px;
+.points {
   margin: 0; padding: 0; list-style: none;
+  max-width: var(--measure);
+  font-size: 19px;
 }
-.features li { border-top: 1px solid var(--rule); padding-top: 16px; }
-.features h3 { font-size: 21px; line-height: 1.25; margin-bottom: 8px; }
-.features p { margin: 0; font-size: 16px; }
-.features svg { width: 28px; height: 28px; display: block; margin-bottom: 14px; stroke: var(--light); fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-
-@media (max-width: 880px) { .features { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .features { grid-template-columns: 1fr; gap: 28px; } }
-
-/* Security statements */
-
-.guards { margin: 0; padding: 0; list-style: none; max-width: var(--measure); }
-.guards li { border-top: 1px solid var(--rule); padding: 14px 0; }
-.guards li:last-child { border-bottom: 1px solid var(--rule); }
-.guards strong { font-weight: 400; font-style: italic; }
+.points li { border-top: 1px solid var(--rule); padding: 12px 0 12px 28px; position: relative; }
+.points li:last-child { border-bottom: 1px solid var(--rule); }
+.points li::before {
+  content: ""; position: absolute; left: 4px; top: 24px;
+  width: 10px; height: 10px; border-radius: 50%; background: var(--light);
+}
 
 .split {
   display: grid;
@@ -224,46 +215,22 @@ figcaption { font-size: 14px; color: var(--sea); margin-top: 12px; max-width: va
 }
 @media (max-width: 880px) { .split { grid-template-columns: 1fr; } }
 
-/* Enrolment steps */
+/* Joining: two terminal panes */
 
-.steps {
-  counter-reset: step;
+.panes {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 32px;
-  margin: 40px 0 0; padding: 0; list-style: none;
-  position: relative;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  margin-top: 28px;
 }
-.steps li { position: relative; padding-top: 70px; }
-.steps li::before {
-  counter-increment: step;
-  content: counter(step);
-  position: absolute; top: 0; left: 0;
-  width: 30px; height: 30px; border-radius: 50%;
-  background: var(--ink); color: var(--paper);
-  font-family: var(--mono); font-size: 14px;
-  display: grid; place-items: center;
-}
-.steps li::after {
-  content: "";
-  position: absolute; top: 15px; left: 38px; right: -32px;
-  border-top: 1px dashed var(--sea);
-}
-.steps li:last-child::after { display: none; }
-.steps .glyph { position: absolute; top: -8px; left: 44px; width: 46px; height: 46px; stroke: var(--ink); fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; background: var(--paper); }
-.steps h3 { font-size: 20px; margin-bottom: 6px; }
-.steps p { margin: 0; font-size: 15.5px; }
-.steps .where { font-family: var(--mono); font-size: 12px; color: var(--sea); display: block; margin-bottom: 8px; }
+.pane-title { display: block; font-family: var(--mono); font-size: 12px; color: var(--sea); margin-bottom: 8px; }
+.panes .term { height: 100%; }
+.pane { display: flex; flex-direction: column; min-width: 0; }
+.panes .term { white-space: pre-wrap; overflow-wrap: break-word; }
+@media (max-width: 720px) { .panes { grid-template-columns: 1fr; } .panes .term { height: auto; } }
 
-@media (max-width: 880px) {
-  .steps { grid-template-columns: 1fr; gap: 28px; }
-  .steps li { padding-top: 0; padding-left: 110px; min-height: 60px; }
-  .steps li::after { top: 36px; left: 15px; right: auto; bottom: -34px; border-top: 0; border-left: 1px dashed var(--sea); }
-}
-@media (max-width: 480px) {
-  .steps li { padding-left: 0; padding-top: 70px; }
-  .steps li::after { display: none; }
-}
+.after-term { margin-top: 20px; }
+.aside { margin: 20px 0 0; font-size: 15.5px; color: var(--sea); max-width: var(--measure); }
 
 /* Terminal */
 

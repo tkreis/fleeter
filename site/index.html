@@ -17,10 +17,10 @@
 <header class="wrap top">
   <a class="brand" href="#top" id="top">fleeter <small>0.3.0</small></a>
   <nav aria-label="Sections">
-    <a href="#what">What you get</a>
+    <a href="#skills">Skills</a>
     <a href="#how">How it works</a>
+    <a href="#join">Joining</a>
     <a href="#memory">Shared memory</a>
-    <a href="#security">Security</a>
     <a href="#commands">Commands</a>
     <a href="https://github.com/tkreis/fleeter">GitHub</a>
   </nav>
@@ -124,40 +124,28 @@
   </div>
 </section>
 
+<section class="section" id="skills">
+  <div class="wrap">
+    <h2>Install a skill once, every machine has it</h2>
+    <pre class="term" aria-label="Adding a skill to the fleet"><span class="p">$</span> fleet skill add ~/my-skills/review
+<span class="ok">added</span> review to your fleet config
+<span class="ok">published</span> (secret scan clean)
+<span class="ok">pushed</span> to 4 nodes</pre>
+    <div class="prose after-term">
+      <p>Skills you install on the master are published to your private config repo and every node picks them up; <code>fleet skill add</code> also accepts a git URL, and <code>fleet skill list</code> shows what the fleet has. Skills you install by hand on the master are picked up automatically by <code>fleet sync</code>.</p>
+    </div>
+  </div>
+</section>
+
 <section class="section" id="what">
   <div class="wrap">
     <h2>What you get on every node</h2>
-    <ul class="features">
-      <li>
-        <svg viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="5" width="22" height="16" rx="1.5"/><path d="M8 11l3 3-3 3M13 17h6"/></svg>
-        <h3>Agents installed and logged in</h3>
-        <p>Claude Code, Codex CLI, Cursor CLI and Grok Build, kept current by their own updaters. Logins reuse what the master has wherever the vendor allows; otherwise <code>fleet login</code> runs the device-code flow on the node.</p>
-      </li>
-      <li>
-        <svg viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="10"/><circle cx="14" cy="14" r="4"/><path d="M14 4v6M22.7 9l-5.2 3M22.7 19l-5.2-3M14 24v-6M5.3 19l5.2-3M5.3 9l5.2 3"/></svg>
-        <h3>A browser the agents can drive</h3>
-        <p>Chrome or chromium plus <code>chrome-devtools-mcp</code> and <code>@playwright/mcp</code> at pinned versions, behind wrappers that run headless on servers. Runtimes via mise, pnpm, uv, gh, Docker; optional CLIProxyAPI and T3 Code.</p>
-      </li>
-      <li>
-        <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M6 4h11l5 5v15H6z"/><path d="M17 4v5h5M10 14h8M10 18h8"/></svg>
-        <h3>The same instructions and skills</h3>
-        <p>One <code>AGENTS.md</code> in your private config repo, rendered into the Claude, Codex, Cursor and Grok locations. Skills and harness templates are captured from the master with <code>fleet config publish</code> and pulled by every node.</p>
-      </li>
-      <li>
-        <svg viewBox="0 0 28 28" aria-hidden="true"><rect x="5" y="12" width="18" height="12" rx="1.5"/><path d="M9 12V8a5 5 0 0110 0v4M14 17v3"/></svg>
-        <h3>Secrets from an encrypted vault</h3>
-        <p>Secrets live in an encrypted vault on the master (age, key in your macOS Keychain). They're decrypted only in memory while being sent to a node over SSH, and land in a file only your user can read. Two profiles: <code>minimal</code> for throwaway containers, <code>full</code> for your own machines.</p>
-      </li>
-      <li>
-        <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 8h20v14H4zM4 13h20M9 8V6M19 8V6"/><path d="M8 18h4M15 18h5"/></svg>
-        <h3>Updates when your master is on</h3>
-        <p>The master pushes new tools, skills, config and secrets whenever it is on: <code>fleet sync</code> runs on a schedule. Nodes keep working with what they have while it is off. Nodes can be Macs, Linux boxes or containers.</p>
-      </li>
-      <li>
-        <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 11l10-5 10 5-10 5z"/><path d="M4 11v8l10 5 10-5v-8M14 16v8"/></svg>
-        <h3>An agent that can run the fleet</h3>
-        <p><code>fleet skill install</code> puts a <code>SKILL.md</code> on the master, so a coding agent there can check nodes, run commands on them and push updates for you, within the same confirmations as you.</p>
-      </li>
+    <ul class="points">
+      <li>Coding agents installed and logged in: Claude Code, Codex, Cursor, Grok</li>
+      <li>Browsers installed, ready for the agents</li>
+      <li>Skills synced to every machine</li>
+      <li>Secrets encrypted</li>
+      <li>Auto-updates while your master is on</li>
     </ul>
   </div>
 </section>
@@ -252,31 +240,30 @@
       </svg>
       <figcaption>Solid arrows are the master pushing. Dashed arrows are nodes fetching with their own read-only deploy keys; only the memory key can write, and only inside the node's folder.</figcaption>
     </figure>
+    <p class="aside">How fleeter protects your machines and secrets: <a href="https://github.com/tkreis/fleeter/blob/main/docs/SECURITY.md">docs/SECURITY.md</a></p>
 
-    <h2 class="rule" style="margin-top:56px">Joining a machine</h2>
-    <div class="prose">
-      <p>An invite is good for one machine and one hour. The master finds the new machine and finishes the setup on its own.</p>
+    <h2 class="rule" id="join" style="margin-top:56px">Joining a machine</h2>
+    <div class="panes">
+      <div class="pane">
+        <span class="pane-title">your master</span>
+        <pre class="term"><span class="p">$</span> fleet invite --name mini
+Run this on the new machine:
+
+  bash <(…invite…)
+
+Invite code: XXXX-XXXX-…
+<span class="dim">valid for one machine, 1 hour</span></pre>
+      </div>
+      <div class="pane">
+        <span class="pane-title">new machine</span>
+        <pre class="term"><span class="p">$</span> &lt;paste the command&gt;
+invite code: ****
+<span class="ok">joined</span> as fleet-mini. Your master finishes the setup.</pre>
+      </div>
     </div>
-    <ol class="steps">
-      <li>
-        <svg class="glyph" viewBox="0 0 46 46" aria-hidden="true"><path d="M8 14h30v6a3 3 0 000 6v6H8v-6a3 3 0 000-6z"/><path d="M18 14v18" stroke-dasharray="2 3"/><path d="M26 23h7"/></svg>
-        <span class="where">on the master</span>
-        <h3>Mint an invite</h3>
-        <p><code>fleet invite --name mini</code> prints one command and an invite code.</p>
-      </li>
-      <li>
-        <svg class="glyph" viewBox="0 0 46 46" aria-hidden="true"><rect x="7" y="10" width="32" height="26" rx="2"/><path d="M13 19l5 4-5 4M21 27h9"/></svg>
-        <span class="where">on the new machine</span>
-        <h3>Paste the command</h3>
-        <p>Paste it into a terminal and enter the invite code when asked.</p>
-      </li>
-      <li>
-        <svg class="glyph" viewBox="0 0 46 46" aria-hidden="true"><path d="M9 20l14-6 14 6-14 6z"/><path d="M9 20v10l14 6 14-6V20"/><path d="M23 26v10"/></svg>
-        <span class="where">on the master, a few minutes later</span>
-        <h3>It sets itself up</h3>
-        <p>The master pushes tools, instructions, skills and secrets; <code>fleet list</code> shows the machine as <code>provisioned</code>.</p>
-      </li>
-    </ol>
+    <div class="prose after-term">
+      <p><code>fleet list</code> on the master shows mini as <code>provisioned</code> a few minutes later.</p>
+    </div>
   </div>
 </section>
 
@@ -350,24 +337,6 @@
     </figure>
   </div>
 </section>
-
-<section class="section" id="security">
-  <div class="wrap">
-    <h2>Security model</h2>
-    <div class="prose intro">
-      <p>Assume a node can be fully compromised: an agent there runs untrusted code and reads untrusted content all day. The design makes that node cheap to lose.</p>
-    </div>
-    <ul class="guards">
-      <li><strong>Push only, from the master.</strong> The master connects to nodes over OpenSSH with its own key and pinned host keys. Every change flows from the master outward, including enrolment.</li>
-      <li><strong>Nodes are isolated on the tailnet.</strong> Each node carries <code>tag:fleet-node</code>, and your own devices may reach it on port 22. <code>fleet doctor</code> checks the live policy and probes from the nodes themselves.</li>
-      <li><strong>Invites are single use.</strong> One pre-authorised Tailscale key, good for one machine and one hour, claimed by the master exactly once. The code is read from a hidden prompt.</li>
-      <li><strong>Every node has its own keys.</strong> Its own Tailscale device and its own deploy keys: code and config read-only, memory writable inside its own folder. <code>fleet kick</code> revokes all of them together and lists the secrets that node held, so you know what to rotate.</li>
-      <li><strong>Secrets live in an encrypted vault on the master</strong> (age, key in your macOS Keychain). They're decrypted only in memory while being sent to a node over SSH, and land in a file only your user can read. The vault stays outside git, and <code>fleet config publish</code> scans for secrets before every push.</li>
-    </ul>
-    <p class="note">The full threat model, the mechanisms table and the rotation checklist are in <a href="https://github.com/tkreis/fleeter/blob/main/docs/SECURITY.md">docs/SECURITY.md</a>.</p>
-  </div>
-</section>
-
 <section class="section" id="commands">
   <div class="wrap">
     <h2>Commands</h2>
@@ -376,13 +345,12 @@
     </div>
 
     <pre class="term" aria-label="Example output of fleet list"><span class="p">$</span> fleet list
-NAME      HOST                 ONLINE  STATE         SYNCED  LAST PROVISION  TOOLS                MEMORY  PROXY  FLEET
-studio    studio.tn.ts.net     yes     provisioned   yes     12m ago         claude codex cursor  ok      ok     0.3.0
-mini      mini.tn.ts.net       yes     provisioned   yes     12m ago         claude cursor        ok      ok     0.3.0
-buildbox  buildbox.tn.ts.net   no      provisioned   yes     3d ago          claude codex         ok      -      0.3.0
-ci-1      ci-1.tn.ts.net       yes     provisioned   <span class="hi">no</span>      2h ago          claude               ok      -      0.3.0
-dock-a3f  dock-a3f.tn.ts.net   yes     <span class="hi">provisioning</span>  -       -               claude               -       -      -
-<span class="dim">5 nodes, 4 online. last sync 1m ago, next in 4m. fleet list --json for the same as JSON.</span></pre>
+NAME      HOST            ONLINE  STATE         SYNCED  LAST PROVISION  TOOLS                  MEMORY  PROXY  FLEET
+studio    fleet-studio    yes     provisioned   yes     12m             9 ok                   ok      ok     0.3.0
+mini      fleet-mini      yes     provisioned   yes     12m             8 ok, <span class="hi">1 login: cursor</span>  ok      ok     0.3.0
+buildbox  fleet-buildbox  no      provisioned   yes     3d              -                      -       -      -
+ci-1      fleet-ci-1      yes     provisioned   <span class="hi">behind</span>  2h              6 ok                   ok      off    0.3.0
+dock-a3f  fleet-dock-a3f  yes     <span class="hi">provisioning</span>  ?       -               -                      -       -      -</pre>
 
     <table class="cmds">
       <thead><tr><th>Command</th><th>What it does</th></tr></thead>
@@ -395,7 +363,7 @@ dock-a3f  dock-a3f.tn.ts.net   yes     <span class="hi">provisioning</span>  -  
         <tr><td>fleet ssh NODE [CMD]</td><td>Shell on a node, or run a command there with its fleet environment loaded.</td></tr>
         <tr><td>fleet secrets set NAME [--profile P]</td><td>Store a secret from a hidden prompt or stdin. <code>secrets list</code> shows names only.</td></tr>
         <tr><td>fleet config publish</td><td>Capture harness and skills from the master, secret scan, commit, push.</td></tr>
-        <tr><td>fleet skill install</td><td>Install the fleet agent skill (<code>SKILL.md</code>) on the master.</td></tr>
+        <tr><td>fleet skill add PATH | URL</td><td>Publish a skill to your config repo and push it to every node. <code>skill list</code> shows what the fleet has.</td></tr>
         <tr><td>fleet kick NODE</td><td>Revoke: stop jobs, delete the device and deploy keys, list secrets to rotate.</td></tr>
         <tr><td>fleet doctor</td><td>Vault, tokens, policy, GitHub access, schedule, and an isolation probe from every node.</td></tr>
         <tr class="group"><td colspan="2">On a node</td></tr>
@@ -412,7 +380,7 @@ dock-a3f  dock-a3f.tn.ts.net   yes     <span class="hi">provisioning</span>  -  
 
 <footer class="wrap foot">
   <span>fleeter is MIT licensed. <a href="https://github.com/tkreis/fleeter">Source on GitHub</a></span>
-  <span class="mono">curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash</span>
+  <span>How fleeter protects your machines and secrets: <a href="https://github.com/tkreis/fleeter/blob/main/docs/SECURITY.md">docs/SECURITY.md</a></span>
 </footer>
 </body>
 </html>

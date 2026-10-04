@@ -54,6 +54,11 @@ machine, and skills you install on the master follow on their own.
   doctor` warns about plaintext secrets or an unreachable key. A locked login
   keychain makes scheduled sync/reconcile skip provisioning with a warning and
   retry later. **Existing masters: run `fleet vault encrypt` once.**
+- The desired-state digest is a sha256 over the ciphertexts (plus code and
+  config revs) instead of an HMAC over the plaintext: `fleet list` and
+  `reconcile` decide `behind` without the key, `digest.key` goes away with the
+  migration. Updating re-provisions every node once; so does re-encrypting an
+  unchanged value or rotating the key.
 
 ## 0.3.0 — 2026-10-04
 
@@ -93,12 +98,6 @@ current from the master.
 - `fleet schedule install`: (re)installs the reconcile and sync timers,
   idempotently (files rewritten and reloaded only when their content changed).
   `fleet doctor` checks both.
-- The desired-state digest is a sha256 over the ciphertexts (plus code and
-  config revs) instead of an HMAC over the plaintext: `fleet list` and
-  `reconcile` decide `behind` without the key, `digest.key` goes away with the
-  migration. Updating re-provisions every node once; so does re-encrypting an
-  unchanged value or rotating the key.
-
 ### Changed
 - `fleet sync` and `fleet reconcile` share a master-wide lock
   (`vault/locks/.sync`); the one that finds it held skips with one line.

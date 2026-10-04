@@ -140,6 +140,21 @@ fleet_in_container() {
   [ -f /.dockerenv ] || [ -f /run/.containerenv ] || [ -n "${FLEET_CONTAINER:-}" ]
 }
 
+# fleet_is_master — this machine runs the master (an initialised vault and no
+# node enrolment). The master takes part in shared memory under its own name.
+fleet_is_master() {
+  [ -d "$FLEET_VAULT/nodes" ] && [ ! -f "$FLEET_HOME/enrol.json" ]
+}
+
+# fleet_master_name — the master's name in the memory vault (nodes/<name>):
+# FLEET_MASTER_NAME, else the short hostname; lower-case, [a-z0-9-] only.
+fleet_master_name() {
+  local n=${FLEET_MASTER_NAME:-}
+  [ -n "$n" ] || n=$(hostname -s 2>/dev/null || hostname)
+  n=$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/^-*//; s/-*$//')
+  printf '%s\n' "${n:-master}"
+}
+
 # Linux package manager name, or empty.
 fleet_pkg_mgr() {
   local m

@@ -31,9 +31,12 @@ node_jobs() {
 
 node_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# node_name — this machine's folder in the vault and its name in status: the
+# enrolled name on a node, fleet_master_name on the master, else the hostname.
 node_name() {
   local n=""
   [ -f "$FLEET_HOME/enrol.json" ] && n=$(json_get "$FLEET_HOME/enrol.json" name)
+  if [ -z "$n" ] && fleet_is_master; then n=$(fleet_master_name); fi
   [ -n "$n" ] || n=$(hostname -s 2>/dev/null || hostname)
   printf '%s\n' "$n"
 }
@@ -78,10 +81,20 @@ node_repo_alias_url() {
   esac
   printf '%s:%s\n' "$alias" "$path"
 }
-# FLEET_*_REMOTE override the derived URL (tests, local bare repos).
+# FLEET_*_REMOTE override the derived URL (tests, local bare repos). The master
+# has no deploy keys: it reaches the memory repo with its own git credentials.
 node_code_remote()   { printf '%s\n' "${FLEET_CODE_REMOTE:-$(node_repo_alias_url github-fleet-code "$FLEET_CODE_REPO")}"; }
 node_config_remote() { printf '%s\n' "${FLEET_CONFIG_REMOTE:-$(node_repo_alias_url github-fleet-config "$FLEET_CONFIG_REPO")}"; }
-node_memory_remote() { printf '%s\n' "${FLEET_MEMORY_REMOTE:-$(node_repo_alias_url github-fleet-memory "$FLEET_MEMORY_REPO")}"; }
+node_memory_remote() {
+  if fleet_is_master; then printf '%s\n' "${FLEET_MEMORY_REMOTE:-$FLEET_MEMORY_REPO}"
+  else printf '%s\n' "${FLEET_MEMORY_REMOTE:-$(node_repo_alias_url github-fleet-memory "$FLEET_MEMORY_REPO")}"; fi
+}
+
+# memory_git — git for the memory vault: the deploy-key ssh wrapper on a node,
+# the user's own credentials on the master (no prompt either way).
+memory_git() {
+  if fleet_is_master; then GIT_TERMINAL_PROMPT=0 git "$@"; else node_git "$@"; fi
+}
 
 node_ts_cli() {
   if have tailscale; then command -v tailscale
@@ -373,28 +386,37 @@ node_bin_link() {
 
 # ---------- memory vault ----------
 
+# node_memory_setup NAME — clone the vault when missing, point origin at the
+# configured remote, set the commit identity (nodes; the master commits as the
+# user) and create nodes/NAME. On the master FLEET_MEMORY_SEED=0 (tests) skips
+# the clone, like memory_seed.
 node_memory_setup() {
   local name=$1 remote
   remote=$(node_memory_remote)
   if [ -z "$remote" ]; then
     node_kv_set "$FLEET_HOME/memory.state" state off
-    log "memory: no FLEET_MEMORY_REPO configured; shared memory is off on this node"
+    log "memory: no FLEET_MEMORY_REPO configured; shared memory is off on this $(fleet_is_master && echo master || echo node)"
     return 0
   fi
   if [ ! -d "$FLEET_MEMORY_DIR/.git" ]; then
+    if fleet_is_master && [ "${FLEET_MEMORY_SEED:-1}" = 0 ]; then return 0; fi
+    mkdir -p "$FLEET_HOME/logs"
     log "cloning fleet-memory into $FLEET_MEMORY_DIR"
-    if node_git clone --quiet "$remote" "$FLEET_MEMORY_DIR" 2>"$FLEET_HOME/logs/memory-clone.err"; then
+    if memory_git clone --quiet "$remote" "$FLEET_MEMORY_DIR" 2>"$FLEET_HOME/logs/memory-clone.err"; then
       ok "memory vault cloned"
     else
-      warn "memory clone failed (deploy key not registered yet?); see $FLEET_HOME/logs/memory-clone.err"
+      if fleet_is_master; then warn "memory clone failed (can this user reach $remote with git?); see $FLEET_HOME/logs/memory-clone.err"
+      else warn "memory clone failed (deploy key not registered yet?); see $FLEET_HOME/logs/memory-clone.err"; fi
       node_kv_set "$FLEET_HOME/memory.state" state missing
       return 0
     fi
   fi
   node_remote_sync memory "$FLEET_MEMORY_DIR" "$remote"
-  node_git -C "$FLEET_MEMORY_DIR" config user.name "fleet-$name"
-  node_git -C "$FLEET_MEMORY_DIR" config user.email "fleet-$name@users.noreply.github.com"
-  node_git -C "$FLEET_MEMORY_DIR" config pull.rebase true
+  if ! fleet_is_master; then
+    memory_git -C "$FLEET_MEMORY_DIR" config user.name "fleet-$name"
+    memory_git -C "$FLEET_MEMORY_DIR" config user.email "fleet-$name@users.noreply.github.com"
+  fi
+  memory_git -C "$FLEET_MEMORY_DIR" config pull.rebase true
   mkdir -p "$FLEET_MEMORY_DIR/nodes/$name"
   case "$(node_kv_get "$FLEET_HOME/memory.state" state)" in
     ""|missing|off) node_kv_set "$FLEET_HOME/memory.state" state ok ;;
@@ -408,10 +430,48 @@ node_rebase_in_progress() {
   [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]
 }
 
-# memory sync [--reset]: commit nodes/<name> only → pull --rebase → push, 3 tries.
-# --reset clears a recorded conflict after the master repaired the vault.
+# node_memory_capture NAME DIR — mirror this machine's native agent memories
+# (FLEET_MEMORY_CAPTURE sources) into DIR/nodes/NAME/<source>/ through
+# lib/memory_capture.py. A file the secret scan hits is skipped, warned about
+# once (again only when the set of hits changes) and recorded in memory.state
+# (capture_skipped, shown as detail); it never reaches the vault. Quiet when
+# nothing changed. Never fails the sync.
+node_memory_capture() {
+  local name=$1 dir=$2 out hits summary n=0 prev
+  [ -n "${FLEET_MEMORY_CAPTURE:-}" ] || return 0
+  [ -f "$FLEET_ROOT/lib/memory_capture.py" ] || { warn "memory: lib/memory_capture.py missing in $FLEET_ROOT; capture skipped"; return 0; }
+  # shellcheck disable=SC2086  # ${FLEET_VERBOSE:+--verbose} is one optional word
+  out=$(python3 "$FLEET_ROOT/lib/memory_capture.py" --home "$HOME" --dest "$dir/nodes/$name" \
+          --sources "$FLEET_MEMORY_CAPTURE" --exclude "${FLEET_MEMORY_CAPTURE_EXCLUDE:-}" \
+          --max-kb "${FLEET_MEMORY_MAX_KB:-256}" ${FLEET_VERBOSE:+--verbose} 2>&1) || warn "memory: capture failed: $(printf '%s' "$out" | tail -n 1)"
+  hits=$(printf '%s\n' "$out" | awk '$1 == "secret" { print $2 }')
+  summary=$(printf '%s\n' "$out" | awk '$1 == "summary" { printf "%s %s", $2, $3; for (i = 4; i <= NF; i++) if ($i !~ /=0$/) printf " %s", $i; printf "; " }')
+  prev=$(node_kv_get "$FLEET_HOME/memory.state" capture_skipped)
+  hits=$(printf '%s' "$hits" | tr '\n' ' ')
+  if [ -n "$hits" ] && [ "$hits" != "$prev" ]; then
+    n=$(printf '%s\n' "$hits" | wc -w | tr -d ' ')
+    warn "memory: $n file(s) not uploaded, the secret scan hit: $hits"
+  fi
+  [ "$hits" = "$prev" ] || node_kv_set "$FLEET_HOME/memory.state" capture_skipped "$hits"
+  printf '%s\n' "$out" | awk '$1 == "copied" || $1 == "removed"' | while IFS= read -r n; do log "memory: capture $n"; done
+  if [ -n "${FLEET_VERBOSE:-}" ] || printf '%s' "$out" | grep -q 'copied=[1-9]\|removed=[1-9]'; then
+    log "memory: captured ${summary%; }"
+  fi
+  return 0
+}
+
+# node_memory_commit_counts DIR NAME — "+A ~M -D" of what is staged under nodes/NAME.
+node_memory_commit_counts() {
+  memory_git -C "$1" diff --cached --no-renames --name-status -- "nodes/$2" \
+    | awk '{ c[substr($1, 1, 1)]++ } END { printf "+%d ~%d -%d\n", c["A"], c["M"], c["D"] }'
+}
+
+# memory sync [--reset]: capture agent memories → commit nodes/<name> only →
+# pull --rebase → push, 3 tries. Runs on nodes and on the master (which clones
+# the vault itself when it is missing). --reset clears a recorded conflict
+# after a human repaired the vault.
 cmd_memory_sync() {
-  local reset=0 name dir sf branch attempt delay others ahead
+  local reset=0 name dir sf branch attempt delay others ahead counts
   [ "${1:-}" = --reset ] && reset=1
   name=$(node_name); dir=$FLEET_MEMORY_DIR; sf="$FLEET_HOME/memory.state"
   if [ -z "$(node_memory_remote)" ]; then
@@ -419,13 +479,15 @@ cmd_memory_sync() {
     [ -z "${FLEET_VERBOSE:-}" ] || log "memory: no FLEET_MEMORY_REPO configured; nothing to sync"
     return 0
   fi
+  if [ ! -d "$dir/.git" ] && fleet_is_master; then node_memory_setup "$name"; fi
   if [ ! -d "$dir/.git" ]; then
     node_kv_set "$sf" state missing
-    warn "memory vault not cloned at $dir (run fleet apply)"
+    if fleet_is_master; then [ "${FLEET_MEMORY_SEED:-1}" = 0 ] || warn "memory vault not cloned at $dir"
+    else warn "memory vault not cloned at $dir (run fleet apply)"; fi
     return 0
   fi
   if node_rebase_in_progress; then
-    if [ "$reset" -eq 1 ]; then node_git -C "$dir" rebase --abort >/dev/null 2>&1 || true
+    if [ "$reset" -eq 1 ]; then memory_git -C "$dir" rebase --abort >/dev/null 2>&1 || true
     else node_kv_set "$sf" state conflict; warn "memory: a rebase is in progress; run 'fleet memory sync --reset' after fixing $dir"; return 0
     fi
   fi
@@ -436,28 +498,34 @@ cmd_memory_sync() {
   [ "$reset" -eq 1 ] && node_kv_set "$sf" state ok
 
   mkdir -p "$dir/nodes/$name"
-  node_git -C "$dir" config user.name "fleet-$name" >/dev/null 2>&1 || true
-  node_git -C "$dir" config user.email "fleet-$name@users.noreply.github.com" >/dev/null 2>&1 || true
-  # Never commit outside nodes/<name>: drop anything staged, then stage only our path.
-  node_git -C "$dir" reset --quiet 2>/dev/null || true
-  node_git -C "$dir" add -A -- "nodes/$name"
-  if ! node_git -C "$dir" diff --cached --quiet; then
-    node_git -C "$dir" commit --quiet -m "memory: $name $(node_utc)"
-    ok "memory: committed nodes/$name"
+  if ! fleet_is_master; then
+    memory_git -C "$dir" config user.name "fleet-$name" >/dev/null 2>&1 || true
+    memory_git -C "$dir" config user.email "fleet-$name@users.noreply.github.com" >/dev/null 2>&1 || true
   fi
-  others=$(node_git -C "$dir" status --porcelain | awk -v p="nodes/$name/" 'index(substr($0, 4), p) != 1 { print substr($0, 4) }')
+  node_memory_capture "$name" "$dir"
+  # Never commit outside nodes/<name>: drop anything staged, then stage only our path.
+  memory_git -C "$dir" reset --quiet 2>/dev/null || true
+  memory_git -C "$dir" add -A -- "nodes/$name"
+  if ! memory_git -C "$dir" diff --cached --quiet; then
+    counts=$(node_memory_commit_counts "$dir" "$name")
+    memory_git -C "$dir" commit --quiet -m "memory: $name $(node_utc) ($counts)"
+    ok "memory: committed nodes/$name ($counts)"
+  fi
+  others=$(memory_git -C "$dir" status --porcelain | awk -v p="nodes/$name/" 'index(substr($0, 4), p) != 1 { print substr($0, 4) }')
   if [ -n "$others" ]; then
     warn "memory: changes outside nodes/$name left unstaged: $(printf '%s' "$others" | tr '\n' ' ')"
     node_kv_set "$sf" detail "unstaged changes outside nodes/$name"
+  elif [ -n "$(node_kv_get "$sf" capture_skipped)" ]; then
+    node_kv_set "$sf" detail "not uploaded (secret scan): $(node_kv_get "$sf" capture_skipped)"
   else
     node_kv_set "$sf" detail ""
   fi
 
-  branch=$(node_git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo main)
+  branch=$(memory_git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo main)
   # Nothing committed yet and the remote branch does not exist: an empty vault.
   # Not an error; the master adds the scaffolding, the first note creates main.
-  if ! node_git -C "$dir" rev-parse --verify --quiet HEAD >/dev/null 2>&1 \
-     && ! node_git -C "$dir" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+  if ! memory_git -C "$dir" rev-parse --verify --quiet HEAD >/dev/null 2>&1 \
+     && ! memory_git -C "$dir" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
     node_kv_set "$sf" state ok
     node_kv_set "$sf" detail "vault empty (the master adds the scaffolding on its next reconcile)"
     return 0
@@ -466,10 +534,10 @@ cmd_memory_sync() {
   attempt=0; delay=2
   while [ "$attempt" -lt 3 ]; do
     attempt=$((attempt + 1))
-    if node_git -C "$dir" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-      if ! node_git -C "$dir" pull --rebase --autostash --quiet origin "$branch" >/dev/null 2>&1; then
+    if memory_git -C "$dir" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+      if ! memory_git -C "$dir" pull --rebase --autostash --quiet origin "$branch" >/dev/null 2>&1; then
         if node_rebase_in_progress; then
-          node_git -C "$dir" rebase --abort >/dev/null 2>&1 || true
+          memory_git -C "$dir" rebase --abort >/dev/null 2>&1 || true
           node_kv_set "$sf" state conflict
           node_kv_set "$sf" detail "rebase conflict on nodes/$name; aborted"
           warn "memory: rebase conflict; aborted and stopped syncing (fix on the master, then 'fleet memory sync --reset')"
@@ -480,10 +548,10 @@ cmd_memory_sync() {
       fi
     fi
     ahead=1
-    if node_git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
-      ahead=$(node_git -C "$dir" rev-list --count "refs/remotes/origin/$branch..HEAD" 2>/dev/null || echo 1)
+    if memory_git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+      ahead=$(memory_git -C "$dir" rev-list --count "refs/remotes/origin/$branch..HEAD" 2>/dev/null || echo 1)
     fi
-    if [ "$ahead" -eq 0 ] || node_git -C "$dir" push --quiet origin "$branch" >/dev/null 2>&1; then
+    if [ "$ahead" -eq 0 ] || memory_git -C "$dir" push --quiet origin "$branch" >/dev/null 2>&1; then
       node_kv_set "$sf" state ok
       node_kv_set "$sf" last_sync "$(node_utc)"
       [ "$ahead" -eq 0 ] || ok "memory: pushed"

@@ -359,10 +359,15 @@ node_shell_rc() {
   for f in $files; do node_rc_ensure "$f"; done
 }
 
+# ~/.local/bin/fleet and its alias ~/.local/bin/fleeter both point at the
+# installed checkout. Idempotent.
 node_bin_link() {
+  local n
   if [ -x "$FLEET_SHARE/fleet" ]; then
     mkdir -p "$FLEET_BIN"
-    [ "$(readlink "$FLEET_BIN/fleet" 2>/dev/null)" = "$FLEET_SHARE/fleet" ] || ln -sfn "$FLEET_SHARE/fleet" "$FLEET_BIN/fleet"
+    for n in fleet fleeter; do
+      [ "$(readlink "$FLEET_BIN/$n" 2>/dev/null)" = "$FLEET_SHARE/fleet" ] || ln -sfn "$FLEET_SHARE/fleet" "$FLEET_BIN/$n"
+    done
   fi
 }
 

@@ -148,9 +148,14 @@ mexec bash -ec '
   t=$(mktemp -d); cp -R /opt/fleet/examples/fleet-config/. "$t/"
   sed "s/YOU/example/g" /opt/fleet/examples/fleet-config/fleet.conf >"$t/fleet.conf"
   git -C "$t" init -q; git -C "$t" add -A; git -C "$t" commit -q -m "config v1"; git -C "$t" push -q /srv/repos/config.git HEAD:main
-  git clone -q /srv/repos/config.git "$HOME/fleet-config"' \
+  git clone -q /srv/repos/config.git "$HOME/fleet-config"
+  # the master runs fleet from a checkout of the code repo (like a real master), not from the image copy:
+  # its code revision is then the one the nodes pull, and `fleet sync` can fast-forward it
+  git clone -q /srv/repos/code.git "$HOME/fleeter"
+  mkdir -p "$HOME/.local/bin"; ln -sfn "$HOME/fleeter/fleet" "$HOME/.local/bin/fleet"' \
   >"$WORK/seed.log" 2>&1
 assert "memory + code + config bare repos seeded, master config dir cloned" bash -c "mexec git --git-dir=/srv/repos/memory.git cat-file -e main:INDEX.md && mexec git --git-dir=/srv/repos/code.git cat-file -e main:fleet && mexec test -f $MHOME/fleet-config/AGENTS.md"
+assert "master runs fleet from its clone of the code repo" bash -c "[ \"\$(mexec sh -c 'command -v fleet')\" = $MHOME/.local/bin/fleet ] && mexec test -d $MHOME/fleeter/.git && mexec fleet --version | grep -q '^fleet '"
 
 # ======================================================================
 step "master init (non-interactive), secrets"
@@ -263,6 +268,25 @@ mexec fleet reconcile >"$WORK/reconcile2.log" 2>&1
 assert "second reconcile is quiet (convergent)" [ ! -s "$WORK/reconcile2.log" ]
 
 # ======================================================================
+step "fleet list: the one-shot overview, table and JSON"
+mexec fleet list --json >"$WORK/list1.json" 2>"$WORK/list1.err"; rc=$?
+assert "fleet list --json exits 0" [ "$rc" = 0 ] || cat "$WORK/list1.err"
+assert "list --json: alpha and beta online, reachable, provisioned, synced yes (applied revs + digest = desired), memory ok, fleet version; laptop absent" python3 - "$WORK/list1.json" <<'EOF'
+import json, sys
+d = {x["name"]: x for x in json.load(open(sys.argv[1]))}
+assert "laptop" not in d and not any(x["name"].startswith("laptop") for x in d.values())
+for n in ("alpha", "beta"):
+    x = d[n]
+    assert x["online"] is True and x["reachable"] is True and x["state"] == "provisioned" and x["synced"] == "yes", (n, x["synced"], x["desired"], x["applied"])
+    assert x["desired"]["code"] == x["applied"]["code"] and x["desired"]["config"] == x["applied"]["config"] and x["desired"]["digest"] == x["applied"]["digest"]
+    assert x["applied"]["source"] == "node" and x["memory"] == "ok" and x["fleet"] and x["proxy"] == "off" and x["provisioned_age"]
+assert d["alpha"]["profile"] == "full" and d["beta"]["profile"] == "minimal" and d["beta"]["ephemeral"] is True
+EOF
+assert "fleet list table: header and both rows (provisioned, synced yes)" bash -c "o=\$(mexec fleet list); printf '%s\n' \"\$o\" | head -1 | grep -Eq '^NAME +HOST +ONLINE +STATE +SYNCED +LAST PROVISION +TOOLS +MEMORY +PROXY +FLEET$' && printf '%s\n' \"\$o\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +yes +[0-9]+[mhd] ' && printf '%s\n' \"\$o\" | grep -Eq '^beta +fleet-beta +yes +provisioned +yes +[0-9]+[mhd] .* ok +off +[0-9.]+$'"
+assert "fleet list --offline: no ssh, reachable null, synced from the registry" bash -c "mexec fleet list --offline --json | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"alpha\"][\"reachable\"] is None and d[\"alpha\"][\"synced\"]==\"yes\" and d[\"alpha\"][\"applied\"][\"source\"]==\"registry\"'"
+
+
+# ======================================================================
 step "node state after provision"
 for n in "$NA:alpha" "$NB:beta"; do
   c=${n%%:*}; name=${n#*:}
@@ -270,6 +294,7 @@ for n in "$NA:alpha" "$NB:beta"; do
   assert "$name: env.sh present, 0600, sources" bash -c "[ \"\$(nmode $c $MHOME/.config/fleet/env.sh)\" = 600 ] && nexec $c bash -c '. ~/.config/fleet/env.sh && [ \"\$FLEET_NODE\" = $name ] && [ \"\$CLAUDE_CODE_OAUTH_TOKEN\" = fake-oauth-token-e2e ]'"
   assert "$name: ~/.claude/CLAUDE.md rendered from the config repo's AGENTS.md (node name filled in)" bash -c "nfile $c $MHOME/.claude/CLAUDE.md | grep -q 'fleet node .$name.' && ! nfile $c $MHOME/.claude/CLAUDE.md | grep -q '\${FLEET_NODE}'"
   assert "$name: ~/.agents/skills non-empty, ~/.claude/skills too" nexec "$c" sh -c "[ \"\$(ls $MHOME/.agents/skills | wc -l)\" -gt 0 ] && [ \"\$(ls $MHOME/.claude/skills | wc -l)\" -gt 0 ] && [ -f $MHOME/.agents/skills/fleet-notes/SKILL.md ]"
+  assert "$name: ~/.local/bin/fleeter alias points at the installed checkout" [ "$(nexec "$c" readlink $MHOME/.local/bin/fleeter)" = "$MHOME/.local/share/fleet/fleet" ]
   assert "$name: ~/.codex/AGENTS.md + ~/.cursor/rules/fleet-global.mdc" nexec "$c" sh -c "test -s $MHOME/.codex/AGENTS.md && test -s $MHOME/.cursor/rules/fleet-global.mdc"
   assert "$name: code + config shipped, ~/.local/bin/fleet linked" nexec "$c" sh -c "test -x $MHOME/.local/share/fleet/fleet && test -f $MHOME/.local/share/fleet-config/AGENTS.md && [ \"\$(readlink $MHOME/.local/bin/fleet)\" = $MHOME/.local/share/fleet/fleet ]"
   assert "$name: rc block in .bashrc once" [ "$(nfile "$c" $MHOME/.bashrc | grep -c '# >>> fleet >>>')" = 1 ]

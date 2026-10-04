@@ -96,7 +96,7 @@ case "$cmd" in
   *"fleet pull --no-apply"*)      touch "$nh/.fleet-pulled"; exit 0 ;;
   *"fleet apply --from-master "*) mkdir -p "$nh/.config/fleet"; printf '%s' "${cmd##* }" >"$nh/.config/fleet/applied"; printf 'c0ffee+cafe\n' >"$nh/.config/fleet/applied_commit"; exit 0 ;;
   *"fleet leave"*)                [ -f "$T/leave-fail" ] && exit 1; touch "$nh/.fleet-left"; exit 0 ;;
-  *"fleet status --json"*)        echo '{"fleet":"0.1.0","tools":{"claude":{"state":"ok","detail":"x"},"codex":{"state":"login","detail":"y"}}}'; exit 0 ;;
+  *"fleet status --json"*)        if [ -f "$T/status-reply.json" ]; then cat "$T/status-reply.json"; else echo '{"fleet":"0.1.0","tools":{"claude":{"state":"ok","detail":"x"},"codex":{"state":"login","detail":"y"}}}'; fi; exit 0 ;;
 esac
 HOME="$nh" exec bash -c "$cmd"
 EOF
@@ -220,6 +220,7 @@ case "$(uname -s)" in
           assert "LaunchAgent interval 120" grep -q '<integer>120</integer>' "$HOME/Library/LaunchAgents/dev.fleet.reconcile.plist" ;;
   *)      assert "systemd timer written" [ -f "$HOME/.config/systemd/user/fleet-reconcile.timer" ] ;;
 esac
+assert "init master installed the fleeter alias next to fleet (no fleet link here: points at this checkout)" [ "$(readlink "$HOME/.local/bin/fleeter")" = "$ROOT/fleet" ]
 key1=$(cat "$FLEET_VAULT/ssh/fleet_master.pub"); ts1=$(cat "$FLEET_VAULT/tailscale.json"); dk1=$(cat "$FLEET_VAULT/digest.key")
 out=$(bash "$FLEET" init master </dev/null 2>&1); rc=$?
 assert "init master idempotent (no prompts second time)" [ "$rc" = 0 ]
@@ -251,7 +252,7 @@ sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -
 export -f vault_snap sha256
 snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
 HELP_OK=1; HELP_BAD=""
-for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite nodes "ssh alpha" "provision alpha" reconcile "kick alpha" \
+for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite list nodes "ssh alpha" "provision alpha" reconcile "kick alpha" \
          "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" doctor join apply pull update "memory sync" login status leave daemon \
          init secrets files proxy t3 config policy memory; do
   for h in --help -h; do
@@ -265,8 +266,9 @@ assert "--help ran nothing: vault unchanged, no API call, no ssh, no tailscale l
 assert "fleet secrets set --help did not consume stdin into the vault" bash -c "! grep -q 'tskey-api-FAKE' '$FLEET_VAULT'/secrets/*.env 2>/dev/null"
 BAD_OK=1; BAD_BAD=""
 for c in "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
-         "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
-         "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" nosuch; do
+         "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "list --bogus" "list extra" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
+         "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" \
+         nosuch; do
   # shellcheck disable=SC2086
   out=$(PATH="$T/tsbin:$PATH" bash "$FLEET" $c </dev/null 2>&1); rc=$?
   if [ "$rc" != 2 ] || ! printf '%s' "$out" | grep -qi 'usage'; then BAD_OK=0; BAD_BAD="$BAD_BAD [$c -> rc $rc]"; fi
@@ -592,6 +594,77 @@ assert "nodes lists unregistered tagged peer as unknown" printf '%s\n' "$out" | 
 refute "nodes ignores untagged peers" printf '%s\n' "$out" | grep -q laptop
 out=$(bash "$FLEET" nodes --live 2>&1)
 assert "nodes --live shows tool states" printf '%s\n' "$out" | grep -q 'claude:ok codex:login'
+
+# ======================================================================
+echo "== list (registry + tailnet + fleet status --json per node; unreachable, offline and unknown peers; --json; --offline)"
+# two extra registry entries: unr is online on the tailnet but has no fake home (ssh exits 255);
+# off is registered but absent from the tailnet
+for n in unr off; do
+  cat >"$FLEET_VAULT/nodes/n$(echo "$n" | tr '[:lower:]' '[:upper:]')CNTRL.json" <<EOF
+{"id":"n$(echo "$n" | tr '[:lower:]' '[:upper:]')CNTRL","name":"$n","hostname":"fleet-$n","dnsname":"fleet-$n.tail1.ts.net","user":"fleetuser","os":"linux","arch":"amd64","container":true,"profile":"minimal","ephemeral":false,"state":"provisioned","enrolled":"2026-10-03T09:00:00Z","provisioned":"2026-10-03T09:01:00Z","provisioned_digest":"stale","applied_commit":"old+old","missing_since":"","pending_cleanup":[],"github_keys":{},"secrets_sent":[],"files_sent":[]}
+EOF
+  chmod 0600 "$FLEET_VAULT/nodes/n$(echo "$n" | tr '[:lower:]' '[:upper:]')CNTRL.json"
+done
+write_status ',"k10":{"ID":"nUNRCNTRL","HostName":"fleet-unr","DNSName":"fleet-unr.tail1.ts.net.","TailscaleIPs":["100.64.0.30"],"Online":true,"Tags":["tag:fleet-node"]}'
+want_code=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || FLEET_ROOT=$ROOT bash -c '. "$FLEET_ROOT/lib/common.sh"; sha256_tree "$FLEET_ROOT"')
+want_cfg=$(git -C "$CFG" rev-parse HEAD)
+# alpha answers with a full status: applied revs + digest equal to the master's desired state
+python3 - "$T/status-reply.json" "$want_code+$want_cfg" "$(digest_of full)" <<'EOF'
+import json, sys
+tools = {n: {"state": "ok", "detail": "1.0"} for n in ("base", "devtools", "claude", "codex", "chrome", "grok", "t3code", "cliproxy", "mise")}
+tools["cursor"] = {"state": "login", "detail": "run: fleet login cursor"}
+json.dump({"fleet": "0.3.0", "name": "alpha", "os": "linux", "container": True, "applied": sys.argv[3], "applied_at": "2026-10-03T10:00:00Z",
+           "applied_commit": sys.argv[2], "tools": tools, "memory": {"state": "ok", "last_sync": "2026-10-03T10:00:00Z"},
+           "timers": {"pull": True}, "token_age_days": {}, "updated": "2026-10-03T10:00:00Z"}, open(sys.argv[1], "w"))
+EOF
+: >"$SSH_LOG"
+out=$(bash "$FLEET" list 2>"$T/list.err"); rc=$?
+assert "list exits 0 with an unreachable node in the fleet" [ "$rc" = 0 ]
+assert "list header: NAME HOST ONLINE STATE SYNCED LAST PROVISION TOOLS MEMORY PROXY FLEET" bash -c "printf '%s\n' \"\$0\" | head -1 | grep -Eq '^NAME +HOST +ONLINE +STATE +SYNCED +LAST PROVISION +TOOLS +MEMORY +PROXY +FLEET$'" "$out"
+assert "list: alpha online, provisioned, synced yes, tools summarised (9 ok, 1 login: cursor), memory ok, proxy ok, fleet 0.3.0" \
+  bash -c "printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +yes +[0-9]+[mhd] +9 ok, 1 login: cursor +ok +ok +0\.3\.0$'" "$out"
+assert "list: unr online but not answering -> unreachable, synced from the registry (behind), no live columns" \
+  bash -c "printf '%s\n' \"\$0\" | grep -Eq '^unr +fleet-unr +yes +provisioned +behind +[0-9]+[mhd] +unreachable +- +- +-$'" "$out"
+assert "list: off is registered but not on the tailnet -> online no, no ssh attempted" \
+  bash -c "printf '%s\n' \"\$0\" | grep -Eq '^off +fleet-off +no +provisioned +behind ' && ! grep -q 'fleet-off' '$SSH_LOG'" "$out"
+assert "list: unregistered tagged peer shown as unknown" bash -c "printf '%s\n' \"\$0\" | grep -Eq '^fleet-beta +fleet-beta +yes +unknown +- +- +- +- +- +-$'" "$out"
+refute "list ignores untagged peers" printf '%s' "$out" | grep -q laptop
+assert "list asked every online registered node once (alpha, unr), with the status command" bash -c "[ \"\$(grep -c 'fleet-alpha.tail1.ts.net ~/.local/bin/fleet status --json' '$SSH_LOG')\" = 1 ] && [ \"\$(grep -c 'fleet-unr.tail1.ts.net' '$SSH_LOG')\" = 1 ]"
+out=$(bash "$FLEET" list --json 2>/dev/null); rc=$?
+assert "list --json exits 0 and is a JSON array with every registered node and the unknown peer" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list) and {\"alpha\",\"unr\",\"off\",\"fleet-beta\",\"dup\"} <= set(x[\"name\"] for x in d)'" "$out"
+assert "list --json: alpha record (schema fields, synced yes, reachable, desired == applied, tools, memory, proxy, fleet)" bash -c "printf '%s' \"\$0\" | python3 -c '
+import json,sys
+d={x[\"name\"]: x for x in json.load(sys.stdin)}; a=d[\"alpha\"]
+assert a[\"id\"]==\"nAAAACNTRL\" and a[\"host\"]==\"fleet-alpha\" and a[\"online\"] is True and a[\"reachable\"] is True
+assert a[\"state\"]==\"provisioned\" and a[\"provisioning\"] is False and a[\"synced\"]==\"yes\" and a[\"profile\"]==\"full\"
+assert a[\"desired\"][\"code\"]==a[\"applied\"][\"code\"]==\"$want_code\" and a[\"desired\"][\"config\"]==a[\"applied\"][\"config\"]==\"$want_cfg\"
+assert a[\"desired\"][\"digest\"]==a[\"applied\"][\"digest\"] and a[\"applied\"][\"source\"]==\"node\"
+assert a[\"tools\"][\"cursor\"][\"state\"]==\"login\" and a[\"memory\"]==\"ok\" and a[\"proxy\"]==\"ok\" and a[\"fleet\"]==\"0.3.0\"
+assert a[\"provisioned\"] and a[\"provisioned_age\"] and a[\"cleanup_pending\"]==[] and a[\"missing_since\"]==\"\"
+'" "$out"
+assert "list --json: unreachable and offline nodes (reachable false / null, synced behind from the registry, empty tools), unknown peer" bash -c "printf '%s' \"\$0\" | python3 -c '
+import json,sys
+d={x[\"name\"]: x for x in json.load(sys.stdin)}
+u=d[\"unr\"]; assert u[\"online\"] is True and u[\"reachable\"] is False and u[\"synced\"]==\"behind\" and u[\"tools\"]=={} and u[\"applied\"][\"source\"]==\"registry\" and u[\"memory\"] is None and u[\"fleet\"] is None
+o=d[\"off\"]; assert o[\"online\"] is False and o[\"reachable\"] is None and o[\"synced\"]==\"behind\" and o[\"tools\"]=={}
+b=d[\"fleet-beta\"]; assert b[\"state\"]==\"unknown\" and b[\"id\"]==\"nBBBBCNTRL\" and b[\"online\"] is True and b[\"synced\"] is None and b[\"profile\"] is None
+'" "$out"
+# the node reports older revs than the master's checkout: behind
+python3 - "$T/status-reply.json" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1])); d["applied_commit"] = "old+old"; json.dump(d, open(sys.argv[1], "w"))
+EOF
+out=$(bash "$FLEET" list 2>/dev/null)
+assert "list: a node whose applied revs differ from the master's is behind" bash -c "printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +behind '" "$out"
+: >"$SSH_LOG"
+out=$(bash "$FLEET" list --offline 2>/dev/null); rc=$?
+assert "list --offline exits 0, no ssh at all, registry + tailnet columns only" bash -c "[ $rc = 0 ] && [ ! -s '$SSH_LOG' ] && printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +behind +[0-9]+[mhd] +- +- +- +-$'" "$out"
+assert "list --offline --json: reachable null, synced from the registry" bash -c "bash '$FLEET' list --offline --json 2>/dev/null | python3 -c '
+import json,sys
+d={x[\"name\"]: x for x in json.load(sys.stdin)}; a=d[\"alpha\"]
+assert a[\"reachable\"] is None and a[\"synced\"]==\"behind\" and a[\"applied\"][\"source\"]==\"registry\" and a[\"tools\"]=={}'"
+rm -f "$T/status-reply.json" "$FLEET_VAULT/nodes/nUNRCNTRL.json" "$FLEET_VAULT/nodes/nOFFCNTRL.json"
+write_status ""
 
 # ======================================================================
 echo "== policy check / apply"
@@ -983,6 +1056,7 @@ assert "audit log records the publish" grep -q ' config.publish - pushed' "$FLEE
 git -C "$CFG" remote remove origin
 out=$(bash "$FLEET" config publish --no-capture --yes 2>&1)
 assert "publish without a remote warns and keeps the commit" printf '%s' "$out" | grep -q 'no origin remote'
+
 
 # ======================================================================
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

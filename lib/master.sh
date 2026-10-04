@@ -787,6 +787,7 @@ cmd_init_master() {
 
   github_setup "$reconfigure"
   install_reconcile_schedule
+  master_bin_link
   audit "init.master" "-" ok
   ok "master ready. next: fleet secrets set CLAUDE_CODE_OAUTH_TOKEN; fleet config publish; fleet invite"
 }
@@ -798,6 +799,23 @@ policy_ensure_readonly() {
     2) warn "policy: could not read the live policy (OAuth client lacks policy_file:read? rerun with --reconfigure)" ;;
     *) warn "policy: live tailnet policy does not isolate $FLEET_NODE_TAG; run: fleet policy apply" ;;
   esac
+}
+
+# master_bin_link — `fleeter` as a second name for the `fleet` command:
+# ~/.local/bin/fleeter points where ~/.local/bin/fleet points (or at this
+# checkout when there is no fleet link). Idempotent; never touches `fleet`.
+master_bin_link() {
+  local target
+  target=$(readlink "$FLEET_BIN/fleet" 2>/dev/null || true)
+  case "$target" in
+    "") target="$FLEET_ROOT/fleet" ;;
+    /*) ;;
+    *)  target="$FLEET_BIN/$target" ;;
+  esac
+  mkdir -p "$FLEET_BIN"
+  [ "$(readlink "$FLEET_BIN/fleeter" 2>/dev/null)" = "$target" ] && return 0
+  ln -sfn "$target" "$FLEET_BIN/fleeter"
+  ok "command alias: $FLEET_BIN/fleeter -> $target"
 }
 
 # repo_slug URL — owner/repo from git@github.com:owner/repo.git or https URL.
@@ -1002,6 +1020,216 @@ print(" ".join("%s:%s"%(k,v.get("state","?")) for k,v in sorted((d.get("tools") 
     [ "$online" = true ] && online=yes || online=no
     printf '%-18s %-14s %-7s %-12s %-8s %-6s %s\n' "$host" "$pid" "$online" unknown - - -
   done
+}
+
+# ---------- list (the one-shot fleet overview) ----------
+
+# node_provisioning ID — true while a live provision worker holds the node lock.
+node_provisioning() {
+  local pid
+  pid=$(lock_pid "$FLEET_VAULT/locks/$1")
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# list_collect_status OUTDIR PEERS — `fleet status --json` from every online,
+# non-revoked node in parallel, each capped (FLEET_LIST_SECS, default 10 s),
+# into OUTDIR/<id>. A node that did not answer leaves no file.
+list_collect_status() {
+  local outdir=$1 peers=$2 id secs=${FLEET_LIST_SECS:-10}
+  for id in $(registry_ids); do
+    node_revoked "$id" && continue
+    peer_online "$peers" "$id" || continue
+    # shellcheck disable=SC2088  # the ~ is expanded by the node's shell, not ours
+    ( with_timeout "$secs" node_ssh "$id" '~/.local/bin/fleet status --json' >"$outdir/$id.tmp" 2>/dev/null \
+        && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$outdir/$id.tmp" 2>/dev/null \
+        && mv -f "$outdir/$id.tmp" "$outdir/$id"; rm -f "$outdir/$id.tmp" ) &
+  done
+  wait
+}
+
+# list_render MODE NODES_DIR PEERS_FILE STATUS_DIR DIGESTS_FILE PROVISIONING_FILE
+# WANT_CODE WANT_CONFIG NOW OFFLINE — the table or the JSON array (CONTRACT
+# "fleet list --json"). STATUS_DIR may be empty (--offline).
+list_render() {
+  python3 - "$@" <<'PY'
+import json, os, sys, calendar, time
+
+mode, nodes_dir, peers_f, status_dir, digests_f, prov_f, want_code, want_config, now, offline = sys.argv[1:11]
+now = int(now); offline = offline == "1"
+
+def read_json(p):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return None
+
+def iso_epoch(s):
+    try:
+        return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return 0
+
+def age(s):
+    t0 = iso_epoch(s or "")
+    if t0 <= 0:
+        return None
+    d = max(0, now - t0)
+    if d < 3600: return "%dm" % (d // 60)
+    if d < 86400: return "%dh" % (d // 3600)
+    return "%dd" % (d // 86400)
+
+peers = {}
+for line in open(peers_f):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) >= 4 and parts[0]:
+        peers[parts[0]] = {"host": parts[1], "dnsname": parts[2], "online": parts[3] == "true"}
+digests = {}
+for line in open(digests_f):
+    k, _, v = line.rstrip("\n").partition("\t")
+    if k: digests[k] = v
+provisioning = set(open(prov_f).read().split())
+
+def tools_summary(tools):
+    if not tools: return "-"
+    ok = sorted(n for n, t in tools.items() if (t or {}).get("state") == "ok")
+    parts = ["%d ok" % len(ok)] if ok else []
+    others = {}
+    for n, t in sorted(tools.items()):
+        st = (t or {}).get("state") or "?"
+        if st != "ok": others.setdefault(st, []).append(n)
+    for st in sorted(others):
+        parts.append("%d %s: %s" % (len(others[st]), st, " ".join(others[st])))
+    return ", ".join(parts)
+
+rows = []
+for fn in sorted(os.listdir(nodes_dir)):
+    if not fn.endswith(".json"): continue
+    r = read_json(os.path.join(nodes_dir, fn))
+    if not isinstance(r, dict): continue
+    nid = r.get("id") or fn[:-5]
+    peer = peers.get(nid, {})
+    state = r.get("state") or "unknown"
+    revoked = state == "revoked"
+    online = bool(peer.get("online"))
+    live = None
+    reachable = None
+    if status_dir and online and not revoked:
+        live = read_json(os.path.join(status_dir, nid))
+        reachable = live is not None
+    if not revoked and nid in provisioning: state = "provisioning"
+    # what the node applied: the node's own report first, else what the registry recorded at the last provision
+    applied = {"code": None, "config": None, "digest": None, "at": None, "source": None}
+    cc = (live or {}).get("applied_commit") if live else None
+    if live and (cc or live.get("applied")):
+        applied.update(digest=live.get("applied"), at=live.get("applied_at"), source="node")
+    elif r.get("applied_commit") or r.get("provisioned_digest"):
+        cc = r.get("applied_commit") or ""
+        applied.update(digest=r.get("provisioned_digest") or None, at=r.get("provisioned") or None, source="registry")
+    if cc and "+" in cc:
+        applied["code"], applied["config"] = cc.split("+", 1)
+        applied["code"] = applied["code"] or None; applied["config"] = applied["config"] or None
+    want_digest = digests.get(r.get("profile") or "")
+    desired = {"code": want_code or None, "config": want_config or None, "digest": want_digest or None}
+    if revoked:
+        synced = None
+    elif applied["source"] is None:
+        synced = "?"
+    else:
+        behind = False
+        if applied["code"] is not None or applied["config"] is not None:
+            behind = behind or (applied["code"] or "") != (want_code or "") or (applied["config"] or "") != (want_config or "")
+        if applied["digest"] and want_digest:
+            behind = behind or applied["digest"] != want_digest
+        synced = "behind" if behind else "yes"
+    tools = (live.get("tools") or {}) if live else {}
+    memory = ((live.get("memory") or {}).get("state") or None) if live else None
+    proxy = None
+    if live:
+        px = tools.get("cliproxy")
+        proxy = "off" if px is None else ("ok" if isinstance(px, dict) and px.get("state") == "ok" else "down")
+    rows.append({
+        "name": r.get("name") or nid, "id": nid, "host": r.get("hostname") or peer.get("host") or None,
+        "dnsname": r.get("dnsname") or peer.get("dnsname") or None, "user": r.get("user"),
+        "os": r.get("os"), "arch": r.get("arch"), "container": bool(r.get("container")),
+        "profile": r.get("profile"), "ephemeral": bool(r.get("ephemeral")),
+        "online": online, "reachable": reachable, "state": state, "provisioning": state == "provisioning",
+        "synced": synced, "provisioned": r.get("provisioned") or None, "provisioned_age": age(r.get("provisioned")),
+        "desired": desired, "applied": applied, "tools": tools, "memory": memory, "proxy": proxy,
+        "fleet": (live or {}).get("fleet") if live else None,
+        "missing_since": r.get("missing_since") or "", "cleanup_pending": list(r.get("pending_cleanup") or []),
+    })
+rows.sort(key=lambda x: (x["name"], x["id"]))
+known = set(x["id"] for x in rows)
+for pid in sorted(peers, key=lambda k: peers[k]["host"]):
+    if pid in known: continue
+    p = peers[pid]
+    rows.append({
+        "name": p["host"], "id": pid, "host": p["host"], "dnsname": p["dnsname"] or None, "user": None,
+        "os": None, "arch": None, "container": False, "profile": None, "ephemeral": False,
+        "online": p["online"], "reachable": None, "state": "unknown", "provisioning": False,
+        "synced": None, "provisioned": None, "provisioned_age": None,
+        "desired": {"code": None, "config": None, "digest": None},
+        "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
+        "tools": {}, "memory": None, "proxy": None, "fleet": None, "missing_since": "", "cleanup_pending": [],
+    })
+
+if mode == "json":
+    print(json.dumps(rows, indent=2, sort_keys=True))
+    sys.exit(0)
+
+def dash(v): return "-" if v in (None, "") else str(v)
+head = ["NAME", "HOST", "ONLINE", "STATE", "SYNCED", "LAST PROVISION", "TOOLS", "MEMORY", "PROXY", "FLEET"]
+table = []
+for x in rows:
+    if x["state"] == "revoked":
+        tools = "cleanup-pending" if x["cleanup_pending"] else "-"
+    elif x["state"] == "unknown" or not x["online"] or x["reachable"] is None:
+        tools = "-"
+    elif x["reachable"] is False:
+        tools = "unreachable"
+    else:
+        tools = tools_summary(x["tools"])
+    table.append([x["name"], dash(x["host"]), "yes" if x["online"] else "no", x["state"], dash(x["synced"]),
+                  dash(x["provisioned_age"]), tools, dash(x["memory"]), dash(x["proxy"]), dash(x["fleet"])])
+widths = [len(h) for h in head]
+for row in table:
+    for i, c in enumerate(row):
+        if i < len(row) - 1: widths[i] = max(widths[i], len(c))
+def fmt(row): return "  ".join(c.ljust(widths[i]) if i < len(row) - 1 else c for i, c in enumerate(row)).rstrip()
+print(fmt(head))
+for row in table: print(fmt(row))
+PY
+}
+
+# fleet list [--json] [--offline] — every node on one line: registry + tailnet
+# peers + (unless --offline) each online node's `fleet status --json`, fetched
+# in parallel and capped. Exit 0 whatever the nodes do; a node that did not
+# answer shows `unreachable`, a tagged peer the master never enrolled `unknown`.
+cmd_list() {
+  local json=0 offline=0 tmpd peers id p
+  while [ $# -gt 0 ]; do
+    case "$1" in --json) json=1 ;; --offline) offline=1 ;; *) die "usage: fleet list [--json] [--offline]" ;; esac; shift
+  done
+  vault_require
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/fleet-list.XXXXXX"); chmod 0700 "$tmpd"
+  # shellcheck disable=SC2064  # expand now: the dir name is fixed
+  trap "rm -rf '$tmpd'" EXIT
+  peers=$(ts_peers)
+  printf '%s\n' "$peers" >"$tmpd/peers"
+  : >"$tmpd/provisioning"
+  for id in $(registry_ids); do node_provisioning "$id" && echo "$id" >>"$tmpd/provisioning"; done
+  # the desired digest per profile; only when the vault has its key (list never writes the vault)
+  : >"$tmpd/digests"
+  if [ -f "$FLEET_VAULT/digest.key" ]; then
+    for p in minimal full; do printf '%s\t%s\n' "$p" "$(desired_digest "$p")" >>"$tmpd/digests"; done
+  fi
+  if [ "$offline" = 0 ]; then
+    mkdir -p "$tmpd/status"
+    list_collect_status "$tmpd/status" "$peers"
+  fi
+  list_render "$([ "$json" = 1 ] && echo json || echo table)" "$FLEET_VAULT/nodes" "$tmpd/peers" \
+    "$([ "$offline" = 0 ] && echo "$tmpd/status")" "$tmpd/digests" "$tmpd/provisioning" \
+    "$(code_rev)" "$(config_rev)" "$(now_epoch)" "$offline"
 }
 
 # ---------- provision ----------

@@ -34,7 +34,8 @@ Master:
   files add PATH [--profile P]      mirror a file under $HOME (e.g. a .env) to nodes
   proxy import [DIR]                copy CLIProxyAPI config + logins into the vault (default ~/cli-proxy-api)
   invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]   print a one-line join command
-  nodes [--live]                    list registered nodes (--live: ask each node for its status)
+  list [--json] [--offline]         fleet overview: online, state, synced, tools, memory, proxy per node (start here)
+  nodes [--live]                    compact registry table (--live: ask each node for its tool states)
   ssh NODE [COMMAND...]             shell on NODE, or run COMMAND there (e.g. fleet ssh mac2 fleet status)
   provision NODE [--refresh-proxy-auth]   push secrets + files (+ code/config once), run apply on NODE
   reconcile                         enrol new nodes, provision every online node that is behind
@@ -58,6 +59,7 @@ Node:
   daemon                            foreground scheduler (containers)
 
 Global: --version, --help; every command accepts -h/--help and then does nothing else.
+`fleeter` is the same command under its project name (~/.local/bin/fleeter).
 EOF
 }
 
@@ -71,6 +73,7 @@ usage_for() {
     files|"files add")  echo "fleet files add PATH [--profile minimal|full]" ;;
     proxy|"proxy import") echo "fleet proxy import [DIR]" ;;
     invite)             echo "fleet invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]" ;;
+    list)               echo "fleet list [--json] [--offline]" ;;
     nodes)              echo "fleet nodes [--live]" ;;
     ssh)                echo "fleet ssh NODE [COMMAND...]" ;;
     provision)          echo "fleet provision NODE [--refresh-proxy-auth]" ;;
@@ -194,6 +197,7 @@ case "$cmd" in
   "proxy import")    arg_check "$cmd" 1 "" "$@"; cmd_proxy_import "$@" ;;
   invite)            arg_check "$cmd" 0 "--ephemeral --profile: --name: --user: --code-only" "$@"; cmd_invite "$@" ;;
   ssh)               cmd_ssh "$@" ;;
+  list)              arg_check "$cmd" 0 "--json --offline" "$@"; cmd_list "$@" ;;
   nodes)             arg_check "$cmd" 0 "--live" "$@"; cmd_nodes "$@" ;;
   provision)         arg_check "$cmd" 1 "--refresh-proxy-auth" "$@"; cmd_provision "$@" ;;
   reconcile)         arg_check "$cmd" 0 "" "$@"; cmd_reconcile "$@" ;;

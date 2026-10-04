@@ -158,10 +158,10 @@ EOF
 write_status ""
 
 # fake node homes
-mk_node() {  # mk_node DNSNAME NONCE
+mk_node() {  # mk_node DNSNAME NONCE [OS] [CONTAINER]
   local nh="$NODES/$1"
   mkdir -p "$nh/.config/fleet" "$nh/.ssh"
-  printf '{"nonce":"%s","name":"%s","user":"fleetuser","os":"linux","arch":"amd64","container":true,"joined":"2026-10-03T09:00:00Z"}' "$2" "${1%%.*}" >"$nh/.config/fleet/enrol.json"
+  printf '{"nonce":"%s","name":"%s","user":"fleetuser","os":"%s","arch":"amd64","container":%s,"joined":"2026-10-03T09:00:00Z"}' "$2" "${1%%.*}" "${3:-linux}" "${4:-true}" >"$nh/.config/fleet/enrol.json"
   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEcode$1 fleet_code" >"$nh/.ssh/fleet_code.pub"
   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEconfig$1 fleet_config" >"$nh/.ssh/fleet_config.pub"
   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEmemory$1 fleet_memory" >"$nh/.ssh/fleet_memory.pub"
@@ -284,7 +284,7 @@ vault_snap() { (cd "$FLEET_VAULT" && find . -type f | LC_ALL=C sort | while IFS=
 export -f vault_snap
 snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
 HELP_OK=1; HELP_BAD=""
-for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" \
+for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" "reboot alpha" "unlock alpha" \
          "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" "skill add $HOME/x" "skill list" "skill remove x" "schedule install" doctor join apply pull update "memory sync" login status leave daemon \
          "vault status" "vault encrypt" "vault rotate-key" "vault export $T/never.age" \
          init secrets files proxy t3 config policy memory skill schedule vault; do
@@ -301,6 +301,7 @@ BAD_OK=1; BAD_BAD=""
 for c in "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
          "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "list --bogus" "list extra" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
          "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" \
+         "reboot --bogus alpha" "reboot a b" "unlock --bogus alpha" "unlock --host" "unlock a b" \
          "sync --bogus" "sync extra" "skill frob" "skill install --bogus" "skill add --bogus x" "skill add a b" "skill add --name" "skill list --bogus" "skill list extra" \
          "skill remove --bogus x" "skill remove a b" "schedule frob" "schedule install extra" \
          "vault frob" "vault status --bogus" "vault status extra" "vault encrypt --bogus" "vault rotate-key extra" "vault export a b" nosuch; do
@@ -1605,6 +1606,176 @@ grep -v '^FLEET_SYNC_PUBLISH_SKILLS=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T
 assert "skill list after the auto-publish: autopub config yes, offskill local-only no" bash -c "o=\$(bash '$FLEET' skill list); printf '%s\n' \"\$o\" | grep -Eq '^autopub +config +yes ' && printf '%s\n' \"\$o\" | grep -Eq '^offskill +local-only +no '"
 rm -rf "$HOME/.claude/skills/autopub" "$HOME/.claude/skills/offskill" "$HOME/.claude/skills/synced" "$HOME/.claude/skills/other-two"
 rm -f "$FLEET_VAULT/nodes/nSKILLCNTRL.json"; rm -rf "$NODES/fleet-skillnode.tail1.ts.net"; write_status ""
+echo '[{"nodeId":"nAAAACNTRL"}]' >"$DEVICES_JSON"
+
+# ======================================================================
+echo "== reboot / unlock: authrestart vs shutdown vs systemctl, confirmation, LAN addresses in the registry, pre-boot ssh options, no password anywhere"
+# two fresh nodes: a Mac (FileVault) and a bare-metal Linux box
+bash "$FLEET" invite --name macnode >/dev/null 2>&1
+mac_pending=$(grep -l '"name": "macnode"' "$FLEET_VAULT"/nodes/pending/*.json)
+mk_node fleet-macnode.tail1.ts.net "$(jget "$mac_pending" nonce)" macos false
+bash "$FLEET" invite --name pengu >/dev/null 2>&1
+pg_pending=$(grep -l '"name": "pengu"' "$FLEET_VAULT"/nodes/pending/*.json)
+mk_node fleet-pengu.tail1.ts.net "$(jget "$pg_pending" nonce)" linux false
+MAC_PEER=',"k13":{"ID":"nMACCNTRL","HostName":"fleet-macnode","DNSName":"fleet-macnode.tail1.ts.net.","TailscaleIPs":["100.64.0.50"],"Online":true,"Tags":["tag:fleet-node"]}'
+MAC_PEER_OFF=',"k13":{"ID":"nMACCNTRL","HostName":"fleet-macnode","DNSName":"fleet-macnode.tail1.ts.net.","TailscaleIPs":["100.64.0.50"],"Online":false,"Tags":["tag:fleet-node"]}'
+PG_PEER=',"k14":{"ID":"nPENGUCNTRL","HostName":"fleet-pengu","DNSName":"fleet-pengu.tail1.ts.net.","TailscaleIPs":["100.64.0.51"],"Online":true,"Tags":["tag:fleet-node"]}'
+write_status "$MAC_PEER$PG_PEER"
+echo '[{"nodeId":"nAAAACNTRL"},{"nodeId":"nMACCNTRL"},{"nodeId":"nPENGUCNTRL"}]' >"$DEVICES_JSON"
+# the Mac's status.json (what apply writes) carries its LAN addresses: provision records them
+MACNH="$NODES/fleet-macnode.tail1.ts.net"
+printf '{"fleet":"0.4.0","name":"macnode","os":"macos","container":false,"tools":{},"memory":{"state":"off"},"timers":{},"awake":"on","awake_lid":"off","lan_ips":["192.168.1.50","10.0.0.5"],"ethernet":"yes","token_age_days":{}}\n' >"$MACNH/.config/fleet/status.json"
+bash "$FLEET" reconcile >/dev/null 2>&1
+assert "macnode and pengu enrolled + provisioned (os/container from enrol.json)" bash -c "[ \"\$(jget '$FLEET_VAULT/nodes/nMACCNTRL.json' state)\" = provisioned ] && [ \"\$(jget '$FLEET_VAULT/nodes/nMACCNTRL.json' os)\" = macos ] && [ \"\$(jget '$FLEET_VAULT/nodes/nMACCNTRL.json' container)\" = false ] && [ \"\$(jget '$FLEET_VAULT/nodes/nPENGUCNTRL.json' state)\" = provisioned ]"
+assert "provision recorded lan_ips + ethernet from the node's status.json" bash -c "[ \"\$(jget '$FLEET_VAULT/nodes/nMACCNTRL.json' lan_ips)\" = '[\"192.168.1.50\", \"10.0.0.5\"]' ] && [ \"\$(jget '$FLEET_VAULT/nodes/nMACCNTRL.json' ethernet)\" = yes ] && [ -n \"\$(jget '$FLEET_VAULT/nodes/nMACCNTRL.json' lan_seen)\" ]"
+refute "a node whose status has no lan_ips (alpha) gets none" bash -c "grep -q lan_ips '$FLEET_VAULT/nodes/nAAAACNTRL.json'"
+# fakes for the restart path, used only here (prepended to PATH, inherited by the fake ssh's bash -c):
+#   sudo logs and runs; fdesetup answers from flag files; shutdown/systemctl log; nc answers from a flag;
+#   ssh records its full argv (the options matter) and the environment, then defers to the usual fake
+RB="$T/rebootbin"; mkdir -p "$RB"
+export REBOOT_LOG="$T/reboot.log" SSH_ARGV="$T/ssh-argv.log" SSH_ENV="$T/ssh-env.log"
+cat >"$RB/sudo" <<'EOF'
+#!/usr/bin/env bash
+echo "sudo $*" >>"$REBOOT_LOG"
+exec "$@"
+EOF
+cat >"$RB/fdesetup" <<'EOF'
+#!/usr/bin/env bash
+echo "fdesetup $*" >>"$REBOOT_LOG"
+case "$1" in
+  status) if [ -f "$T/fv-off" ]; then echo "FileVault is Off."; else echo "FileVault is On."; fi ;;
+  supportsauthrestart) if [ -f "$T/no-authrestart" ]; then echo false; else echo true; fi ;;
+  authrestart) [ -f "$T/authrestart-fail" ] && exit 1 ;;
+esac
+exit 0
+EOF
+# shellcheck disable=SC2016  # the fakes expand $* and $T themselves
+printf '#!/usr/bin/env bash\necho "shutdown $*" >>"$REBOOT_LOG"\n' >"$RB/shutdown"
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\necho "systemctl $*" >>"$REBOOT_LOG"\n' >"$RB/systemctl"
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\necho "nc $*" >>"$REBOOT_LOG"\n[ -f "$T/nc-closed" ] && exit 1\nexit 0\n' >"$RB/nc"
+cat >"$RB/ssh" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >>"\$SSH_ARGV"
+env >>"\$SSH_ENV"
+# \$T/ssh-down: the node does not answer the \`true\` probe (down after the restart)
+if [ -f "\$T/ssh-down" ]; then case "\${!#}" in true) exit 255 ;; esac; fi
+exec "$T/bin/ssh" "\$@"
+EOF
+chmod +x "$RB"/*
+# rb ARGS... — fleet with the fakes, no grace period, 1 s polls; the wait budget
+# (RB_WAIT, default 5 s) goes through the local fleet.conf: config keys beat the environment
+rb() {
+  grep -v '^FLEET_REBOOT_WAIT_SECS=\|^FLEET_UNLOCK_WAIT_SECS=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+  printf 'FLEET_REBOOT_WAIT_SECS=%s\nFLEET_UNLOCK_WAIT_SECS=%s\n' "${RB_WAIT:-5}" "${RB_WAIT:-5}" >>"$FLEET_HOME/fleet.conf"
+  PATH="$RB:$PATH" FLEET_REBOOT_GRACE_SECS=0 FLEET_WAIT_POLL_SECS=1 bash "$FLEET" "$@"
+}
+printf '{"fleet":"0.4.0","name":"macnode","os":"macos","container":false,"tools":{},"memory":{"state":"off"},"timers":{},"awake":"on","awake_lid":"off","lan_ips":["192.168.1.60"],"ethernet":"no","token_age_days":{}}\n' >"$T/status-reply.json"
+: >"$REBOOT_LOG"; : >"$SSH_ARGV"; : >"$SSH_ENV"
+out=$(rb reboot macnode --yes </dev/null 2>&1); rc=$?
+assert "reboot --yes on a FileVault Mac with authrestart: exit 0, says back online" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -Eq 'macnode back online after [0-9]+s'" "$out"
+assert "it asked fdesetup status and supportsauthrestart, then ran exactly sudo fdesetup authrestart -delayminutes 0" bash -c "grep -qx 'fdesetup status' '$REBOOT_LOG' && grep -qx 'fdesetup supportsauthrestart' '$REBOOT_LOG' && grep -qx 'sudo fdesetup authrestart -delayminutes 0' '$REBOOT_LOG' && ! grep -q shutdown '$REBOOT_LOG'"
+assert "the restart ran over an interactive fleet session (-t, master key, pinned known_hosts, no BatchMode)" bash -c "grep -E -- '-t .*-i $FLEET_VAULT/ssh/fleet_master .*UserKnownHostsFile=$FLEET_VAULT/ssh/known_hosts .*fleetuser@fleet-macnode.tail1.ts.net sudo fdesetup authrestart -delayminutes 0' '$SSH_ARGV' | grep -vq BatchMode"
+refute "no -inputplist, no password, nothing on stdin for fdesetup" grep -Eiq 'inputplist|password' "$SSH_ARGV"
+assert "reboot refreshed lan_ips from the node's live status first (Wi-Fi only this time)" bash -c "[ \"\$(jget '$FLEET_VAULT/nodes/nMACCNTRL.json' lan_ips)\" = '[\"192.168.1.60\"]' ] && [ \"\$(jget '$FLEET_VAULT/nodes/nMACCNTRL.json' ethernet)\" = no ]"
+assert "audit: reboot macnode authrestart, then online" bash -c "grep -q ' reboot macnode authrestart' '$FLEET_VAULT/audit.log' && grep -Eq ' reboot macnode online [0-9]+s' '$FLEET_VAULT/audit.log'"
+# FileVault on, authrestart unsupported: plain shutdown; the prompt warns about the pre-boot prompt; typed name confirms
+touch "$T/no-authrestart"; : >"$REBOOT_LOG"
+out=$(printf 'macnode\n' | rb reboot macnode 2>&1); rc=$?
+assert "no authrestart support: typed confirmation, sudo shutdown -r now, warns it will wait at the prompt (fleet unlock)" bash -c "[ $rc = 0 ] && grep -qx 'sudo shutdown -r now' '$REBOOT_LOG' && ! grep -q 'fdesetup authrestart' '$REBOOT_LOG' && printf '%s' \"\$0\" | grep -q 'Type the node name to confirm' && printf '%s' \"\$0\" | grep -q 'fleet unlock macnode'" "$out"
+rm -f "$T/no-authrestart"
+# FileVault off: shutdown as well, no supportsauthrestart question
+touch "$T/fv-off"; : >"$REBOOT_LOG"
+out=$(rb reboot macnode --yes </dev/null 2>&1); rc=$?
+assert "FileVault off: sudo shutdown -r now, supportsauthrestart not asked" bash -c "[ $rc = 0 ] && grep -qx 'sudo shutdown -r now' '$REBOOT_LOG' && ! grep -q supportsauthrestart '$REBOOT_LOG' && grep -q ' reboot macnode shutdown' '$FLEET_VAULT/audit.log'"
+rm -f "$T/fv-off"
+# Linux: systemctl reboot; a container is refused
+: >"$REBOOT_LOG"
+out=$(rb reboot pengu --yes </dev/null 2>&1); rc=$?
+assert "Linux: sudo systemctl reboot, no fdesetup" bash -c "[ $rc = 0 ] && grep -qx 'sudo systemctl reboot' '$REBOOT_LOG' && ! grep -q fdesetup '$REBOOT_LOG' && grep -q ' reboot pengu systemctl' '$FLEET_VAULT/audit.log'"
+: >"$REBOOT_LOG"
+refute "a container node is refused" rb reboot alpha --yes
+refute "...and nothing ran on it" [ -s "$REBOOT_LOG" ]
+# confirmation: a wrong word aborts before anything runs
+out=$(printf 'nope\n' | rb reboot macnode 2>&1); rc=$?
+assert "wrong confirmation: aborted, no sudo" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q aborted && ! grep -q sudo '$REBOOT_LOG'" "$out"
+refute "no stdin, no --yes: aborted" rb reboot macnode </dev/null
+# the restart command fails (wrong sudo/FileVault password): a clear error, no waiting
+touch "$T/authrestart-fail"; : >"$REBOOT_LOG"
+out=$(rb reboot macnode --yes </dev/null 2>&1); rc=$?
+assert "failed authrestart: exit 1, names the rerun, audited as fail" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'restart command failed on macnode' && printf '%s' \"\$0\" | grep -q 'rerun: fleet reboot macnode' && grep -q ' reboot macnode fail authrestart' '$FLEET_VAULT/audit.log'" "$out"
+rm -f "$T/authrestart-fail"
+# the node never answers ssh again after the restart (ssh-down): timeout points at fleet unlock
+write_status "$MAC_PEER_OFF$PG_PEER" "$T/status-macoff.json"
+touch "$T/ssh-down"; : >"$REBOOT_LOG"
+out=$(RB_WAIT=3 rb reboot macnode --yes </dev/null 2>&1); rc=$?
+rm -f "$T/ssh-down"
+assert "timeout on a FileVault Mac: exit 1, next step is fleet unlock macnode, audited" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'did not come back within 3s' && printf '%s' \"\$0\" | grep -q 'fleet unlock macnode' && grep -q ' reboot macnode timeout 3s' '$FLEET_VAULT/audit.log'" "$out"
+cp "$T/status-macoff.json" "$FLEET_TS_STATUS_JSON"; : >"$REBOOT_LOG"
+refute "offline node: reboot refuses" rb reboot macnode --yes </dev/null
+refute "...and nothing ran on it" [ -s "$REBOOT_LOG" ]
+# ---- unlock ----
+: >"$REBOOT_LOG"; : >"$SSH_ARGV"; : >"$SSH_ENV"
+out=$(rb unlock pengu 2>&1); rc=$?
+assert "unlock on a Linux node: explains it is not needed, exit 0, no ssh" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'nothing to unlock' && [ ! -s '$SSH_ARGV' ]" "$out"
+write_status "$MAC_PEER$PG_PEER"
+out=$(rb unlock macnode 2>&1); rc=$?
+assert "unlock while the Mac is online and answering: nothing to unlock, no pre-boot ssh" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'nothing to unlock' && ! grep -q PubkeyAuthentication '$SSH_ARGV'" "$out"
+# the Mac is at its pre-boot prompt: offline on the tailnet; the registry's first LAN address answers on 22
+cp "$T/status-macoff.json" "$FLEET_TS_STATUS_JSON"
+python3 - "$FLEET_VAULT/nodes/nMACCNTRL.json" <<'EOF'
+import json, sys
+f = sys.argv[1]; d = json.load(open(f)); d["lan_ips"] = ["192.168.1.50", "10.0.0.5"]; d["ethernet"] = "yes"
+json.dump(d, open(f, "w"))
+EOF
+: >"$REBOOT_LOG"; : >"$SSH_ARGV"; : >"$SSH_ENV"
+( sleep 2; write_status "$MAC_PEER$PG_PEER" ) &
+flip_pid=$!
+out=$(RB_WAIT=8 rb unlock macnode </dev/null 2>&1); rc=$?
+wait "$flip_pid"
+assert "unlock: reachability probed with nc -z -w 3 <ip> 22 on the registry's first LAN address" grep -qx 'nc -z -w 3 192.168.1.50 22' "$REBOOT_LOG"
+assert "unlock: plain password ssh to user@lan-ip with the pre-boot known_hosts, accept-new, keyboard-interactive/password only, PubkeyAuthentication=no, IdentitiesOnly, -t" bash -c "grep -qx -- '-t -o UserKnownHostsFile=$FLEET_VAULT/ssh/known_hosts_preboot -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=keyboard-interactive,password -o PubkeyAuthentication=no -o IdentitiesOnly=yes -o ConnectTimeout=10 -o LogLevel=ERROR fleetuser@192.168.1.50' '$SSH_ARGV'"
+refute "unlock: the master key, the normal known_hosts and BatchMode are never used for the pre-boot session" bash -c "grep -- 'fleetuser@192.168.1.50' '$SSH_ARGV' | grep -Eq 'fleet_master|ssh/known_hosts |BatchMode'"
+refute "no password in any ssh argv or environment (nothing to pass: the user types it on the Mac's prompt)" bash -c "grep -Eiq 'password=|passwd|sshpass' '$SSH_ARGV' '$SSH_ENV'"
+assert "unlock: connection closed, node reappeared on the tailnet: exit 0, says unlocked, audited" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -Eq 'macnode unlocked and back online after [0-9]+s' && grep -q ' unlock macnode start host=192.168.1.50' '$FLEET_VAULT/audit.log' && grep -Eq ' unlock macnode ok host=192.168.1.50 [0-9]+s' '$FLEET_VAULT/audit.log'" "$out"
+# --host overrides the registry
+cp "$T/status-macoff.json" "$FLEET_TS_STATUS_JSON"
+: >"$REBOOT_LOG"; : >"$SSH_ARGV"
+( sleep 2; write_status "$MAC_PEER$PG_PEER" ) &
+flip_pid=$!
+out=$(RB_WAIT=8 rb unlock macnode --host 10.9.9.9 </dev/null 2>&1); rc=$?
+wait "$flip_pid"
+assert "--host IP: probed and dialled instead of the registry addresses" bash -c "[ $rc = 0 ] && grep -qx 'nc -z -w 3 10.9.9.9 22' '$REBOOT_LOG' && grep -q 'PubkeyAuthentication=no .*fleetuser@10.9.9.9$' '$SSH_ARGV' && ! grep -q '192.168.1.50' '$SSH_ARGV'"
+# unreachable: refused before any ssh, with the LAN explanation
+cp "$T/status-macoff.json" "$FLEET_TS_STATUS_JSON"
+touch "$T/nc-closed"; : >"$REBOOT_LOG"; : >"$SSH_ARGV"
+out=$(rb unlock macnode </dev/null 2>&1); rc=$?
+assert "no route to any LAN address: exit 1, every address probed, no ssh, explains same-LAN/Ethernet/--host" bash -c "[ $rc != 0 ] && grep -qx 'nc -z -w 3 192.168.1.50 22' '$REBOOT_LOG' && grep -qx 'nc -z -w 3 10.0.0.5 22' '$REBOOT_LOG' && ! grep -q PubkeyAuthentication '$SSH_ARGV' && printf '%s' \"\$0\" | grep -q 'none of 192.168.1.50 10.0.0.5 answers on port 22' && printf '%s' \"\$0\" | grep -q 'same LAN' && printf '%s' \"\$0\" | grep -q 'Ethernet' && printf '%s' \"\$0\" | grep -q -- '--host IP'" "$out"
+rm -f "$T/nc-closed"
+# Wi-Fi only in the registry: a warning, still tried
+python3 - "$FLEET_VAULT/nodes/nMACCNTRL.json" <<'EOF'
+import json, sys
+f = sys.argv[1]; d = json.load(open(f)); d["ethernet"] = "no"
+json.dump(d, open(f, "w"))
+EOF
+: >"$SSH_ARGV"
+out=$(RB_WAIT=1 rb unlock macnode </dev/null 2>&1); rc=$?
+assert "Wi-Fi only: warned, pre-boot ssh still attempted; the node stays away: exit 1 with the checklist (network, Ethernet, macOS 26 / Apple silicon, Remote Login, account), audited timeout" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'Wi-Fi only' && grep -q 'fleetuser@192.168.1.50' '$SSH_ARGV' && printf '%s' \"\$0\" | grep -q 'not back on the tailnet after 1s' && printf '%s' \"\$0\" | grep -q 'Ethernet rather than Wi-Fi' && printf '%s' \"\$0\" | grep -q 'macOS 26' && printf '%s' \"\$0\" | grep -q 'Remote Login' && grep -q ' unlock macnode timeout host=192.168.1.50' '$FLEET_VAULT/audit.log'" "$out"
+# no LAN address recorded and no --host: refused with the hint
+python3 - "$FLEET_VAULT/nodes/nMACCNTRL.json" <<'EOF'
+import json, sys
+f = sys.argv[1]; d = json.load(open(f)); d.pop("lan_ips", None)
+json.dump(d, open(f, "w"))
+EOF
+: >"$SSH_ARGV"
+out=$(rb unlock macnode </dev/null 2>&1); rc=$?
+assert "no lan_ips recorded: exit 1, points at --host / provision / reboot, no ssh" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'no LAN address recorded for macnode' && printf '%s' \"\$0\" | grep -q -- '--host IP' && [ ! -s '$SSH_ARGV' ]" "$out"
+refute "unlock of a revoked / unknown node dies" rb unlock nosuchnode
+grep -v '^FLEET_REBOOT_WAIT_SECS=\|^FLEET_UNLOCK_WAIT_SECS=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+write_status ""
+rm -f "$FLEET_VAULT/nodes/nMACCNTRL.json" "$FLEET_VAULT/nodes/nPENGUCNTRL.json" "$T/status-reply.json" "$T/status-macoff.json"
+rm -rf "$NODES/fleet-macnode.tail1.ts.net" "$NODES/fleet-pengu.tail1.ts.net"
 echo '[{"nodeId":"nAAAACNTRL"}]' >"$DEVICES_JSON"
 
 # ======================================================================

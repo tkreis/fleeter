@@ -1229,9 +1229,10 @@ cmd_invite() {
 d={"v":1,"ts_auth_key":sys.stdin.read(),"nonce":sys.argv[1],"name":sys.argv[2],
    "master_pubkey":sys.argv[3],"master_user":sys.argv[4],"tag":sys.argv[5],
    "hostname_prefix":sys.argv[6],"tools":" ".join(sys.argv[7].split()),
-   "keep_awake":"0" if sys.argv[8].strip()=="0" else "1"}
+   "keep_awake":"0" if sys.argv[8].strip()=="0" else "1",
+   "keep_awake_lid":"1" if sys.argv[9].strip()=="1" else "0"}
 print(base64.b64encode(json.dumps(d,separators=(",",":")).encode()).decode())' \
-    "$nonce" "$name" "$pub" "$user" "$FLEET_NODE_TAG" "$FLEET_HOSTNAME_PREFIX" "${FLEET_TOOLS:-}" "${FLEET_KEEP_AWAKE:-1}")
+    "$nonce" "$name" "$pub" "$user" "$FLEET_NODE_TAG" "$FLEET_HOSTNAME_PREFIX" "${FLEET_TOOLS:-}" "${FLEET_KEEP_AWAKE:-1}" "${FLEET_KEEP_AWAKE_LID:-0}")
   key=""
 
   audit "invite" "$name" "ok profile=$profile ephemeral=$ephemeral"
@@ -1561,7 +1562,7 @@ ship_tree() {
 # worker (see provision_locked); rechecks the registry before every step so a
 # concurrent kick stops it before anything else is shipped.
 provision_node() {
-  local id=$1 name profile digest fdir names files applied_cc want_cc payload
+  local id=$1 name profile digest fdir names files applied_cc want_cc payload lan_tmp
   name=$(registry_get "$id" name); profile=$(registry_get "$id" profile)
   digest=$(desired_digest "$profile")
   # the vault key must be readable before anything is shipped (a locked login
@@ -1646,6 +1647,10 @@ provision_node() {
   files=$(files_list "$profile" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
   registry_set "$id" state provisioned provisioned "$(now_iso)" provisioned_digest "$digest" \
     applied_commit "$applied_cc" secrets_sent "json:$names" files_sent "json:$files"
+  # the node's LAN addresses (status.json, just written by apply): what `fleet unlock` dials
+  lan_tmp=$(mktemp "${TMPDIR:-/tmp}/fleet-lan.XXXXXX")
+  node_ssh "$id" 'cat ~/.config/fleet/status.json 2>/dev/null' </dev/null >"$lan_tmp" 2>/dev/null || true
+  registry_record_lan "$id" "$lan_tmp"; rm -f "$lan_tmp"
   if [ -n "$applied_cc" ] && [ "$applied_cc" != "$want_cc" ]; then
     warn "$name applied revs $applied_cc; this checkout is at $want_cc (unpushed commits? nodes only pull what is pushed)"
     audit provision "$name" "ok revs-differ"
@@ -2195,6 +2200,224 @@ cmd_kick() {
     printf 'No secrets were sent to %s.\n' "$name"
   fi
   audit kick "$name" "done$results"
+}
+
+# ---------- reboot / unlock: nodes that stay online ----------
+#
+# Facts these two commands rest on (verified on macOS 26.6, 2026-10-04):
+#   fdesetup(8): "On supported hardware, fdesetup allows restart of a
+#     FileVault-enabled system without requiring unlock during the subsequent
+#     boot using the authrestart command. [...] fdesetup must be run as root
+#     and itself prompts for a password to unlock the FileVault root volume."
+#     "authrestart [-inputplist] [-delayminutes N]: [...] A value of 0
+#     represents 'immediately'". "supportsauthrestart: Returns the string
+#     'true' if the system supports the authenticated restart option."
+#     "Once authrestart is authenticated, it launches shutdown(8) and, upon
+#     successful unlock, the unlock key will be removed." fleet never uses
+#     -inputplist (a password on stdin): the user types it at fdesetup's own
+#     prompt on the node's TTY.
+#   apple_ssh_and_filevault(7), macOS 26: "When FileVault is enabled, the data
+#     volume is locked [...] until an account has been authenticated using a
+#     password. [...] the usually configured authentication methods and shell
+#     access are not available during this time. However, when Remote Login
+#     is enabled, it is possible to perform password authentication using SSH
+#     even in this situation. This can be used to unlock the data volume
+#     remotely over the network. [...] once the data volume has been unlocked
+#     using this method, macOS will disconnect SSH briefly while it completes
+#     mounting the data volume [...]. HISTORY: The capability to unlock the
+#     data volume over SSH appeared in macOS 26 Tahoe." Observed: the prompt
+#     reads "This system is locked. To unlock it, use a local account name and
+#     password."; the connection closes after the password; ssh then works
+#     normally. The node's key-only sshd drop-in lives on the locked data
+#     volume, so it does not apply before the unlock: pre-boot is password
+#     only. Tailscale is not running before the unlock, so the master has to
+#     reach the node over the LAN (jeffgeerling.com, 2025: Ethernet reliable,
+#     Wi-Fi only from 26.5 on, if at all).
+
+# ssh_tty_to USER HOST CMD — interactive ssh (TTY, no BatchMode) with the
+# master key and the pinned host key, for a remote command that prompts (sudo,
+# fdesetup). stdin is the user's terminal.
+ssh_tty_to() {
+  local user=$1 host=$2; shift 2
+  ssh -t -i "$(master_key)" -o "StrictHostKeyChecking=$(ssh_strict_mode "$host")" \
+      -o "UserKnownHostsFile=$(known_hosts_file)" -o HashKnownHosts=no -o HostKeyAlgorithms=ssh-ed25519 \
+      -o ConnectTimeout=10 -o LogLevel=ERROR "$user@$host" "$@"
+}
+
+# known_hosts_preboot_file — the pre-boot sshd of a FileVault Mac may present a
+# different host key than the booted system (it runs before the data volume
+# with /etc/ssh is mounted), so `fleet unlock` pins it in its own file and
+# never lets it near the normal pins.
+known_hosts_preboot_file() { echo "$FLEET_VAULT/ssh/known_hosts_preboot"; }
+
+# registry_record_lan ID STATUS_FILE — copy `lan_ips` and `ethernet` from a
+# node's status JSON into the registry: the addresses `fleet unlock` dials.
+registry_record_lan() {
+  local id=$1 f=$2 ips eth
+  [ -s "$f" ] || return 0
+  ips=$(python3 -c 'import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get("lan_ips")
+    print(json.dumps([str(x) for x in v]) if isinstance(v, list) else "")
+except Exception:
+    print("")' "$f" 2>/dev/null)
+  [ -n "$ips" ] || return 0
+  eth=$(json_get "$f" ethernet)
+  registry_set "$id" lan_ips "json:$ips" ethernet "${eth:-no}" lan_seen "$(now_iso)"
+}
+
+# node_wait_online ID SECS — poll (FLEET_WAIT_POLL_SECS, default 5) until the
+# peer is online on the tailnet and `ssh NODE true` answers; prints the
+# seconds it took. Returns 1 after SECS.
+node_wait_online() {
+  local id=$1 secs=$2 every=${FLEET_WAIT_POLL_SECS:-5} t0 t
+  t0=$(date +%s)
+  while :; do
+    t=$(( $(date +%s) - t0 ))
+    if peer_online "$(ts_peers)" "$id" && with_timeout 15 node_ssh "$id" true >/dev/null 2>&1; then echo "$t"; return 0; fi
+    [ "$t" -lt "$secs" ] || return 1
+    sleep "$every"
+  done
+}
+
+# node_filevault_on ID — true when the node reports "FileVault is On".
+node_filevault_on() {
+  node_ssh "$1" 'fdesetup status 2>/dev/null' </dev/null 2>/dev/null | grep -q 'FileVault is On'
+}
+
+# fleet reboot NODE [--yes] — a planned restart after which the node is back
+# without anyone at its keyboard. macOS with FileVault on and `fdesetup
+# supportsauthrestart` true: `sudo fdesetup authrestart -delayminutes 0` on
+# the node's TTY; the user types the sudo password and then the FileVault
+# password of their account at fdesetup's own prompt (nothing in argv, nothing
+# stored, nothing passes through fleet). Otherwise `sudo shutdown -r now`;
+# Linux: `sudo systemctl reboot`. Then waits (FLEET_REBOOT_WAIT_SECS, 600)
+# for the peer to be online and answering ssh.
+cmd_reboot() {
+  local yes=0 q="" id name os how cmd rc=0 t tmp fv=0 sar="" secs=${FLEET_REBOOT_WAIT_SECS:-600} grace=${FLEET_REBOOT_GRACE_SECS:-20}
+  while [ $# -gt 0 ]; do
+    case "$1" in --yes|-y) yes=1 ;; -*) die "unknown flag: $1" ;; *) q=$1 ;; esac; shift
+  done
+  [ -n "$q" ] || die "usage: fleet reboot NODE [--yes]"
+  vault_require
+  id=$(registry_find "$q"); name=$(registry_get "$id" name); os=$(registry_get "$id" os)
+  node_revoked "$id" && die "node $name is revoked"
+  [ "$(registry_get "$id" container)" != true ] || die "$name is a container; restart it with docker instead"
+  peer_online "$(ts_peers)" "$id" || die "$name is not online on the tailnet" "fleet list"
+  # fresh LAN addresses for a later `fleet unlock`, while the node can still tell us
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fleet-reboot.XXXXXX")
+  # shellcheck disable=SC2088  # the ~ is expanded by the node's shell
+  with_timeout 30 node_ssh "$id" '~/.local/bin/fleet status --json' >"$tmp" 2>/dev/null || true
+  registry_record_lan "$id" "$tmp"; rm -f "$tmp"
+  case "$os" in
+    macos)
+      if node_filevault_on "$id"; then
+        fv=1
+        sar=$(node_ssh "$id" 'fdesetup supportsauthrestart 2>/dev/null' </dev/null 2>/dev/null || true)
+      fi
+      if [ "$fv" = 1 ] && [ "$sar" = true ]; then how=authrestart; cmd='sudo fdesetup authrestart -delayminutes 0'
+      else how=shutdown; cmd='sudo shutdown -r now'; fi ;;
+    linux) how=systemctl; cmd='sudo systemctl reboot' ;;
+    *) die "cannot restart $name: unsupported os '$os'" ;;
+  esac
+  if [ "$yes" != 1 ]; then
+    case "$how" in
+      authrestart)
+        printf 'Restart %s (%s): FileVault is on and authenticated restart is supported, so it comes back without the pre-boot prompt.\nOn the node you will type your sudo password, then the FileVault password of your account (fdesetup asks; fleet never sees it).\n' "$name" "$id" >&2 ;;
+      shutdown)
+        printf 'Restart %s (%s): sudo shutdown -r now (you type your sudo password on the node).\n' "$name" "$id" >&2
+        [ "$fv" = 1 ] && printf 'FileVault is on but this Mac does not support authenticated restart: it will wait at the pre-boot prompt. Then: fleet unlock %s\n' "$name" >&2 ;;
+      systemctl)
+        printf 'Restart %s (%s): sudo systemctl reboot (you type your sudo password on the node).\n' "$name" "$id" >&2 ;;
+    esac
+    typed_confirm 'Type the node name to confirm: ' "$name" || die "aborted"
+  fi
+  log "$name: $cmd"
+  ssh_tty_to "$(registry_get "$id" user)" "$(registry_get "$id" dnsname)" "$cmd" || rc=$?
+  # 255 = the connection dropped, which a restart does; anything else is the command failing
+  if [ "$rc" != 0 ] && [ "$rc" != 255 ]; then
+    audit reboot "$name" "fail $how rc=$rc"
+    die "the restart command failed on $name (exit $rc; wrong password?)" "rerun: fleet reboot $name"
+  fi
+  audit reboot "$name" "$how"
+  log "waiting for $name to come back (up to ${secs}s)"
+  sleep "$grace"
+  if t=$(node_wait_online "$id" "$secs"); then
+    t=$((t + grace))
+    ok "$name back online after ${t}s"
+    audit reboot "$name" "online ${t}s"
+    return 0
+  fi
+  audit reboot "$name" "timeout ${secs}s"
+  if [ "$fv" = 1 ]; then
+    die "$name did not come back within ${secs}s" "it is probably waiting at the FileVault pre-boot prompt: fleet unlock $name"
+  fi
+  die "$name did not come back within ${secs}s" "watch: fleet list; once it is back: fleet ssh $name true"
+}
+
+# fleet unlock NODE [--host IP] — a FileVault Mac that restarted (power cut,
+# an update, a plain restart) waits at its pre-boot prompt: no Tailscale, no
+# key auth, only a password over the LAN (apple_ssh_and_filevault(7), macOS
+# 26+). fleet opens a plain password ssh session to one of the LAN addresses
+# recorded in the registry (or --host) and gets out of the way: the user types
+# the account password at the Mac's own prompt, fleet never sees it. The
+# pre-boot host key is pinned in vault/ssh/known_hosts_preboot (TOFU, separate
+# from the normal pins). Success = the connection closes and the node is back
+# on the tailnet (FLEET_UNLOCK_WAIT_SECS, 300).
+cmd_unlock() {
+  local q="" host="" id name os user ip ips="" eth t rc=0 secs=${FLEET_UNLOCK_WAIT_SECS:-300} reach=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --host) [ $# -ge 2 ] || die "--host needs a value"; host=$2; shift ;;
+      -*) die "unknown flag: $1" ;;
+      *) q=$1 ;;
+    esac; shift
+  done
+  [ -n "$q" ] || die "usage: fleet unlock NODE [--host IP]"
+  vault_require
+  id=$(registry_find "$q"); name=$(registry_get "$id" name); os=$(registry_get "$id" os); user=$(registry_get "$id" user)
+  node_revoked "$id" && die "node $name is revoked"
+  if [ "$os" != macos ]; then
+    printf '%s runs %s: nothing to unlock. Only a FileVault Mac stops at a pre-boot password prompt after a restart; a Linux node boots straight to sshd and Tailscale.\n' "$name" "${os:-unknown}"
+    return 0
+  fi
+  if peer_online "$(ts_peers)" "$id" && with_timeout 15 node_ssh "$id" true >/dev/null 2>&1; then
+    ok "$name is online and answering ssh: nothing to unlock"
+    return 0
+  fi
+  if [ -n "$host" ]; then ips=$host
+  else
+    ips=$(json_list "$(registry_path "$id")" lan_ips | tr '\n' ' '); ips=${ips% }
+    [ -n "$ips" ] || die "no LAN address recorded for $name" "pass --host IP (the Mac's LAN address, e.g. from your router), or record them first: fleet provision $name / fleet reboot $name while it is up"
+    eth=$(registry_get "$id" ethernet)
+    [ "$eth" = yes ] || warn "$name was last seen on Wi-Fi only (no Ethernet address): the pre-boot prompt is often not reachable over Wi-Fi"
+  fi
+  # the pre-boot sshd listens on 22; a master on another network has no route
+  for ip in $ips; do
+    if have nc; then
+      if nc -z -w 3 "$ip" 22 >/dev/null 2>&1; then reach=$ip; break; fi
+    else
+      warn "nc not found: cannot check whether $ip:22 is reachable, trying anyway"; reach=$ip; break
+    fi
+  done
+  [ -n "$reach" ] || die "none of $ips answers on port 22 from here" "fleet unlock only works from the same LAN (or a VPN into it): Tailscale is not running on the node before the unlock. Is this master on the Mac's network? Is the Mac on Ethernet (Wi-Fi is often down in pre-boot)? Was it on and reachable before the restart? Try --host IP."
+  mkdir -p "$FLEET_VAULT/ssh"; chmod 0700 "$FLEET_VAULT/ssh"
+  log "$name: pre-boot unlock at $user@$reach; type the password of a local account at the Mac's prompt (fleet never sees it)"
+  log "the Mac closes the connection as soon as it accepts the password; that is expected"
+  audit unlock "$name" "start host=$reach"
+  # no key, no agent: password / keyboard-interactive only, separate TOFU pins
+  ssh -t -o "UserKnownHostsFile=$(known_hosts_preboot_file)" -o StrictHostKeyChecking=accept-new \
+      -o PreferredAuthentications=keyboard-interactive,password -o PubkeyAuthentication=no -o IdentitiesOnly=yes \
+      -o ConnectTimeout=10 -o LogLevel=ERROR "$user@$reach" || rc=$?
+  [ -f "$(known_hosts_preboot_file)" ] && chmod 0600 "$(known_hosts_preboot_file)"
+  log "waiting for $name on the tailnet (up to ${secs}s)"
+  if t=$(node_wait_online "$id" "$secs"); then
+    ok "$name unlocked and back online after ${t}s"
+    audit unlock "$name" "ok host=$reach ${t}s"
+    return 0
+  fi
+  audit unlock "$name" "timeout host=$reach ssh_rc=$rc"
+  die "$name is not back on the tailnet after ${secs}s (ssh exit $rc)" "check: same network as the Mac? Ethernet rather than Wi-Fi? macOS 26 or newer on Apple silicon? Remote Login was on before the restart? the right account password (a local account with a FileVault-enabled login)? Then: fleet unlock $name --host IP"
 }
 
 # ---------- config publish ----------

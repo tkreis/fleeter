@@ -1086,6 +1086,7 @@ cmd_sync() {
   fi
   [ -d "$FLEET_CONFIG_DIR" ] && sync_ff_repo config "$FLEET_CONFIG_DIR"
   fleet_load_config          # a config fast-forward may have changed fleet.conf
+  sync_publish_skills        # lib/skills.sh: local skills missing from the config repo -> commit + push
   reconcile_run || rc=$?
   sync_push_tools "$(ts_peers)"
   lock_release "$l" $$

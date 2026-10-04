@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.3.1 — 2026-10-04
+
+Skills become a first-class fleet object: one command puts a skill on every
+machine, and skills you install on the master follow on their own.
+
+### Added
+
+- `fleet skill add SOURCE [--name N] [--yes]`: SOURCE is a directory with a
+  `SKILL.md`, or a git URL (https/ssh) with optional `#subdir` and `@ref`,
+  cloned shallowly into a private temp dir. The skill is validated (frontmatter
+  `name` → directory name, `[a-z0-9][a-z0-9-]{0,63}`), secret-scanned before
+  anything is copied, put into `skills/N` of the config repo (an existing
+  different skill only with `--yes`; identical = no-op), installed into the
+  master's own skill dirs, committed (`add skill N` / `update skill N`), pushed,
+  and pushed to the online nodes (`reconcile`): `added N to your fleet config`,
+  `published (secret scan clean)`, `pushed to K nodes` (or `nodes pick it up on
+  their next pull`). `FLEET_SKILL_ADD_NO_SYNC=1` skips the node push.
+- `fleet skill list [--json]`: on the master NAME, SOURCE (`config` | `fleet` |
+  `local-only`), ON NODES? (`yes` | `not pushed` | `no`), DESCRIPTION
+  (truncated to the terminal); on a node what `fleet apply` installed.
+- `fleet skill remove N [--yes]`: out of the config repo (`remove skill N`,
+  pushed), out of the master's skill dirs, off the nodes on their next apply
+  (manifest cleanup) or right away through `reconcile`. Asks first.
+- `fleet sync` auto-publishes skills (`FLEET_SYNC_PUBLISH_SKILLS`, default 1):
+  skills installed in the master's `~/.claude/skills`, `~/.agents/skills`,
+  `~/.codex/skills`, `~/.cursor/skills` that the config repo lacks or has in
+  another version are copied in, secret-scanned (a hit skips that skill with a
+  warning), committed as `publish skills: a, b` and pushed, non-interactively.
+  `FLEET_SKILL_EXCLUDE`, the bundled `fleet` skill and vendor caches are left
+  alone; nothing is ever removed from the repo by sync; quiet when nothing
+  changed.
+- The `fleet` agent skill knows how to add, list and remove skills (remove
+  needs the user's confirmation).
+
+### Security
+
+- **The vault is encrypted at rest.** Every secret-bearing file
+  (`secrets/*.env`, mirrored files, the CLIProxyAPI logins, `tailscale.json`,
+  `github.json`) is an [age](https://age-encryption.org) ciphertext (`*.age`)
+  encrypted to `vault/recipient.txt`; the private key lives in the macOS login
+  keychain (`fleet-vault`), in `secret-tool` on Linux, or in
+  `~/.config/fleet/vault.key` (`FLEET_VAULT_KEY_BACKEND` = `keychain` |
+  `secret-tool` | `file`). The key reaches `age` only on a pipe (`-i -`):
+  never argv, never a file. `secrets set` decrypts into memory and
+  re-encrypts; `files add` / `proxy import` encrypt straight from the source;
+  provision decrypts into the ssh stream (the mirrored files as a tar built in
+  memory); `lib/api.py` reads the credentials through the same helper. New
+  commands: `fleet vault status`, `fleet vault encrypt` (migrates a plaintext
+  vault in place, verified round-trip, idempotent), `fleet vault rotate-key`,
+  `fleet vault export FILE` (decrypted tar inside an `age -p` archive).
+  `fleet init master` installs `age` if missing and creates the key; `fleet
+  doctor` warns about plaintext secrets or an unreachable key. A locked login
+  keychain makes scheduled sync/reconcile skip provisioning with a warning and
+  retry later. **Existing masters: run `fleet vault encrypt` once.**
+
 ## 0.3.0 — 2026-10-04
 
 The fleet becomes visible in one command, drivable by agents, and keeps itself
@@ -38,24 +93,6 @@ current from the master.
 - `fleet schedule install`: (re)installs the reconcile and sync timers,
   idempotently (files rewritten and reloaded only when their content changed).
   `fleet doctor` checks both.
-- **The vault is encrypted at rest.** Every secret-bearing file
-  (`secrets/*.env`, mirrored files, the CLIProxyAPI logins, `tailscale.json`,
-  `github.json`) is an [age](https://age-encryption.org) ciphertext (`*.age`)
-  encrypted to `vault/recipient.txt`; the private key lives in the macOS login
-  keychain (`fleet-vault`), in `secret-tool` on Linux, or in
-  `~/.config/fleet/vault.key` (`FLEET_VAULT_KEY_BACKEND` = `keychain` |
-  `secret-tool` | `file`). The key reaches `age` only on a pipe (`-i -`):
-  never argv, never a file. `secrets set` decrypts into memory and
-  re-encrypts; `files add` / `proxy import` encrypt straight from the source;
-  provision decrypts into the ssh stream (the mirrored files as a tar built in
-  memory); `lib/api.py` reads the credentials through the same helper. New
-  commands: `fleet vault status`, `fleet vault encrypt` (migrates a plaintext
-  vault in place, verified round-trip, idempotent), `fleet vault rotate-key`,
-  `fleet vault export FILE` (decrypted tar inside an `age -p` archive).
-  `fleet init master` installs `age` if missing and creates the key; `fleet
-  doctor` warns about plaintext secrets or an unreachable key. A locked login
-  keychain makes scheduled sync/reconcile skip provisioning with a warning and
-  retry later. **Existing masters: run `fleet vault encrypt` once.**
 - The desired-state digest is a sha256 over the ciphertexts (plus code and
   config revs) instead of an HMAC over the plaintext: `fleet list` and
   `reconcile` decide `behind` without the key, `digest.key` goes away with the

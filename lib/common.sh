@@ -6,7 +6,7 @@
 # Helpers declare their variables local: bash scoping is dynamic, so a plain
 # assignment here would overwrite a caller's local of the same name.
 
-export FLEET_VERSION="0.3.0"
+export FLEET_VERSION="0.3.1"
 
 : "${FLEET_HOME:=$HOME/.config/fleet}"          # node + master state
 : "${FLEET_VAULT:=$FLEET_HOME/vault}"           # master only

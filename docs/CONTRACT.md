@@ -337,9 +337,21 @@ One run, under `vault/locks/.sync`:
    alone. A fast-forward is logged and audited (`sync.ff <code|config>`); a
    code fast-forward re-executes `fleet sync` once from the new checkout
    (`FLEET_SYNC_REEXEC=1`, same PID, lock kept).
-2. `reconcile_run` (the body of `fleet reconcile`): enrol, provision every node
+2. `sync_publish_skills` (`lib/skills.sh`, `FLEET_SYNC_PUBLISH_SKILLS=1`):
+   every `<dir>/<name>/SKILL.md` under `~/.claude/skills`, `~/.agents/skills`,
+   `~/.codex/skills`, `~/.cursor/skills` (first source wins on a name
+   collision; `synced`, `.system`, hidden names, `fleet` and `FLEET_SKILL_EXCLUDE`
+   skipped; the name must match `[a-z0-9][a-z0-9-]{0,63}`) whose tree digest
+   differs from `$FLEET_CONFIG_DIR/skills/<name>` (or which is missing there)
+   is secret-scanned — a hit warns and skips that skill — then copied in
+   (without `.git`, `.DS_Store`, `node_modules`, `__pycache__`), staged,
+   committed as `publish skills: a, b` and pushed (`GIT_TERMINAL_PROMPT=0`,
+   BatchMode; a failed push warns and is retried by the next sync). Never
+   removes a skill from the repo; quiet when nothing changed; audited
+   `sync.skills`.
+3. `reconcile_run` (the body of `fleet reconcile`): enrol, provision every node
    whose desired digest changed, cleanups, absence tracking.
-3. Every `FLEET_PUSH_TOOLS_EVERY` minutes (0 = never), when at least one
+4. Every `FLEET_PUSH_TOOLS_EVERY` minutes (0 = never), when at least one
    provisioned node is online: `~/.local/bin/fleet update` on each of them in
    parallel, each under `with_timeout FLEET_SYNC_UPDATE_SECS` (900), one summary
    line, failures' output in `$FLEET_HOME/logs/update-<name>.log`, the run
@@ -347,6 +359,46 @@ One run, under `vault/locks/.sync`:
 
 Quiet when nothing happened. `fleet reconcile` takes the same lock for its run
 and skips with one line when it is held; `fleet sync` skips the same way.
+
+## `fleet skill` (master; `list` also on nodes) — `lib/skills.sh`
+
+A skill is `skills/<name>/` in the config repo with a `SKILL.md` whose YAML
+frontmatter has `name` (and usually `description`). Nodes get every such
+directory from `harness_apply` into `~/.claude/skills`, `~/.agents/skills` and
+`~/.cursor/skills` (recorded in `harness.manifest`); a directory that drops out
+of the repo is removed on the next apply by the manifest cleanup.
+
+- `fleet skill add SOURCE [--name N] [--yes]`: SOURCE is a local directory, or a
+  git URL `URL[#subdir][@ref]` (also `URL@ref`; the `@` of `git@host:` is not a
+  ref) cloned with `git clone --depth 1 [--branch REF]` into a 0700
+  `mktemp -d fleet-skill.XXXXXX` (a commit id falls back to a full clone +
+  checkout), removed on exit. Order: validate (`SKILL.md`, frontmatter, `name`
+  or `--name`, pattern `[a-z0-9][a-z0-9-]{0,63}`) → `harness_secret_scan` on the
+  source (a hit aborts before anything is copied) → refuse an existing
+  `skills/N` with a different tree digest unless `--yes` (identical: no-op,
+  exit 0) → copy → `git add` → confirm unless `--yes` (declined: working tree
+  restored, exit 1) → commit `add skill N` / `update skill N` → install into
+  this machine's `harness_skill_targets` dirs (`_harness_install_dir`, both
+  manifests) → push to `origin` (BatchMode) → `cmd_reconcile` unless
+  `FLEET_SKILL_ADD_NO_SYNC=1`. Output lines: `added N to your fleet config` (or
+  `updated …`), `published (secret scan clean)`, `pushed to K nodes` where K =
+  `provision … ok` audit lines added by that reconcile, else `nodes pick it up
+  on their next pull`. Audit: `skill.add|skill.update N pushed`.
+- `fleet skill list [--json]`: master = `[ -d vault/nodes ]`. Rows: every
+  `skills/*/SKILL.md` of the config repo (`config`; ON NODES? `yes` when
+  committed and the upstream has it, `not pushed` when the path is dirty or in
+  `@{upstream}..HEAD`), the bundled `skills/fleet` (`fleet`, unless the repo
+  ships one), then skills present only in this machine's skill dirs
+  (`local-only`, `no`; same exclusions as the auto-publish). Node: the
+  `*/skills/*` paths of `harness.manifest`, one row per name, `config` when the
+  config checkout has it, `fleet` for the bundled skill. JSON: array of
+  `{name, source, description, path}` plus `on_nodes` on the master.
+- `fleet skill remove N [--yes]`: confirm → `git rm --cached` + delete
+  `skills/N` → commit `remove skill N` → delete `~/.claude/skills/N`,
+  `~/.agents/skills/N`, `~/.cursor/skills/N` here (a symlink is unlinked, not
+  followed) and drop them from both manifests → push → `cmd_reconcile` (same
+  knob and output as add, `nodes drop it on their next pull`). Audit
+  `skill.remove N pushed`.
 
 ## `fleet list --json` (master)
 
@@ -418,7 +470,8 @@ from `$FLEET_ROOT/templates/`.
 
 ## Harness rendering (`lib/harness.sh`)
 
-Inputs from `$FLEET_CONFIG_DIR`: `AGENTS.md`, `harness/<harness>/…`, `skills/<name>/`.
+Inputs from `$FLEET_CONFIG_DIR`: `AGENTS.md`, `harness/<harness>/…`, `skills/<name>/`
+(filled by `fleet skill add`, the sync auto-publish, or capture).
 Placeholders: `${HOME}`, `${FLEET_NODE}`, `${FLEET_NODE_NAME}`, `${FLEET_MEMORY_DIR}`
 and the secrets of `secrets.env`; only `${UPPER_CASE}` is substituted. Capture
 (`harness_capture`, master) writes back into `$FLEET_CONFIG_DIR/harness` and

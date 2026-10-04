@@ -314,6 +314,25 @@ assert "second sync: exit 0 and quiet (nothing to pull, nothing to provision, to
 assert "master lock released after sync" mexec sh -c "! test -e $VAULT/locks/.sync"
 
 # ======================================================================
+step "fleet skill add on the master: into the config repo, onto the master and both nodes"
+mexec_i sh -c "mkdir -p $MHOME/my-skills/review && cat > $MHOME/my-skills/review/SKILL.md" <<'EOF'
+---
+name: review
+description: Review a pull request the way this team does it.
+---
+# review
+
+Read the diff, then the tests.
+EOF
+mexec fleet skill add $MHOME/my-skills/review --yes >"$WORK/skill-add.log" 2>&1; rc=$?
+assert "fleet skill add exits 0: added, published (secret scan clean), pushed to 2 nodes" bash -c "[ $rc = 0 ] && grep -q 'added review to your fleet config' '$WORK/skill-add.log' && grep -q 'published (secret scan clean)' '$WORK/skill-add.log' && grep -q 'pushed to 2 nodes' '$WORK/skill-add.log'" || tail -20 "$WORK/skill-add.log"
+assert "config repo: skills/review committed as 'add skill review' and pushed" bash -c "mexec git --git-dir=/srv/repos/config.git log -1 --format=%s main | grep -qx 'add skill review' && mexec git --git-dir=/srv/repos/config.git cat-file -e main:skills/review/SKILL.md"
+assert "master: review installed in ~/.claude/skills" mexec test -f $MHOME/.claude/skills/review/SKILL.md
+assert "alpha and beta: ~/.claude/skills/review/SKILL.md present after the push, recorded in harness.manifest" bash -c "nfile $NA $MHOME/.claude/skills/review/SKILL.md | grep -q 'Read the diff' && nfile $NB $MHOME/.claude/skills/review/SKILL.md | grep -q 'Read the diff' && nexec $NA grep -qx $MHOME/.claude/skills/review $MHOME/.config/fleet/harness.manifest"
+assert "fleet skill list on the master: review config yes, the bundled fleet skill" bash -c "o=\$(mexec fleet skill list); printf '%s\n' \"\$o\" | grep -Eq '^review +config +yes +Review a pull request' && printf '%s\n' \"\$o\" | grep -Eq '^fleet +fleet +yes '"
+assert "fleet skill list on a node: review config" bash -c "nexec $NA fleet skill list | grep -Eq '^review +config +Review a pull request'"
+
+# ======================================================================
 step "node state after provision"
 for n in "$NA:alpha" "$NB:beta"; do
   c=${n%%:*}; name=${n#*:}

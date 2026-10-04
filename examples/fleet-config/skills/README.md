@@ -5,9 +5,15 @@ Skills pushed to every node by `fleet apply` into `~/.claude/skills`,
 `~/.cursor/skills`. Grok reads `~/.claude/skills` and `~/.cursor/skills` itself.
 
 One directory per skill, each with a `SKILL.md` (directories without one are
-ignored). Two ways to fill this directory:
+ignored). Three ways to fill this directory:
 
-- **Capture** (default): `fleet config publish` on the master copies the union
+- **`fleet skill add DIR | URL[#subdir][@ref]`** on the master: validates the
+  skill, secret-scans it, copies it here, installs it on the master, commits,
+  pushes and provisions the online nodes. `fleet skill list` shows what is here,
+  `fleet skill remove NAME` takes it out again everywhere. Skills installed on
+  the master by hand are published by the next `fleet sync` as well
+  (`FLEET_SYNC_PUBLISH_SKILLS=1`).
+- **Capture**: `fleet config publish` on the master copies the union
   of `~/.claude/skills`, `~/.agents/skills`, `~/.codex/skills`, `~/.cursor/skills`
   here (symlinks dereferenced; on a name collision the first source in that
   order wins), removes skills that are gone from the master, and rewrites this

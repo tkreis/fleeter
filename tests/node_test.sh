@@ -1067,7 +1067,7 @@ case_skill() {
   begin "skill: apply installs skills/fleet into the harness skill dirs (manifest), config repo's fleet/ wins, targets follow harness dirs + FLEET_TOOLS, skill install is idempotent"
   local r2="$WORK/fleet-h" h h2 cfg rc out m1 m2
   rm -rf "$r2"; cp -R "$ROOT" "$r2"
-  cp "$SRC/lib/harness.sh" "$r2/lib/"; mkdir -p "$r2/skills"; cp -R "$SRC/skills/fleet" "$r2/skills/fleet"
+  cp "$SRC/lib/harness.sh" "$SRC/lib/skills.sh" "$r2/lib/"; mkdir -p "$r2/skills"; cp -R "$SRC/skills/fleet" "$r2/skills/fleet"
   assert "shipped skill has the Agent Skills frontmatter (name: fleet, description)" bash -c "head -1 '$SRC/skills/fleet/SKILL.md' | grep -qx -- '---' && grep -qx 'name: fleet' '$SRC/skills/fleet/SKILL.md' && grep -q '^description: .*fleet' '$SRC/skills/fleet/SKILL.md'"
   assert "shipped skill stays under 200 lines" [ "$(wc -l <"$SRC/skills/fleet/SKILL.md" | tr -d ' ')" -lt 200 ]
   h=$(mk_home skill "base claude")
@@ -1090,6 +1090,16 @@ case_skill() {
   rm -rf "$cfg/skills/fleet"
   HOME="$h" "$r2/fleet" apply >"$WORK/apply-skill4.log" 2>&1
   assert "without the config repo skill the built-in one is back" cmp -s "$h/.claude/skills/fleet/SKILL.md" "$SRC/skills/fleet/SKILL.md"
+  # fleet skill list on a node: what apply installed, from harness.manifest
+  out=$(HOME="$h" "$r2/fleet" skill list 2>&1); rc=$?
+  assert "node: fleet skill list shows the installed skills with source and description" bash -c "[ '$rc' -eq 0 ] && printf '%s\n' \"\$0\" | head -1 | grep -Eq '^NAME +SOURCE +DESCRIPTION$' && printf '%s\n' \"\$0\" | grep -Eq '^fleet-notes +config +Record a reusable finding' && printf '%s\n' \"\$0\" | grep -Eq '^fleet +fleet +Operate the user'" "$out"
+  assert "node: fleet skill list --json has no on_nodes column" bash -c "HOME='$h' '$r2/fleet' skill list --json | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"fleet-notes\"][\"source\"]==\"config\" and d[\"fleet\"][\"source\"]==\"fleet\" and \"on_nodes\" not in d[\"fleet\"]'"
+  # a skill removed from the config repo (fleet skill remove on the master) leaves every skill dir on the next apply
+  rm -rf "$cfg/skills/fleet-notes"
+  HOME="$h" "$r2/fleet" apply >"$WORK/apply-skill5.log" 2>&1; rc=$?
+  assert "removed config skill: apply exits 0, gone from ~/.claude, ~/.agents and ~/.cursor skill dirs, out of harness.manifest, removal reported" bash -c "[ '$rc' -eq 0 ] && [ ! -e '$h/.claude/skills/fleet-notes' ] && [ ! -e '$h/.agents/skills/fleet-notes' ] && [ ! -e '$h/.cursor/skills/fleet-notes' ] && ! grep -q 'skills/fleet-notes$' '$h/.config/fleet/harness.manifest' && grep -q 'removed .*/skills/fleet-notes (no longer in the config repo)' '$WORK/apply-skill5.log'"
+  assert "the fleet skill survived the cleanup and skill list no longer shows fleet-notes" bash -c "[ -f '$h/.claude/skills/fleet/SKILL.md' ] && ! HOME='$h' '$r2/fleet' skill list | grep -q fleet-notes"
+  git -C "$cfg" checkout -q -- skills/fleet-notes
   # targets: a harness dir in $HOME or its tool in FLEET_TOOLS enables a skill dir; nothing else does
   h2="$WORK/homes/skilltargets"; rm -rf "$h2"; mkdir -p "$h2"
   # shellcheck disable=SC2329  # invoked through assert

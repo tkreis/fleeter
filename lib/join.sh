@@ -13,9 +13,10 @@
 #   preflight → invite code → deps → (macOS: Homebrew) → tailscale up (tagged)
 #   → ssh server (key-only, verified with `sshd -T -C …`) → privileged
 #   prerequisites (Linux: base packages, browser, docker; macOS: Homebrew;
-#   marker ~/.config/fleet/privileged_done) → master key in authorized_keys →
-#   three deploy keys (code, config, memory) → ~/.ssh/config aliases →
-#   ~/.config/fleet/enrol.json.
+#   marker ~/.config/fleet/privileged_done) → keep awake (macOS pmset -c,
+#   Linux masked sleep targets; marker ~/.config/fleet/power_done) → master
+#   key in authorized_keys → three deploy keys (code, config, memory) →
+#   ~/.ssh/config aliases → ~/.config/fleet/enrol.json.
 #   Then it prints "waiting for master" and exits 0. It exits non-zero (no
 #   "joined") when SSH could not be verified usable.
 #
@@ -75,6 +76,15 @@ j_root() {
   fi
 }
 
+# j_root_try CMD... — j_root for optional steps: no sudo or a refused password
+# is a return code (the caller warns), never the end of the join.
+j_root_try() {
+  if [ "$(id -u)" -eq 0 ]; then "$@"; else
+    j_have sudo || return 1
+    sudo "$@"
+  fi
+}
+
 # join_write_atomic DEST MODE < content
 join_write_atomic() {
   local _dest=$1 _mode=$2 _tmp
@@ -92,6 +102,7 @@ JOIN_KEYFILE=""                     # tmp file holding the tailscale auth key (0
 JOIN_NONCE=""; JOIN_NAME=""; JOIN_MASTER_PUBKEY=""; JOIN_MASTER_USER=""; JOIN_TAG=""
 JOIN_PREFIX="fleet-"                # tailscale hostname = prefix + name (FLEET_HOSTNAME_PREFIX on the master)
 JOIN_TOOLS=""                       # the master's FLEET_TOOLS (optional in the code; empty = install everything)
+JOIN_KEEP_AWAKE=1                   # the master's FLEET_KEEP_AWAKE (optional in the code; absent = 1)
 JOIN_TS=""; JOIN_TS_SUDO=0          # tailscale CLI path and whether it needs root
 
 join_cleanup() {
@@ -342,6 +353,8 @@ if not isinstance(prefix, str) or not re.match(r"^[a-z0-9-]{0,24}$", prefix):
 tools = d.get("tools", "")
 if not isinstance(tools, str) or not re.match(r"^[a-z0-9 _-]{0,200}$", tools):
     tools = ""
+# optional (older masters omit it): the master's FLEET_KEEP_AWAKE; only "0" switches it off
+awake = "0" if str(d.get("keep_awake", "1")).strip() == "0" else "1"
 fd = os.open(sys.argv[1], os.O_WRONLY | os.O_TRUNC | os.O_CREAT, 0o600)
 os.write(fd, d["ts_auth_key"].strip().encode("utf-8"))
 os.close(fd)
@@ -349,6 +362,7 @@ for k in ("nonce", "name", "master_pubkey", "master_user", "tag"):
     print(d[k].strip())
 print(prefix)
 print(" ".join(tools.split()))
+print(awake)
 PY
   ) || j_die "could not decode the invite code" "ask the master for a fresh 'fleet invite'"
   {
@@ -359,12 +373,13 @@ PY
     IFS= read -r JOIN_TAG
     IFS= read -r JOIN_PREFIX || JOIN_PREFIX=""     # the heredoc strips trailing empty lines:
     IFS= read -r JOIN_TOOLS || JOIN_TOOLS=""       # an empty prefix or tool list reads as end of input
+    IFS= read -r JOIN_KEEP_AWAKE || JOIN_KEEP_AWAKE=1
   } <<EOF
 $_fields
 EOF
   unset JOIN_CODE
   [ -n "$JOIN_NAME" ] && [ -n "$JOIN_TAG" ] || j_die "invite code is incomplete"
-  j_ok "invite for node '$JOIN_NAME' ($JOIN_TAG, hostname $JOIN_PREFIX$JOIN_NAME${JOIN_TOOLS:+, tools: $JOIN_TOOLS})"
+  j_ok "invite for node '$JOIN_NAME' ($JOIN_TAG, hostname $JOIN_PREFIX$JOIN_NAME${JOIN_TOOLS:+, tools: $JOIN_TOOLS}, keep awake: $JOIN_KEEP_AWAKE)"
 }
 
 # ---------- 6. ssh server (key-only, verified) ----------
@@ -648,6 +663,54 @@ join_privileged() {
   fi
 }
 
+# ---------- 6c. keep awake ----------
+
+# join_keep_awake — FLEET_KEEP_AWAKE in this machine's environment (explicit
+# for this node) wins over the master's value carried in the invite; default on.
+join_keep_awake() { [ "${FLEET_KEEP_AWAKE:-$JOIN_KEEP_AWAKE}" != 0 ]; }
+
+# A node is only useful while it is reachable and syncing, so join (the one step
+# with root) switches system sleep off once and records ~/.config/fleet/power_done.
+#   macOS  `pmset -c sleep 0 disksleep 0 womp 1 autorestart 1`: the charger (AC)
+#          profile only, so a MacBook on battery still sleeps; `displaysleep` is
+#          never touched (the screen may turn off); womp = wake for network
+#          access, autorestart = power back on after an outage. With the
+#          dev.fleet.awake agent that `fleet apply` installs this covers the
+#          login window, reboots and power loss, not a closed lid without an
+#          external display (macOS clamshell rule) and not a FileVault Mac
+#          waiting for its first login.
+#   Linux  (systemd) `systemctl mask sleep.target suspend.target
+#          hibernate.target hybrid-sleep.target`.
+# Skipped in containers and with FLEET_KEEP_AWAKE=0; a failure (sudo refused,
+# no sudo) warns and never fails the join — on macOS the agent still covers the
+# logged-in case. Rerunning join leaves settings the user changed since alone.
+join_power() {
+  local _marker="$HOME/.config/fleet/power_done" _what=""
+  [ "$JOIN_CONTAINER" -eq 0 ] || return 0
+  if ! join_keep_awake; then j_ok "keep awake: skipped (FLEET_KEEP_AWAKE=0)"; return 0; fi
+  if [ -f "$_marker" ]; then j_ok "keep awake: already done ($(cat "$_marker" 2>/dev/null))"; return 0; fi
+  if [ "$JOIN_OS" = macos ]; then
+    j_have pmset || { j_warn "keep awake: pmset not found; sleep settings unchanged"; return 0; }
+    j_log "keep awake: pmset -c sleep 0 disksleep 0 womp 1 autorestart 1 (charger profile only; asks for your password)"
+    if j_root_try pmset -c sleep 0 disksleep 0 womp 1 autorestart 1; then _what=pmset
+    else
+      j_warn "keep awake: pmset failed; the dev.fleet.awake agent from fleet apply still covers the logged-in session (by hand: sudo pmset -c sleep 0 disksleep 0 womp 1 autorestart 1)"
+      return 0
+    fi
+  else
+    j_have systemctl || { j_ok "keep awake: no systemd here, nothing to mask"; return 0; }
+    j_log "keep awake: systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target"
+    if j_root_try systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1; then _what=mask
+    else
+      j_warn "keep awake: systemctl mask failed; this box may still suspend (by hand: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target)"
+      return 0
+    fi
+  fi
+  mkdir -p "$HOME/.config/fleet"; chmod 700 "$HOME/.config/fleet"
+  printf '%s %s:%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$JOIN_OS" "$_what" | join_write_atomic "$_marker" 0600
+  j_ok "keep awake: $JOIN_OS $_what done (fleet status shows 'awake')"
+}
+
 # ---------- 7. keys and ssh config ----------
 
 join_authorized_keys() {
@@ -752,6 +815,7 @@ join_main() {
   join_tailscale_up
   join_ssh_enable
   join_privileged
+  join_power
   join_authorized_keys
   join_deploy_keys
   join_ssh_config

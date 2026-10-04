@@ -1,5 +1,7 @@
 # fleeter
 
+Overview site: <https://tkreis.github.io/fleeter/>
+
 fleeter turns your Macs, Linux boxes and throwaway Docker containers into a
 small, private fleet of machines that run coding agents (Claude Code, Codex,
 Cursor, Grok) with the same instructions, skills, tools and secrets as your own

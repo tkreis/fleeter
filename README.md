@@ -18,7 +18,8 @@ database.
  │ fleet reconcile  (timer, 2 min) │        ┌─ fleeter       code       (RO, or public https)
  │ fleet sync       (timer, 30 min)│◀──────▶├─ fleet-config  your layer (RO)
  │ ~/.config/fleet/vault  0700     │        └─ fleet-memory  shared vault (RW, nodes/<name>/ only; optional)
- │   secrets/ files/ nodes/ ssh/   │                 ▲  pull every 15 min / sync every 5 min
+ │   secrets/ files/ (age) nodes/  │                 ▲  pull every 15 min / sync every 5 min
+ │   ssh/; key in the keychain     │                 │
  └──────────┬──────────────────────┘                 │
             │ OpenSSH, master → node only            │
    ┌────────┼─────────┬──────────────┐               │
@@ -77,7 +78,9 @@ fleet init master --config-dir ~/fleet-config
 #   Tailscale API access token (opens the keys page; revoked at the end), the typed word
 #   `apply` to merge the fleet rules into your tailnet policy, and one `gh auth login --web`
 #   approval if gh is not logged in. Installs the reconcile (2 min) and sync (30 min) timers,
-#   the `fleeter` command alias and the `fleet` agent skill for your coding agents.
+#   the `fleeter` command alias and the `fleet` agent skill for your coding agents. The vault
+#   is encrypted with age from the start (installed if missing); its key goes into the login
+#   keychain (macOS) / secret-tool (Linux), see "Encrypt, inspect and back up the vault".
 claude setup-token                                      # prints a 1-year token
 fleet secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal
 fleet config publish --no-capture                       # push the example config as it is (see "Push new skills")
@@ -350,10 +353,47 @@ fleet secrets list                                   # names + profiles, never v
 fleet reconcile                                      # the digest changed → every online node is re-provisioned
 ```
 
-Secrets land in `~/.config/fleet/secrets.env` (0600) on nodes and are exported
-by `~/.config/fleet/env.sh` into every shell and timer. Rotation = `secrets
-set` again + `reconcile`. Nodes a secret was sent to are listed in the
-registry (`secrets_sent`), so `fleet kick` can tell you what to rotate.
+On the master the value is stored encrypted (`vault/secrets/<profile>.env.age`,
+age, see below); it is decrypted only into the SSH stream to a node. Secrets
+land in `~/.config/fleet/secrets.env` (0600) on nodes and are exported by
+`~/.config/fleet/env.sh` into every shell and timer. Rotation = `secrets set`
+again + `reconcile`. Nodes a secret was sent to are listed in the registry
+(`secrets_sent`), so `fleet kick` can tell you what to rotate.
+
+### Encrypt, inspect and back up the vault
+
+Every secret-bearing file in the vault — the env files, mirrored files, the
+proxy logins, the Tailscale OAuth client, the GitHub fallback token — is an
+[age](https://age-encryption.org) ciphertext (`<name>.age`). The private key
+never sits in the vault: it is in the **login keychain** on macOS (service
+`fleet-vault`), in **secret-tool** (libsecret) on Linux when installed, or in
+`~/.config/fleet/vault.key` (0600) as a fallback; `FLEET_VAULT_KEY_BACKEND`
+chooses (`keychain` | `secret-tool` | `file`). Writers only need the public
+recipient (`vault/recipient.txt`); readers get the key from the backend and
+hand it to `age` on a pipe, never through a file or an argument. The SSH keys
+(`vault/ssh/`) stay plain files because ssh needs them.
+
+```sh
+fleet vault status          # backend, recipient, key reachable?, encrypted vs plaintext files
+fleet vault encrypt         # existing master (before 0.3.0): encrypt the plaintext vault in place, idempotent
+fleet vault rotate-key      # new key, every file re-encrypted, old key removed from the backend
+fleet vault export ~/fleet-vault-$(date +%F).age   # whole vault (decrypted) in one age -p archive; type a passphrase
+age -d ~/fleet-vault-2026-10-04.age | tar -tf -    # list a backup
+```
+
+**Existing masters: run `fleet vault encrypt` once after updating.** Until
+then everything keeps working on the plaintext files (`fleet doctor` warns),
+and the first run after the update re-provisions every node once because the
+desired-state digest is now computed over the ciphertexts (so `fleet list` and
+`reconcile` can tell `behind` without the key; a re-encrypted value changes the
+digest once more, which is harmless).
+
+A locked login keychain (nobody logged in on the Mac) makes the key
+unreachable: scheduled `sync`/`reconcile` then skip provisioning with a clear
+warning and retry on their own; `fleet secrets set` and friends ask you to
+unlock. Nothing decrypted is ever written to the master's disk: secrets go
+from memory into the node's ssh session, the mirrored files as a tar built in
+memory.
 
 ### Mirror a .env file
 
@@ -362,9 +402,10 @@ fleet files add ~/projects/app/.env                  # full profile; path must b
 fleet reconcile
 ```
 
-The file is stored in the vault and recreated at the same path under the
-node's `$HOME`, 0600, atomically (unpacked into a private staging dir on the
-node and renamed into place). Its content is part of the digest.
+The file is stored encrypted in the vault (`files/<profile>/<path>.age`) and
+recreated at the same path under the node's `$HOME`, 0600, atomically
+(unpacked into a private staging dir on the node and renamed into place). Its
+ciphertext is part of the digest.
 
 ### Share the CLIProxyAPI setup
 
@@ -502,11 +543,15 @@ and kick).
 
 | Command | Flags | What it does |
 |---|---|---|
-| `fleet init master` | `--config-dir DIR`, `--reconfigure` | Preflight (commands, Tailscale logged in, git identity, how GitHub is reached), then: records the config dir in `~/.config/fleet/fleet.conf` (offers to clone `FLEET_CONFIG_REPO` into it when missing), creates the vault, master SSH key, digest key (and the T3 client key with `FLEET_T3_REMOTE=1`); Tailscale: bootstrap token → policy check/merge-apply → scoped OAuth client (token revoked; init stops if the policy step is skipped); GitHub: `gh auth login --web` or token; installs the reconcile and sync timers, the `~/.local/bin/fleeter` alias and the `fleet` agent skill. `--reconfigure` redoes the Tailscale/GitHub steps. Idempotent. |
-| `fleet secrets set NAME` | `--profile minimal\|full` (default full) | Stores one secret from a hidden prompt or stdin into `vault/secrets/<profile>.env`. |
-| `fleet secrets list` | | Names and profiles only. |
-| `fleet files add PATH` | `--profile minimal\|full` | Mirrors a file under `$HOME` into the vault; recreated at the same relative path on nodes. |
-| `fleet proxy import [DIR]` | | Copies CLIProxyAPI `conf/config.yaml` and `auth/*.json` from DIR (default `FLEET_CLIPROXY_DIR`) into the full profile. |
+| `fleet init master` | `--config-dir DIR`, `--reconfigure` | Preflight (commands, Tailscale logged in, git identity, how GitHub is reached), then: records the config dir in `~/.config/fleet/fleet.conf` (offers to clone `FLEET_CONFIG_REPO` into it when missing), creates the vault, its age key in the key backend + `vault/recipient.txt` (installs `age` when missing), the master SSH key (and the T3 client key with `FLEET_T3_REMOTE=1`); Tailscale: bootstrap token → policy check/merge-apply → scoped OAuth client (token revoked; init stops if the policy step is skipped); GitHub: `gh auth login --web` or token; installs the reconcile and sync timers, the `~/.local/bin/fleeter` alias and the `fleet` agent skill. `--reconfigure` redoes the Tailscale/GitHub steps. Idempotent. |
+| `fleet secrets set NAME` | `--profile minimal\|full` (default full) | Stores one secret from a hidden prompt or stdin into `vault/secrets/<profile>.env.age` (the current file is decrypted into memory, updated, re-encrypted; needs the vault key). |
+| `fleet secrets list` | | Names and profiles only (decrypts into memory; needs the vault key). |
+| `fleet files add PATH` | `--profile minimal\|full` | Mirrors a file under `$HOME` into the vault, encrypted straight from the source (`files/<profile>/<path>.age`); recreated at the same relative path on nodes. |
+| `fleet proxy import [DIR]` | | Copies CLIProxyAPI `conf/config.yaml` and `auth/*.json` from DIR (default `FLEET_CLIPROXY_DIR`) into the full profile, encrypted. |
+| `fleet vault status` | | Key backend (and the one the key was created with), recipient, whether the key is reachable now, how many files are encrypted, which are still plaintext. Read-only. |
+| `fleet vault encrypt` | | Migration for a vault from before 0.3.0: creates the key if there is none, encrypts every plaintext secret, env, JSON and mirrored file (each one decrypted again and compared before the plaintext is removed), drops the legacy `digest.key`. Idempotent; refuses when the key backend is unreachable. |
+| `fleet vault rotate-key` | | Generates a new key, stores it as the incoming key, re-encrypts every file (verified), swaps files + recipient, then replaces the old key in the backend. Takes the master lock. A crash leaves a vault that still decrypts; rerun to finish. |
+| `fleet vault export FILE` | | Tar of the whole vault with everything decrypted, piped into `age -p` (you type the passphrase; interactive). The offline backup; it holds every secret and key once opened. |
 | `fleet invite` | `--ephemeral`, `--profile P`, `--name N`, `--user U`, `--code-only` | Mints a single-use, pre-authorized, tagged Tailscale key (1 h), records a pending invite (nonce), prints the join one-liner and the invite code (which also carries `FLEET_TOOLS`). `--ephemeral` = ephemeral device + minimal profile. `--user` = login the master will SSH to. `--code-only` prints just the code. |
 | `fleet list` | `--json`, `--offline` | The fleet overview: registry + tailnet peers + each online node's `fleet status --json` (parallel, `FLEET_LIST_SECS` = 10 s each). Columns NAME, HOST, ONLINE, STATE, SYNCED, LAST PROVISION, TOOLS, MEMORY, PROXY, FLEET; `--json` a stable array (`docs/CONTRACT.md`); `--offline` skips SSH. Unknown tagged peers listed as `unknown`, nodes that did not answer as `unreachable`; exit 0 regardless. Never writes the vault. |
 | `fleet nodes` | `--live` | Compact registry table (name, id, online, state, profile, age); `--live` adds each node's tool states over SSH. Kept for scripts; `fleet list` supersedes it. |
@@ -523,7 +568,7 @@ and kick).
 | `fleet config publish` | `--yes`, `--no-capture` | Git identity check, `harness_capture` into the config dir (authoritative; skipped with `--no-capture`), secret scan over `harness/` and `skills/` (always), staged diff, confirm, commit (`publish fleet config`), push to the checkout's `origin`. Never touches the fleeter checkout. |
 | `fleet policy check` | | Fetches the live policy with the OAuth client and checks it against the template. Exit 1 on findings. |
 | `fleet policy apply` | | Merges the fleet rules into the **live** policy (adds the `tagOwners` entry and the template grants; turns `*`/`autogroup:tagged` sources into `autogroup:member`; keeps every other rule), shows a unified diff, requires the typed word `apply`, backs up the previous policy to `vault/policy-backups/`, POSTs with `If-Match`. Asks for a one-off API access token (revoked afterwards). |
-| `fleet doctor` | | See "Check isolation". Exit 1 on any problem. |
+| `fleet doctor` | | See "Check isolation"; also warns when the vault still holds plaintext secrets or its key is unreachable. Exit 1 on any problem. |
 | `fleet join` | env `FLEET_INVITE_CODE` or `FLEET_INVITE_FILE` | Node bootstrap (also embedded in the invite one-liner). Interactive, uses sudo once; skips browser/docker installs the fleet's tools do not need. |
 | `fleet apply` | `--from-master DIGEST` | Converges tools, instructions, harness templates, skills, `env.sh`, shell rc block, memory clone (when configured), timers. Records the digest and `applied_commit` only on success. Takes `~/.config/fleet/locks/apply`. |
 | `fleet pull` | `--no-apply` | Fetches the code and config repos (converting the shipped tar copies into checkouts the first time, cloning a missing config dir, re-pointing `origin` when the configured URL changed), and runs `apply` when `<code>+<config>` differs from the last successful apply. Timer: `FLEET_PULL_EVERY`. |
@@ -576,6 +621,7 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_PUSH_TOOLS_EVERY` | `1440` | Minutes between `fleet update` pushes to the online nodes from `fleet sync`; `0` = never push tool updates from the master. |
 | `FLEET_MISSING_GRACE_HOURS` | `24` | Hours a non-ephemeral node may be gone from the device list before its keys are revoked (ephemeral: 1 h fixed). |
 | `FLEET_DEFAULT_PROFILE` / `FLEET_EPHEMERAL_PROFILE` | `full` / `minimal` | Secret profile for normal / `--ephemeral` invites. |
+| `FLEET_VAULT_KEY_BACKEND` | unset = by platform | Where the vault's private age key lives: `keychain` (macOS login keychain, default on macOS), `secret-tool` (libsecret; default on Linux when installed), `file` (`~/.config/fleet/vault.key`, 0600; fallback, CI). Per machine: set it in `~/.config/fleet/fleet.conf` or the environment, and keep it constant once the key exists (`fleet vault status` shows the backend the key was created with). |
 
 Environment knobs (not config keys; all optional):
 
@@ -599,23 +645,26 @@ Environment knobs (not config keys; all optional):
 
 ## Files on disk
 
-Master, `~/.config/fleet/vault` (0700 dirs, 0600 files):
+Master, `~/.config/fleet/vault` (0700 dirs, 0600 files; `*.age` = encrypted to `recipient.txt`):
 
 ```
-secrets/minimal.env, secrets/full.env   KEY='value' lines; full = minimal + full
-files/<profile>/<path under $HOME>      mirrored files; files/full/.cli-proxy-api/{config.yaml,auth/}
-ssh/fleet_master(.pub)                  the key nodes authorize for provisioning
+recipient.txt                           the vault's public age recipient (0644) and which key backend holds the private key
+secrets/minimal.env.age, full.env.age   KEY='value' lines, encrypted; full = minimal + full
+files/<profile>/<path under $HOME>.age  mirrored files, encrypted; files/full/.cli-proxy-api/{config.yaml,auth/*}.age
+ssh/fleet_master(.pub)                  the key nodes authorize for provisioning (plain: ssh needs it)
 ssh/t3_client(.pub)                     the key T3 Code uses towards nodes (only with FLEET_T3_REMOTE=1 or after fleet t3 setup)
 ssh/known_hosts                         pinned node host keys (read over the fleet session); every ssh is strict once pinned
-digest.key                              HMAC key for the desired-state digest; never shipped
-tailscale.json                          OAuth client (auth_keys, devices:core, policy_file:read; tag-scoped)
-github.json                             fallback token (only without gh)
+tailscale.json.age                      OAuth client (auth_keys, devices:core, policy_file:read; tag-scoped), encrypted
+github.json.age                         fallback token (only without gh), encrypted
+digest.key                              legacy (vault before `fleet vault encrypt`): HMAC key for plaintext fingerprints; removed by the migration
 nodes/<ts-id>.json                      registry; nodes/pending/, nodes/claimed/, rollback-* tombstones
 policy-backups/<timestamp>.hujson       the live policy as it was before each `policy apply`
 sync.json                               last `fleet update` push to the nodes (fleet sync)
 locks/<ts-id>/{pid,token}, locks/.registry, locks/.sync (sync and reconcile never overlap)
 audit.log                               one line per action
 ~/.config/fleet/fleet.conf              FLEET_CONFIG_DIR + local overrides; reconcile.log, sync.log; logs/update-<node>.log (failed pushes)
+~/.config/fleet/vault.key               the private age key, only with FLEET_VAULT_KEY_BACKEND=file (0600); otherwise it is a
+                                        keychain item (service fleet-vault, account $USER) or a secret-tool entry, never a file
 ~/Library/LaunchAgents/dev.fleet.{reconcile,sync}.plist   or ~/.config/systemd/user/fleet-{reconcile,sync}.{service,timer}
 ~/.local/bin/fleeter                    alias of ~/.local/bin/fleet (same target)
 ~/.claude/skills/fleet, ~/.agents/skills/fleet, ~/.cursor/skills/fleet   fleeter's agent skill (for the harnesses present here)
@@ -675,8 +724,11 @@ agent CLIs, Chrome, Docker) are left alone.
 # the reconcile and sync timers
 for j in reconcile sync; do launchctl bootout "gui/$(id -u)/dev.fleet.$j"; rm -f ~/Library/LaunchAgents/dev.fleet.$j.plist; done      # macOS
 for j in reconcile sync; do systemctl --user disable --now fleet-$j.timer; rm -f ~/.config/systemd/user/fleet-$j.{service,timer}; done  # Linux
-# keep a copy of the vault if you may come back (secrets, keys, the OAuth client, the registry, audit log, policy backups)
-(umask 077; tar -C ~/.config/fleet -czf ~/fleet-vault-backup.tgz vault)        # restore: tar -C ~/.config/fleet -xzf ~/fleet-vault-backup.tgz
+# keep a copy of the vault if you may come back (secrets, keys, the OAuth client, the registry, audit log, policy backups):
+# decrypted into one passphrase-protected archive, so it is readable without this machine's keychain
+fleet vault export ~/fleet-vault-backup.age        # restore (plaintext, then a fresh key): mkdir -p ~/.config/fleet/vault && age -d ~/fleet-vault-backup.age | tar -C ~/.config/fleet/vault -xf - && fleet vault encrypt
+# the vault key: keychain item (macOS) / secret-tool entry (Linux) / ~/.config/fleet/vault.key
+security delete-generic-password -s fleet-vault -a "$USER"      # macOS;  Linux: secret-tool clear service fleet-vault account "$USER"
 # the T3 ssh include (only if fleet t3 setup was used)
 sed -i.bak '/^Include ~\/.ssh\/config.d\/fleet$/d' ~/.ssh/config; rm -rf ~/.ssh/config.d/fleet   # or restore ~/.ssh/config.pre-fleet
 # Tailscale: delete the OAuth client "fleet master" (admin console → Settings → OAuth clients) and, if you want the
@@ -701,12 +753,13 @@ GitLab/Gitea key API would go. A public **code** repo on any host works today
 (https URL, no key); the config repo needs GitHub.
 
 **Where do secrets live, and can I plug in a secrets manager?** In the file
-vault: `~/.config/fleet/vault/secrets/{minimal,full}.env` (0600, under a 0700
-dir, on a disk you should encrypt). The seam is small: `cmd_secrets_set` writes
-a value, `secrets_env PROFILE` streams what a node of that profile gets,
-`secret_names` lists names, and `desired_digest` hashes the same bytes. A
-backend that renders the same `KEY='value'` lines into those three functions
-would slot in without touching provision or the nodes.
+vault, encrypted: `~/.config/fleet/vault/secrets/{minimal,full}.env.age` (age,
+key in the login keychain / secret-tool / a 0600 file; see "Encrypt, inspect
+and back up the vault"). The seam is small: `cmd_secrets_set` writes a value,
+`secrets_env PROFILE` streams what a node of that profile gets, `secret_names`
+lists names, and `desired_digest` fingerprints the stored items. A backend
+that renders the same `KEY='value'` lines into those functions would slot in
+without touching provision or the nodes.
 
 **Do I need the memory repo?** No. Leave `FLEET_MEMORY_REPO` empty and nothing
 memory-related exists on master or nodes (no deploy key, clone, timer or seed;
@@ -765,6 +818,14 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
   (`fleet kick` + a fresh invite) when the key must move too.
 - **`another fleet apply is running`** — a previous apply hung; find the pid in
   `~/.config/fleet/locks/apply/pid`, kill it or remove the directory.
+- **`the vault key is unreachable` / `provision skipped`** — the login keychain
+  is locked (nobody logged in on the Mac) or the secret service is not
+  reachable from the timer's session: log in / unlock, and the next `sync`
+  picks it up; `fleet vault status` shows the backend and the key state. On a
+  headless Linux master set `FLEET_VAULT_KEY_BACKEND=file` in
+  `~/.config/fleet/fleet.conf` before `fleet init master` (or move the key:
+  `fleet vault export`, delete the entry, set the knob, `fleet vault encrypt`
+  after restoring the export).
 - **Harness template renders nothing for a server** — a `${PLACEHOLDER}` has no
   value in `secrets.env`; `fleet secrets set NAME` on the master, reconcile. The
   placeholder list is `harness/SECRETS.md` in your config repo.
@@ -802,8 +863,10 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
   extension: fleeter opens them (macOS) and reports the manual step.
 - **No control panel.** Use `fleet list`, `fleet kick`, and the Tailscale
   admin console from the phone (or let an agent run them: "Let agents drive fleet").
-- **No protection from processes already running as your user on the master**;
-  the vault is 0700 on a disk you should encrypt.
+- **No protection from processes already running as your user on the master**:
+  the vault is encrypted at rest, but a process running as you can read the
+  key the same way `fleet` does (unlocked keychain, your secret service, or
+  `vault.key`). Keep the disk encrypted too (FileVault/LUKS).
 - **`launchctl setenv` argv note (macOS):** with a local CLIProxyAPI,
   publishing `ANTHROPIC_AUTH_TOKEN` into the launchd session for GUI apps puts
   the token in one process's argv for milliseconds (local user only, never
@@ -814,8 +877,9 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
 
 Short version: nodes can reach the internet but not the master or each other
 (tailnet policy, verified by `fleet doctor` from the nodes themselves); the
-master pushes over OpenSSH with its own key and pinned host keys; secrets never
-enter a repo, argv or a log; every node has its own revocable deploy keys and
+master pushes over OpenSSH with its own key and pinned host keys; secrets are
+age-encrypted at rest on the master (key in the keychain) and never enter a
+repo, argv or a log; every node has its own revocable deploy keys and
 Tailscale device; a kicked node loses access but keeps what it had, so you
 rotate. Threat model, mechanisms, known limits and the rotation checklist:
 [`docs/SECURITY.md`](docs/SECURITY.md).

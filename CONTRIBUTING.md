@@ -15,12 +15,16 @@ docker run --rm -v "$PWD:/src:ro" debian:bookworm-slim bash /src/tests/node_test
 bash tests/e2e.sh                          # one master + two Docker nodes through the whole flow; ~2 min after the image build
 ```
 
-Each prints `PASS`/`FAIL` per check and exits non-zero on any failure. Run
-`master_test.sh` on macOS **and** in a clean Debian container before a PR:
+Each prints `PASS`/`FAIL` per check and exits non-zero on any failure.
+`master_test.sh` and `e2e.sh` need `age` on the host (`brew install age` /
+`apt-get install age`); the master test pins `FLEET_VAULT_KEY_BACKEND=file`
+and fakes `security` / `secret-tool` on PATH, so it never touches a real
+keychain. Run `master_test.sh` on macOS **and** in a clean Debian container
+before a PR:
 
 ```sh
 docker run --rm -v "$PWD:/src:ro" debian:bookworm-slim bash -c \
-  'apt-get update -qq && apt-get install -y -qq --no-install-recommends git python3 openssh-client procps netcat-openbsd ca-certificates && cd /tmp && bash /src/tests/master_test.sh'
+  'apt-get update -qq && apt-get install -y -qq --no-install-recommends git python3 openssh-client procps netcat-openbsd ca-certificates age && cd /tmp && bash /src/tests/master_test.sh'
 ```
 
 Lint:

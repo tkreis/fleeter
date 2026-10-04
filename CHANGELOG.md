@@ -38,6 +38,29 @@ current from the master.
 - `fleet schedule install`: (re)installs the reconcile and sync timers,
   idempotently (files rewritten and reloaded only when their content changed).
   `fleet doctor` checks both.
+- **The vault is encrypted at rest.** Every secret-bearing file
+  (`secrets/*.env`, mirrored files, the CLIProxyAPI logins, `tailscale.json`,
+  `github.json`) is an [age](https://age-encryption.org) ciphertext (`*.age`)
+  encrypted to `vault/recipient.txt`; the private key lives in the macOS login
+  keychain (`fleet-vault`), in `secret-tool` on Linux, or in
+  `~/.config/fleet/vault.key` (`FLEET_VAULT_KEY_BACKEND` = `keychain` |
+  `secret-tool` | `file`). The key reaches `age` only on a pipe (`-i -`):
+  never argv, never a file. `secrets set` decrypts into memory and
+  re-encrypts; `files add` / `proxy import` encrypt straight from the source;
+  provision decrypts into the ssh stream (the mirrored files as a tar built in
+  memory); `lib/api.py` reads the credentials through the same helper. New
+  commands: `fleet vault status`, `fleet vault encrypt` (migrates a plaintext
+  vault in place, verified round-trip, idempotent), `fleet vault rotate-key`,
+  `fleet vault export FILE` (decrypted tar inside an `age -p` archive).
+  `fleet init master` installs `age` if missing and creates the key; `fleet
+  doctor` warns about plaintext secrets or an unreachable key. A locked login
+  keychain makes scheduled sync/reconcile skip provisioning with a warning and
+  retry later. **Existing masters: run `fleet vault encrypt` once.**
+- The desired-state digest is a sha256 over the ciphertexts (plus code and
+  config revs) instead of an HMAC over the plaintext: `fleet list` and
+  `reconcile` decide `behind` without the key, `digest.key` goes away with the
+  migration. Updating re-provisions every node once; so does re-encrypting an
+  unchanged value or rotating the key.
 
 ### Changed
 - `fleet sync` and `fleet reconcile` share a master-wide lock

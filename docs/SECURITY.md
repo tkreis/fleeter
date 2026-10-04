@@ -15,8 +15,11 @@ Adversaries considered:
 - **A prompt-injection return path** through the shared memory vault.
 
 Not considered: a process already running as your user on the master (it can
-run `fleet` itself), a compromised GitHub account, a compromised Tailscale
-account, or physical access to an unencrypted master disk.
+run `fleet` itself, and read the vault key the way `fleet` does), a
+compromised GitHub account, or a compromised Tailscale account. A copy of the
+master's disk (backup, stolen machine without FileVault, a synced
+`~/.config`) is considered: the vault is encrypted at rest and the key is not
+on it (keychain / secret service), see "Vault encryption at rest".
 
 ## What is protected, and how
 
@@ -28,7 +31,7 @@ account, or physical access to an unencrypted master disk.
 | A node cannot write to code or config | Read-only deploy keys per repo per node; `fleet pull` only fetches. |
 | A node cannot rewrite the shared memory | Read-write key, but `fleet memory sync` stages only `nodes/<name>/`; git history keeps everything; instructions tell harnesses to treat `nodes/**` as data. A node that writes elsewhere by hand is caught in review, and its key can be revoked alone. |
 | Secrets never appear in argv or logs | Hidden prompts / stdin for input; API credentials read from vault files by `lib/api.py`; `docker login --password-stdin`; MCP configs edited in place; audit log records names and outcomes only. Exception: `launchctl setenv` on macOS (see limits). |
-| Secrets at rest | Vault 0700/0600; `secrets.env` 0600 on nodes; `digest.key` never leaves the master; the desired-state digest is an HMAC, so it does not leak values. |
+| Secrets at rest | Master: every secret-bearing vault file is an age ciphertext (`*.age`) to one X25519 recipient; the private key lives in the login keychain / secret-tool / a 0600 file outside the vault and reaches `age` only through a pipe ("Vault encryption at rest"). The desired-state digest is a sha256 over the ciphertexts, so it reveals nothing and needs no key. Nodes: `secrets.env` and mirrored files 0600, plaintext (the harnesses need them; see "Node side" below). |
 | Secrets in transit | SSH over WireGuard; written with `umask 077`, tmp + `mv` (mirrored files via a 0700 staging dir under `~/.config/fleet`, renamed into place one by one). |
 | Invite material | The auth key is inside the invite code, read from a hidden prompt or a 0600 file, written to a 0600 temp file and deleted after `tailscale up`; single use, 1 h expiry, revoked when expired. Docker: bind-mounted file, truncated on both sides after join; never in `docker inspect`. |
 | Revocation is complete and retried | `kick` and the vanished-node path delete the Tailscale device and all three deploy keys, each on the repository recorded when it was created (a changed `FLEET_*_REPO` cannot turn a 404 on the wrong repo into "deleted"); failures live in `pending_cleanup` and every reconcile retries them, independent of other API calls. A failed remote stop is retried while the node is still on the tailnet and dropped once the device is gone. Enrolment rollbacks use the same mechanism, so no key is ever lost. |
@@ -37,6 +40,87 @@ account, or physical access to an unencrypted master disk.
 | Node SSH accepts keys only | Drop-in sorted first in `sshd_config.d`, reload required, effective config verified with `sshd -T -C` for the master's login; join fails otherwise. |
 | Node host keys are pinned | `vault/ssh/known_hosts` (0600) holds each node's ed25519 host key, read with `cat /etc/ssh/ssh_host_ed25519_key.pub` over the authenticated fleet session at enrolment (never `ssh-keyscan`); every later ssh — fleet's own and T3 Code's — runs with `StrictHostKeyChecking yes`, `HostKeyAlgorithms ssh-ed25519` and that file. A key that differs from the pin is refused and reported (`HOST KEY MISMATCH`), never replaced automatically. |
 | T3 Code reaches a node with a key that can do nothing else | See "T3 Code remote access" below. |
+
+## Vault encryption at rest
+
+What is encrypted, where (`lib/vault.sh`):
+
+| Item | At rest |
+|---|---|
+| `vault/secrets/minimal.env`, `full.env` | `secrets/<profile>.env.age` |
+| every mirrored file (`fleet files add`), the CLIProxyAPI config + logins (`fleet proxy import`) | `files/<profile>/<path>.age` |
+| the Tailscale OAuth client, the GitHub fallback token | `tailscale.json.age`, `github.json.age` |
+| `vault/recipient.txt` | plain, 0644: the public recipient and the name of the key backend. Writers (`secrets set`, `files add`, `proxy import`, `lib/api.py` minting the OAuth client) need only this. |
+| `vault/ssh/fleet_master`, `ssh/t3_client`, `ssh/known_hosts` | plain, 0600: OpenSSH reads them itself. The master key is the credential for every node; it is protected by the 0700 vault and the disk encryption you run, not by age. |
+| registry (`nodes/*.json`), `audit.log`, `sync.json`, policy backups | plain: names, ids, dates, key ids; no credentials. |
+
+The private identity (one `AGE-SECRET-KEY-1…` line) lives in a **key backend**
+chosen by `FLEET_VAULT_KEY_BACKEND`:
+
+- `keychain` (default on macOS): a generic password in the login keychain,
+  service `fleet-vault`, account `$USER`. Stored by feeding
+  `add-generic-password -U -s fleet-vault -a $USER -w <identity>` to
+  `security -i` on **stdin** (the identity is never an argument), read with
+  `security find-generic-password -s fleet-vault -a $USER -w` (stdout). The
+  `security` binary is the ACL's trusted application, so no dialog appears.
+- `secret-tool` (default on Linux when installed): `secret-tool store
+  --label=fleet-vault service fleet-vault account $USER` with the identity on
+  stdin; `secret-tool lookup …` to read.
+- `file` (fallback, CI, containers): `~/.config/fleet/vault.key`, 0600,
+  outside `vault/`. Loudly warned about at creation: anything that can read
+  your home directory can decrypt the vault; it still protects against a copy
+  of `vault/` alone and keeps the code path identical.
+
+How the identity reaches `age`: `vault_identity` fetches it from the backend
+into a shell variable once per process (never exported), and every decryption
+is `printf '%s\n' "$id" | age -d -i - FILE.age` — the identity on age's
+stdin, the ciphertext as the file, the plaintext on stdout. No temp file, no
+FIFO, no argv (verified by `tests/master_test.sh` with a fake `security` that
+records argv and stdin separately). `lib/api.py` reads `tailscale.json` and
+`github.json` through the same `vault_cat` in a subprocess and keeps the bytes
+in memory. Provision decrypts the env into a variable and pipes it into the
+node's ssh session; the mirrored files become a tar built in memory (python
+`tarfile` over `BytesIO`, each item decrypted by `age` with the identity on a
+pipe) that goes straight into ssh. Nothing decrypted is written under
+`$FLEET_HOME` or `$TMPDIR` (the test snapshots both for a canary during a
+provision, and the e2e greps the master container's whole filesystem).
+
+Locked keychain: on macOS the login keychain is unlocked while you are logged
+in; a scheduled `fleet sync`/`reconcile` running from launchd with nobody
+logged in cannot read the key. Then `provision_node` skips the node with one
+clear warning (`audit: provision <name> skip vault-locked`) before anything is
+shipped, and the next run retries; `fleet secrets set`, `secrets list`,
+`vault rotate-key` die with the unlock hint; `fleet vault status` and
+`doctor` report `key: UNREACHABLE`. A decryption failure can never ship an
+empty `secrets.env`: the env is decrypted into memory first and the ssh runs
+only on success.
+
+Digest: `sha256(code_rev+config_rev, then path + sha256(ciphertext) per item)`.
+Reconcile and `fleet list` can therefore tell `behind` with the key
+unreachable. age uses a fresh file key per encryption, so `secrets set` with
+an unchanged value, or a key rotation, changes the digest once and
+re-provisions the nodes once; harmless. A vault that still holds plaintext
+items (before `fleet vault encrypt`) fingerprints those with the legacy HMAC
+keyed by `digest.key`, so the digest never covers plaintext bytes directly.
+
+Rotation (`fleet vault rotate-key`): new identity → stored as `fleet-vault-next`
+→ every `.age` re-encrypted into `<file>.rotating` and compared against the old
+plaintext → files swapped, recipient rewritten → new identity stored as
+`fleet-vault`, `-next` removed. While `-next` exists `vault_identity` offers
+both keys, so a crash at any step leaves a decryptable vault and a rerun
+finishes.
+
+Node side: a node keeps `~/.config/fleet/secrets.env` and the mirrored files
+in plaintext (0600) because the harnesses source them; encrypt the node's disk
+(FileVault on Macs, LUKS on Linux) and treat a lost node as "rotate
+everything" (see below). The master's own disk should stay FileVault/LUKS
+encrypted as well: age protects the vault copy, not the SSH keys or the
+registry.
+
+`fleet vault export FILE` writes the whole vault **decrypted** into one
+`age -p` archive (passphrase typed at the terminal), without `recipient.txt`,
+so a restore on another machine gets a fresh key from `fleet vault encrypt`.
+Store it offline.
 
 ## T3 Code remote access
 
@@ -106,9 +190,14 @@ forward to the server on the node's loopback (`ssh -n -N -L
   and clones. Treat everything it held as exposed and rotate (see below).
 - **LAN and Docker-bridge traffic is not governed by the tailnet policy.** The
   master listens on loopback only, so this matters only if you add services.
-- **The master is not protected from local processes** running as your user.
-  Optional hardening: run `fleet` under a separate OS user; keep the vault on an
-  encrypted disk (FileVault/LUKS).
+- **The master is not protected from local processes** running as your user:
+  they can read the vault key the way `fleet` does (unlocked keychain, your
+  secret service, or `vault.key`). Optional hardening: run `fleet` under a
+  separate OS user; keep the disk encrypted (FileVault/LUKS) so the SSH keys
+  and the registry are covered too.
+- **The `file` key backend** keeps the age key next to the vault (different
+  directory, same home). It defends a copy of `vault/` alone, not a copy of the
+  home directory. Use it where there is no keychain or secret service.
 - **Shared memory is a prompt-injection return path.** Instructions mitigate;
   they do not prevent a model from following a planted note. Review
   `nodes/**` before promoting anything to `notes/`.
@@ -161,7 +250,9 @@ M1–M6, `tests/node_test.sh` N1–N8, `tests/e2e.sh`).
 3. HTTP with credentials goes through `lib/api.py`, which reads the vault
    files itself, or through `gh api` (keyring). Never `curl -H "Authorization: …"`.
 4. Files that may hold secrets are written with `atomic_write … 0600` under
-   `umask 077`.
+   `umask 077`; in the vault, through `vault_write` (encrypted) and read with
+   `vault_read`/`vault_cat` into a pipe or a variable, never into a temp file.
+   The identity reaches `age` on stdin (`-i -`), never as an argument.
 5. Templates reference secrets as `${UPPER_CASE}` placeholders documented in
    `harness/SECRETS.md`; `harness_secret_scan` must stay at zero hits.
 6. Tests use obviously fake values (`…-FAKE`, `ghtok`, `example`) and never a

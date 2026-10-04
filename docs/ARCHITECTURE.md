@@ -122,9 +122,15 @@ hostname is never guessed.
   is the fleet tag. `doctor` additionally runs `nc -z` from every online node
   to the master (22, 443) and to another node (22): a successful connection, or
   a node without `nc`, is a failure.
-- **Secrets at rest** on the master: `~/.config/fleet/vault`, 0700/0600, never
-  in argv, never logged, never in a repo. API calls read credentials from the
-  vault files themselves (`lib/api.py`) or go through `gh` (keyring).
+- **Secrets at rest** on the master: `~/.config/fleet/vault`, 0700/0600, and
+  every secret-bearing file an age ciphertext (`*.age`) whose private key sits
+  in the login keychain / secret-tool / a 0600 file outside the vault
+  (`lib/vault.sh`, `FLEET_VAULT_KEY_BACKEND`). Decryption goes from the key
+  backend through a pipe into `age` and from there into memory or the ssh
+  stream; never in argv, never logged, never in a repo, never a temp file. API
+  calls read credentials from the vault files themselves (`lib/api.py`, through
+  the same helper) or go through `gh` (keyring). `fleet vault status|encrypt|
+  rotate-key|export` manage it; `docs/SECURITY.md` has the details.
 - **Secret profiles**: `minimal` (what a throwaway container needs) and `full`
   (everything, including mirrored files and the proxy logins). `--ephemeral`
   invites default to `minimal`. The registry records which profile each node
@@ -157,12 +163,15 @@ hostname is never guessed.
   taken by `provision`, `reconcile` and `kick`; registry read-modify-writes
   additionally run under `locks/.registry`, so a concurrent `missing_since`
   update can never put a stale state over `revoked`.
-- **Desired-state digest** = `sha256(code_rev + "+" + config_rev + "\n" + H + "\n")`
-  where the revs are the HEADs (or tree hashes) of the fleeter checkout and the
-  config dir, and `H` = HMAC-SHA256 keyed with `vault/digest.key` over the
-  profile's secret file bytes and every mirrored file's path + content. A
-  changed secret value, file, code or config commit changes the digest; the
-  digest itself reveals nothing. The node stores it in `~/.config/fleet/applied`.
+- **Desired-state digest** = sha256 over `code_rev + "+" + config_rev` (the
+  HEADs or tree hashes of the fleeter checkout and the config dir) and, per
+  secret file and mirrored file of the profile, its path and the sha256 of its
+  ciphertext (`docs/CONTRACT.md` has the exact layout). A changed secret
+  value, file, code or config commit changes the digest; it is computed from
+  the ciphertexts, so it reveals nothing and needs no key — reconcile and
+  `fleet list` can tell `behind` while the keychain is locked. Re-encrypting an
+  unchanged value (or rotating the key) changes it once. The node stores it in
+  `~/.config/fleet/applied`.
 - Reconcile provisions a node only when its recorded or reported digest
   differs, so it is convergent: a second run is silent.
 - Code and config are shipped (`git archive HEAD`, or a tar of the tree) only

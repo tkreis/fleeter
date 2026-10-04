@@ -131,29 +131,43 @@ tombstone once cleanup is empty and the device stayed gone for that period.
 Every read-modify-write (`registry_set`) runs under `vault/locks/.registry` in
 addition to any node lock (node lock first, never the other way round).
 
-**Desired-state digest** = `sha256(code_rev + "+" + config_rev + "\n" + H + "\n")`
+**Desired-state digest** = `sha256(code_rev + "+" + config_rev + "\n" +
+"secrets/minimal.env\0" + fp + "\0" [+ "secrets/full.env\0" + fp + "\0" for
+profile full] + "files/<rel>\0" + fp + "\0" per mirrored file, sorted by rel)`
 where `code_rev` / `config_rev` are the HEADs of `$FLEET_ROOT` and
 `$FLEET_CONFIG_DIR` (or tree hashes without a commit; `none` for a missing
-config dir) and `H` = HMAC-SHA256 keyed with `vault/digest.key` (32 random
-bytes, 0600, never shipped) over the profile's secret file bytes (`minimal.env`,
-then `full.env` for profile full) and each mirrored file's path + content,
-sorted.
+config dir), `rel` is the path as it lands on the node (`.age` stripped) and
+`fp` is the item's fingerprint: the sha256 of its ciphertext (`<item>.age`),
+empty for a missing item, or — only for an item still in plaintext on a vault
+that has not run `fleet vault encrypt` — HMAC-SHA256 keyed with
+`vault/digest.key` over the plaintext. No key is needed for an encrypted
+vault, and a re-encryption (same value, or `vault rotate-key`) changes the
+digest once.
 
 ## Vault layout (master, 0700 dirs / 0600 files)
 
+Secret-bearing items are age ciphertexts (`lib/vault.sh`): `<name>.age`,
+encrypted to the recipient in `recipient.txt`; the private identity is in the
+key backend (`FLEET_VAULT_KEY_BACKEND`: keychain item / secret-tool entry
+`fleet-vault` for `$USER`, or `$FLEET_HOME/vault.key`), never in the vault.
+Readers (`vault_read PATH`) prefer `PATH.age` and fall back to a plaintext
+`PATH` left from before the migration; writers (`vault_write PATH.age`) always
+encrypt and remove the plaintext counterpart.
+
 ```
 vault/
-  secrets/minimal.env      KEY='value' lines, shell-safe single-quoted
-  secrets/full.env         full = minimal.env + full.env
-  files/<profile>/<path under $HOME>          mirrored files
-  files/full/.cli-proxy-api/{config.yaml,auth/…}   CLIProxyAPI state (full only)
-  ssh/fleet_master, ssh/fleet_master.pub
+  recipient.txt            `# fleet vault: backend=<b> account=<u>` + the age1… recipient (0644, public)
+  secrets/minimal.env.age  KEY='value' lines, shell-safe single-quoted, encrypted
+  secrets/full.env.age     full = minimal.env + full.env
+  files/<profile>/<path under $HOME>.age      mirrored files, encrypted
+  files/full/.cli-proxy-api/{config.yaml,auth/…}.age   CLIProxyAPI state (full only)
+  ssh/fleet_master, ssh/fleet_master.pub      plain (ssh reads them)
   ssh/t3_client, ssh/t3_client.pub        the key T3 Code uses towards nodes (lib/t3.sh); created by init master / t3 setup
   ssh/known_hosts          pinned node host keys, one plain `<dnsname> ssh-ed25519 <key>` line per node (host_key_pin)
-  digest.key
-  tailscale.json           {"oauth_client_id","oauth_client_secret","tailnet":"-"}, minted by init master
+  digest.key               legacy: only while plaintext items exist; `fleet vault encrypt` removes it
+  tailscale.json.age       {"oauth_client_id","oauth_client_secret","tailnet":"-"}, minted by init master
                            (keyType client, scopes auth_keys devices:core policy_file:read, tag-scoped)
-  github.json              {"token"}   fallback only
+  github.json.age          {"token"}   fallback only
   sync.json                {"tools_pushed": "<ISO>"}  last time `fleet sync` ran `fleet update` on the nodes
   nodes/<ts-id>.json, nodes/pending/<nonce>.json, nodes/claimed/<nonce>.<ts-id>.json, nodes/rollback-*.json
   locks/<ts-id>/pid        pid of the provision worker (background subshell)
@@ -191,8 +205,16 @@ node that predates pinning on their next contact.
    `FLEET_CODE_REPO` is set (then `fleet pull` tracks the repo).
 2. Ship config: same for `$FLEET_CONFIG_DIR` into `~/.local/share/fleet-config`,
    governed by `FLEET_CONFIG_REPO`.
-3. Ship secrets: `ssh … 'umask 077; mkdir -p ~/.config/fleet; cat > ~/.config/fleet/secrets.env.tmp && mv … secrets.env'`.
-4. Ship files: `tar -C vault/files/<profile> -cf - . | ssh … '<PROVISION_FILES_SCRIPT>'`:
+0. The vault key must be readable (`vault_unlocked`) when the vault is
+   encrypted; otherwise the provision is skipped with a warning (exit 4,
+   audit `skip vault-locked`) before anything is shipped, and the next
+   reconcile/sync retries.
+3. Ship secrets: the profile's env decrypted into memory (`secrets_env`; a
+   decryption failure aborts, never ships an empty file), then
+   `printf '%s\n' "$env" | ssh … 'umask 077; mkdir -p ~/.config/fleet; cat > ~/.config/fleet/secrets.env.tmp && mv … secrets.env'`.
+4. Ship files: `vault_identity | vault_tar files vault/files/<profile> | ssh … '<PROVISION_FILES_SCRIPT>'`
+   — the tar is built in memory from the decrypted items (members 0600, paths
+   without `.age`); on the node:
    `umask 077`, `mktemp -d ~/.config/fleet/stage.XXXXXX`, `tar -xf -` into it,
    `mkdir -p` + `mv -f` each file to its path under `$HOME` (same filesystem:
    an atomic rename), `rm -rf` the staging dir. With `--refresh-proxy-auth`

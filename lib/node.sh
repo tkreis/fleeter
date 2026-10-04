@@ -202,6 +202,7 @@ cmd_apply() {
     log "container: no schedules (fleet daemon runs the jobs)"
   else
     node_schedule_install
+    node_awake_apply
   fi
 
   [ -n "$failed_optional" ] && warn "optional steps failed:$failed_optional"
@@ -801,6 +802,7 @@ node_write_status() {
   FLEET_ST_MEM_DETAIL="$(node_kv_get "$FLEET_HOME/memory.state" detail)" \
   FLEET_ST_MEM_DIR="$FLEET_MEMORY_DIR" \
   FLEET_ST_SECRETS="$FLEET_HOME/secrets.env" \
+  FLEET_ST_AWAKE="$(node_awake_state)" \
   python3 - "$tmp" <<'PY' | atomic_write "$FLEET_HOME/status.json" 0600
 import json, os, re, sys, time
 e = os.environ.get
@@ -834,7 +836,8 @@ print(json.dumps({
     "applied": e("FLEET_ST_APPLIED") or None, "applied_at": e("FLEET_ST_APPLIED_AT") or None,
     "code_commit": e("FLEET_ST_CODE_COMMIT") or None, "config_commit": e("FLEET_ST_COMMIT") or None,
     "applied_commit": e("FLEET_ST_APPLIED_COMMIT") or None,
-    "tools": tools, "memory": memory, "timers": timers, "token_age_days": ages,
+    "tools": tools, "memory": memory, "timers": timers, "awake": e("FLEET_ST_AWAKE") or "n/a",
+    "token_age_days": ages,
     "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 }, indent=2))
 PY
@@ -857,6 +860,7 @@ for label, key, applied in (("code", "code_commit", ac[0]), ("config", "config_c
 m = d["memory"]
 print("memory    %s  last sync %s%s" % (m["state"], m.get("last_sync") or "-", ("  (" + m["detail"] + ")") if m.get("detail") else ""))
 print("timers    " + "  ".join("%s=%s" % (k, "on" if v else "off") for k, v in sorted(d["timers"].items())))
+print("awake     %s" % d.get("awake", "n/a"))
 for k, v in sorted(d["tools"].items()):
     print("tool      %-12s %-8s %s" % (k, v["state"], v["detail"]))
 for k, v in sorted(d["token_age_days"].items()):
@@ -938,6 +942,7 @@ cmd_leave() {
   log "leaving the fleet (files stay on disk)"
   node_daemon_stop
   node_schedule_remove || true
+  node_awake_remove || true
   if have pkill; then
     for p in $NODE_HARNESS_PROCS; do pkill -u "$(id -u)" -x "$p" 2>/dev/null || true; done
     ok "harness processes stopped"
@@ -1222,4 +1227,117 @@ node_schedule_remove() {
       if have crontab; then node_schedule_remove_cron; fi ;;
   esac
   return 0
+}
+
+# ---------- keep awake ----------
+
+# A node is only useful while it is reachable and syncing, so FLEET_KEEP_AWAKE
+# (default 1) keeps it out of system sleep. Never on the master (it may sleep)
+# and never in a container (no power management). macOS: the LaunchAgent
+# dev.fleet.awake runs `caffeinate -i -m -s` (no idle, disk or system sleep on
+# AC power; the display may still sleep) for as long as the user is logged in;
+# `fleet join` adds the pmset settings that cover logout and reboots
+# (join_power). Linux: the sleep targets are masked by `fleet join` (root);
+# apply only reports. Status: node_awake_state → on | off | n/a.
+
+NODE_AWAKE_LABEL="dev.fleet.awake"
+
+node_keep_awake() {
+  [ "${FLEET_KEEP_AWAKE:-1}" != 0 ] && ! fleet_is_master && ! fleet_in_container
+}
+
+node_awake_plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$NODE_AWAKE_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>-m</string>
+    <string>-s</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+EOF
+}
+
+# Same bootstrap logic as the job agents: rewritten and reloaded only when the
+# content changed or the agent is not loaded; FLEET_NO_SCHEDULER writes only.
+node_awake_install_macos() {
+  local plist tmp uid label=$NODE_AWAKE_LABEL
+  uid=$(id -u); plist="$HOME/Library/LaunchAgents/$label.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  tmp=$(mktemp "$HOME/Library/LaunchAgents/.fleet.XXXXXX")
+  node_awake_plist >"$tmp"
+  if [ -f "$plist" ] && cmp -s "$tmp" "$plist" && launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+    rm -f "$tmp"; return 0
+  fi
+  [ -n "${FLEET_NO_SCHEDULER:-}" ] || launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+  chmod 0644 "$tmp"; mv -f "$tmp" "$plist"
+  if [ -n "${FLEET_NO_SCHEDULER:-}" ]; then
+    ok "keep awake: $label written, not loaded (FLEET_NO_SCHEDULER)"
+  elif launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1 || launchctl load -w "$plist" >/dev/null 2>&1; then
+    ok "keep awake: $label loaded (caffeinate -i -m -s; the display may still sleep)"
+  else
+    warn "could not load $plist (launchctl); it will load at next login"
+  fi
+  node_manifest_add "$plist"
+}
+
+# Only acts when the plist is there (we always write it before loading), so a
+# machine that never had the agent sees no launchctl call.
+node_awake_remove_macos() {
+  local uid plist="$HOME/Library/LaunchAgents/$NODE_AWAKE_LABEL.plist"
+  [ -f "$plist" ] || return 0
+  uid=$(id -u)
+  launchctl bootout "gui/$uid/$NODE_AWAKE_LABEL" >/dev/null 2>&1 || launchctl unload "$plist" >/dev/null 2>&1 || true
+  rm -f "$plist"
+  ok "keep awake: $NODE_AWAKE_LABEL removed"
+}
+
+# node_awake_apply — converge: the agent is installed while node_keep_awake and
+# removed otherwise (FLEET_KEEP_AWAKE=0 on a later apply). Nothing privileged.
+node_awake_apply() {
+  if fleet_is_master || fleet_in_container; then return 0; fi
+  case "$(fleet_os)" in
+    macos)
+      if node_keep_awake; then node_awake_install_macos; else node_awake_remove_macos; fi ;;
+    linux)
+      if node_keep_awake && have systemctl && [ "$(node_awake_state)" = off ]; then
+        log "keep awake: sleep targets not masked; rerun the join one-liner or: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target"
+      fi ;;
+  esac
+  return 0
+}
+
+node_awake_remove() {
+  if fleet_is_master || fleet_in_container; then return 0; fi
+  [ "$(fleet_os)" = macos ] && node_awake_remove_macos
+  return 0
+}
+
+# node_pmset_ac_sleep — the `sleep` value of the charger (AC) profile, "" when unknown.
+node_pmset_ac_sleep() {
+  pmset -g custom 2>/dev/null | awk '/^AC Power:/ {ac=1; next} /^Battery Power:/ {ac=0} ac && $1 == "sleep" {print $2; exit}'
+}
+
+# node_awake_state — on | off | n/a (CONTRACT "fleet status --json"). macOS: the
+# agent is loaded, or pmset says no system sleep on AC; Linux: sleep.target masked.
+node_awake_state() {
+  if fleet_is_master || fleet_in_container; then echo n/a; return 0; fi
+  case "$(fleet_os)" in
+    macos)
+      if have launchctl && launchctl print "gui/$(id -u)/$NODE_AWAKE_LABEL" >/dev/null 2>&1; then echo on; return 0; fi
+      if have pmset && [ "$(node_pmset_ac_sleep)" = 0 ]; then echo on; return 0; fi
+      echo off ;;
+    linux)
+      if have systemctl && [ "$(systemctl is-enabled sleep.target 2>/dev/null)" = masked ]; then echo on; else echo off; fi ;;
+    *) echo n/a ;;
+  esac
 }

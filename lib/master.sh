@@ -1223,13 +1223,15 @@ cmd_invite() {
     created "$created" expires "$expires" ts_key_id "$key_id" user "$user"
 
   # The auth key goes to python on stdin, never argv. `tools` lets join skip
-  # privileged installs (browser, docker) the fleet does not use.
+  # privileged installs (browser, docker) the fleet does not use; `keep_awake`
+  # is this fleet's FLEET_KEEP_AWAKE, so join knows whether to touch power settings.
   code=$(printf '%s' "$key" | python3 -c 'import base64,json,sys
 d={"v":1,"ts_auth_key":sys.stdin.read(),"nonce":sys.argv[1],"name":sys.argv[2],
    "master_pubkey":sys.argv[3],"master_user":sys.argv[4],"tag":sys.argv[5],
-   "hostname_prefix":sys.argv[6],"tools":" ".join(sys.argv[7].split())}
+   "hostname_prefix":sys.argv[6],"tools":" ".join(sys.argv[7].split()),
+   "keep_awake":"0" if sys.argv[8].strip()=="0" else "1"}
 print(base64.b64encode(json.dumps(d,separators=(",",":")).encode()).decode())' \
-    "$nonce" "$name" "$pub" "$user" "$FLEET_NODE_TAG" "$FLEET_HOSTNAME_PREFIX" "${FLEET_TOOLS:-}")
+    "$nonce" "$name" "$pub" "$user" "$FLEET_NODE_TAG" "$FLEET_HOSTNAME_PREFIX" "${FLEET_TOOLS:-}" "${FLEET_KEEP_AWAKE:-1}")
   key=""
 
   audit "invite" "$name" "ok profile=$profile ephemeral=$ephemeral"
@@ -1439,6 +1441,7 @@ for fn in sorted(os.listdir(nodes_dir)):
         "synced": synced, "provisioned": r.get("provisioned") or None, "provisioned_age": age(r.get("provisioned")),
         "desired": desired, "applied": applied, "tools": tools, "memory": memory, "proxy": proxy,
         "fleet": (live or {}).get("fleet") if live else None,
+        "awake": (live or {}).get("awake") if live else None,
         "missing_since": r.get("missing_since") or "", "cleanup_pending": list(r.get("pending_cleanup") or []),
     })
 rows.sort(key=lambda x: (x["name"], x["id"]))
@@ -1454,7 +1457,7 @@ for pid in sorted(peers, key=lambda k: peers[k]["host"]):
         "synced": None, "provisioned": None, "provisioned_age": None,
         "desired": {"code": None, "config": None, "digest": None},
         "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
-        "tools": {}, "memory": None, "proxy": None, "fleet": None, "missing_since": "", "cleanup_pending": [], "master": False,
+        "tools": {}, "memory": None, "proxy": None, "fleet": None, "awake": None, "missing_since": "", "cleanup_pending": [], "master": False,
     })
 if len(master) >= 4:
     mem_state, mem_sync = master[2], master[3]
@@ -1466,7 +1469,7 @@ if len(master) >= 4:
         "desired": {"code": want_code or None, "config": want_config or None, "digest": None},
         "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
         "tools": {}, "memory": mem_state, "memory_last_sync": None if mem_sync == "-" else mem_sync,
-        "proxy": None, "fleet": os.environ.get("FLEET_VERSION"), "missing_since": "", "cleanup_pending": [], "master": True,
+        "proxy": None, "fleet": os.environ.get("FLEET_VERSION"), "awake": None, "missing_since": "", "cleanup_pending": [], "master": True,
     })
 
 if mode == "json":

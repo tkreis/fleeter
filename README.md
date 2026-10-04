@@ -60,13 +60,13 @@ container node). `fleet init master` checks the first three before it writes
 anything and tells you what is missing.
 
 ```sh
-# 1. the code (fork first if you want nodes to pull your own copy; the URL goes into fleet.conf)
-git clone https://github.com/tkreis/fleeter.git ~/fleeter
-mkdir -p ~/.local/bin && ln -s ~/fleeter/fleet ~/.local/bin/fleet
+# 1. install (clones into ~/.local/share/fleeter, links ~/.local/bin/fleet and fleeter; no sudo; rerun to update)
+curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"          # for this shell; put the same line in ~/.zshrc or ~/.bashrc
+#   (fork first if you want nodes to pull your own copy: FLEETER_REPO=<your fork> before bash)
 
 # 2. your private config repo, started from the example
-cp -R ~/fleeter/examples/fleet-config ~/fleet-config && cd ~/fleet-config
+cp -R ~/.local/share/fleeter/examples/fleet-config ~/fleet-config && cd ~/fleet-config
 $EDITOR fleet.conf          # replace YOU in the repo URLs; FLEET_MEMORY_REPO="" skips shared memory for now
 git -c init.defaultBranch=main init && git add -A && git commit -m "start fleet config"
 gh repo create YOU/fleet-config --private --source . --push
@@ -84,7 +84,7 @@ fleet config publish --no-capture                       # push the example confi
 fleet doctor
 
 # 4. one Docker node
-cd ~/fleeter && docker build -f docker/Dockerfile -t fleet-node:local .
+cd ~/.local/share/fleeter && docker build -f docker/Dockerfile -t fleet-node:local .
 docker/spawn.sh 1                                       # mints an invite, starts fleet-dock-<rand>
 fleet reconcile                                         # or wait for the timer; first provision takes a few minutes
 fleet list                                              # STATE provisioned, SYNCED yes when done
@@ -681,7 +681,7 @@ for j in reconcile sync; do systemctl --user disable --now fleet-$j.timer; rm -f
 sed -i.bak '/^Include ~\/.ssh\/config.d\/fleet$/d' ~/.ssh/config; rm -rf ~/.ssh/config.d/fleet   # or restore ~/.ssh/config.pre-fleet
 # Tailscale: delete the OAuth client "fleet master" (admin console → Settings → OAuth clients) and, if you want the
 # fleet rules out of your policy, paste the newest vault/policy-backups/*.hujson back into the policy editor
-rm -rf ~/.config/fleet ~/.local/bin/fleet ~/.local/bin/fleeter ~/fleeter
+rm -rf ~/.config/fleet ~/.local/bin/fleet ~/.local/bin/fleeter ~/.local/share/fleeter
 rm -rf ~/.claude/skills/fleet ~/.agents/skills/fleet ~/.cursor/skills/fleet    # the agent skill
 ```
 

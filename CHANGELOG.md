@@ -2,11 +2,13 @@
 
 ## 0.3.0 — 2026-10-04
 
+
 The fleet becomes visible in one command, drivable by agents, and keeps itself
 current from the master.
 
 ### Added
-- `fleet list [--json] [--offline]`: the one-shot overview. Registry + tailnet
+
+- One-line installer: `curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash` (clones into `~/.local/share/fleeter`, links `fleet` and `fleeter`, no sudo, rerun to update).- `fleet list [--json] [--offline]`: the one-shot overview. Registry + tailnet
   peers + each online node's `fleet status --json` (parallel, 10 s cap each,
   `FLEET_LIST_SECS`). Columns NAME, HOST, ONLINE, STATE, SYNCED (applied revs
   and digest against the master's), LAST PROVISION, TOOLS (`9 ok, 1 login:

@@ -23,6 +23,10 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
+      - name: install age (the vault is encrypted with it)
+        run: |
+          if [ "$(uname -s)" = Darwin ]; then brew install age; else sudo apt-get update -qq && sudo apt-get install -y -qq age; fi
+          age --version
       - name: offline master tests
         run: bash tests/master_test.sh
 
@@ -35,7 +39,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src:ro" debian:bookworm-slim bash -c '
             apt-get update -qq >/dev/null
-            apt-get install -y -qq --no-install-recommends git python3 openssh-client procps netcat-openbsd ca-certificates >/dev/null
+            apt-get install -y -qq --no-install-recommends git python3 openssh-client procps netcat-openbsd ca-certificates age >/dev/null
             cd /tmp && bash /src/tests/master_test.sh'
 
   node-test:

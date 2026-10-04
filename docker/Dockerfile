@@ -26,7 +26,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TS_SOCKET=/var/run/tailscale/tailscaled.sock
 
 # procps: pkill for `fleet leave`. netcat-openbsd: `fleet doctor` probes
-# isolation with nc. gnupg is not needed: the keyring is binary.
+# isolation with nc. age: only a master needs it (encrypted vault); it is in
+# the image because tests/e2e.sh runs the master from this image too.
+# gnupg is not needed: the keyring is binary.
 # chromium + fonts: the agents' browser (lib/tools/chrome.sh); apt can only
 # install it as root, so it is part of the image, never left to `fleet apply`
 # (which runs as the sudo-less node user). Headless, --no-sandbox. Fleets
@@ -34,7 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # --build-arg FLEET_BROWSER=0.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl bash git openssh-server openssh-client python3 procps gzip tar netcat-openbsd \
+      ca-certificates curl bash git openssh-server openssh-client python3 procps gzip tar netcat-openbsd age \
  && if [ "${FLEET_BROWSER}" = 1 ]; then \
       apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji; \
     fi \

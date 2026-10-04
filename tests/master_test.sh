@@ -1436,6 +1436,54 @@ rm -f "$FLEET_VAULT/nodes/nSYNCCNTRL.json"; rm -rf "$NODES/fleet-syncnode.tail1.
 echo '[{"nodeId":"nAAAACNTRL"}]' >"$DEVICES_JSON"
 
 # ======================================================================
+echo "== the master takes part in shared memory: schedule install clones the vault + installs the memory timer; memory sync under the master's name; fleet list master row"
+# a local bare memory repo in place of GitHub (FLEET_MEMORY_REMOTE), seed enabled for this section only
+git -c init.defaultBranch=main init -q --bare "$T/memory.git"
+mt=$(mktemp -d "$T/memseed.XXXXXX"); cp -R "$ROOT/templates/memory/." "$mt/"
+git -C "$mt" -c init.defaultBranch=main init -q; git -C "$mt" add -A; git -C "$mt" commit -q -m "init vault"; git -C "$mt" push -q "$T/memory.git" HEAD:main
+mm() { FLEET_MEMORY_SEED=1 FLEET_MEMORY_REMOTE="$T/memory.git" bash "$FLEET" "$@"; }
+refute "before: the master has no memory clone (FLEET_MEMORY_SEED=0 kept init master away from the repo)" [ -e "$HOME/fleet-memory" ]
+out=$(mm schedule install 2>&1); rc=$?
+assert "schedule install exits 0, clones the vault with the master's own git, reports the memory schedule" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'memory vault cloned' && printf '%s' \"\$0\" | grep -q 'memory schedule:' && [ -d '$HOME/fleet-memory/.git' ] && [ \"\$(git -C '$HOME/fleet-memory' remote get-url origin)\" = '$T/memory.git' ]" "$out"
+assert "the master's clone has no fleet-<name> identity: it commits as the user" bash -c "[ -z \"\$(git -C '$HOME/fleet-memory' config --local user.name)\" ]"
+case "$(uname -s)" in
+  Darwin)
+    MP="$HOME/Library/LaunchAgents/dev.fleet.memory.plist"
+    assert "dev.fleet.memory LaunchAgent: label, fleet memory sync (two argv words), every 300 s, memory.log" bash -c "grep -q '<string>dev.fleet.memory</string>' '$MP' && grep -q '<string>$ROOT/fleet</string><string>memory</string><string>sync</string>' '$MP' && grep -q '<integer>300</integer>' '$MP' && grep -q '$FLEET_HOME/memory.log' '$MP'" ;;
+  *)
+    MP="$HOME/.config/systemd/user/fleet-memory.timer"
+    assert "fleet-memory.timer + service: every 5 min, ExecStart fleet memory sync, memory.log" bash -c "grep -q '^OnUnitActiveSec=5min' '$MP' && grep -q '^ExecStart=$ROOT/fleet memory sync$' '$HOME/.config/systemd/user/fleet-memory.service' && grep -q 'memory.log' '$HOME/.config/systemd/user/fleet-memory.service'" ;;
+esac
+mp1=$(cat "$MP")
+out=$(mm schedule install 2>&1); rc=$?
+assert "schedule install is idempotent for the memory job (same file, no second clone message)" bash -c "[ $rc = 0 ] && [ \"\$(cat '$MP')\" = \"\$1\" ] && ! printf '%s' \"\$0\" | grep -q 'memory vault cloned'" "$out" "$mp1"
+out=$(mm doctor 2>&1)
+assert "doctor sees the memory schedule and the clone" bash -c "printf '%s' \"\$0\" | grep -q 'memory schedule installed' && printf '%s' \"\$0\" | grep -q 'memory vault cloned: $HOME/fleet-memory (nodes/'" "$out"
+# the master's own agent memories go up under FLEET_MASTER_NAME
+printf 'FLEET_MASTER_NAME="Ctrl Mac"\n' >>"$FLEET_HOME/fleet.conf"
+mkdir -p "$HOME/.claude/projects/-home-dev-repositories-app/memory"
+printf '# master knows the release steps\n' >"$HOME/.claude/projects/-home-dev-repositories-app/memory/MEMORY.md"
+out=$(mm memory sync 2>&1); rc=$?
+assert "memory sync on the master exits 0, captures and pushes under the sanitised master name ctrl-mac" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'committed nodes/ctrl-mac (+1 ~0 -0)' && git --git-dir='$T/memory.git' cat-file -e main:nodes/ctrl-mac/claude/-home-dev-repositories-app/MEMORY.md && git --git-dir='$T/memory.git' log -1 --format=%s main | grep -Eq '^memory: ctrl-mac [0-9T:-]+Z \(\+1 ~0 -0\)$'" "$out"
+assert "the master's commit carries the user's identity, not fleet-<name>" [ "$(git --git-dir="$T/memory.git" log -1 --format=%an main)" = "fleet tester" ]
+assert "memory.state on the master: ok with last_sync" bash -c "grep -q '^state=ok' '$FLEET_HOME/memory.state' && grep -q '^last_sync=' '$FLEET_HOME/memory.state'"
+out=$(mm list --offline --json 2>/dev/null); rc=$?
+assert "list --json: first row is the master (master true, state master, name ctrl-mac, memory ok, memory_last_sync, fleet version); node rows say master false" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); m=d[0]
+assert m[\"master\"] is True and m[\"state\"]==\"master\" and m[\"name\"]==\"ctrl-mac\" and m[\"id\"]==\"master\" and m[\"online\"] is True
+assert m[\"memory\"]==\"ok\" and m[\"memory_last_sync\"] and m[\"fleet\"] and m[\"synced\"] is None and m[\"tools\"]=={}
+assert all(x[\"master\"] is False and \"memory_last_sync\" not in x for x in d[1:]) and \"alpha\" in {x[\"name\"] for x in d[1:]}
+'" "$out"
+out=$(mm list --offline 2>/dev/null)
+assert "list table: the master row comes first with STATE master and MEMORY ok (<age>)" bash -c "printf '%s\n' \"\$0\" | sed -n 2p | grep -Eq '^ctrl-mac +[^ ]+ +yes +master +- +- +- +ok \([0-9]+[mhd]\) +- +[0-9.]+$'" "$out"
+# without a memory repo the master row says off and the memory schedule is removed again
+out=$(FLEET_MEMORY_SEED=1 FLEET_MEMORY_REMOTE="" FLEET_MEMORY_REPO="" bash -c "printf 'FLEET_MEMORY_REPO=\"\"\n' >>'$FLEET_HOME/fleet.conf'; bash '$FLEET' schedule install 2>&1; bash '$FLEET' list --offline 2>/dev/null | sed -n 2p"); rc=$?
+assert "FLEET_MEMORY_REPO unset: schedule install removes the memory timer, list shows memory off on the master row" bash -c "printf '%s' \"\$0\" | grep -q 'memory schedule removed' && [ ! -e '$MP' ] && printf '%s\n' \"\$0\" | tail -1 | grep -Eq '^ctrl-mac +[^ ]+ +yes +master +- +- +- +off +- '" "$out"
+grep -v '^FLEET_MASTER_NAME=\|^FLEET_MEMORY_REPO=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+rm -rf "$HOME/fleet-memory" "$HOME/.claude/projects"; rm -f "$FLEET_HOME/memory.state"
+
+# ======================================================================
 echo "== skill add / list / remove: config repo + this machine + the nodes; sync auto-publishes local skills"
 # a provisioned node that is online: the add's reconcile re-provisions it
 bash "$FLEET" invite --name skillnode >/dev/null 2>&1

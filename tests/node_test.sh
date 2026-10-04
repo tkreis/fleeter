@@ -75,7 +75,7 @@ git_init() { git -c init.defaultBranch=main init -q "$@"; }
 setup_root() {
   mkdir -p "$ROOT/lib/tools" "$ROOT/config" "$WORK/bin" "$WORK/tmp" "$WORK/homes"
   cp "$SRC/fleet" "$ROOT/fleet"; chmod +x "$ROOT/fleet"
-  cp "$SRC/lib/common.sh" "$SRC/lib/node.sh" "$SRC/lib/join.sh" "$ROOT/lib/"
+  cp "$SRC/lib/common.sh" "$SRC/lib/node.sh" "$SRC/lib/join.sh" "$SRC/lib/secretscan.py" "$SRC/lib/memory_capture.py" "$ROOT/lib/"
   cp "$SRC/config/defaults.conf" "$ROOT/config/defaults.conf"
   cp "$SRC/lib/tools/chrome.sh" "$ROOT/lib/tools/chrome.sh"   # real plug-in: wrapper + status tests
   cp "$SRC/lib/tools/cliproxy.sh" "$ROOT/lib/tools/cliproxy.sh" # real plug-in: remote mode in containers (env.sh proxy vars)
@@ -892,7 +892,7 @@ case_harness_toml() {
   local fh="$WORK/homes/capture" repo="$WORK/capture-repo" out rc tpl
   rm -rf "$fh" "$repo"
   mkdir -p "$fh/.claude" "$fh/.codex" "$fh/.cursor" "$fh/.grok" "$fh/.t3/userdata" "$repo/harness/codex" "$repo/skills"
-  cp "$SRC/lib/common.sh" "$SRC/lib/harness.sh" "$repo/"
+  cp "$SRC/lib/common.sh" "$SRC/lib/harness.sh" "$repo/"; mkdir -p "$repo/lib"; cp "$SRC/lib/secretscan.py" "$repo/lib/"
   echo '{}' >"$fh/.claude/settings.json"; echo '{"mcpServers":{}}' >"$fh/.claude.json"
   printf 'model = "gpt"\n\n[mcp_servers.foo]\nurl = "https://example.invalid/mcp"\n' >"$fh/.codex/config.toml"
   echo '{"mcpServers":{}}' >"$fh/.cursor/mcp.json"; echo '{}' >"$fh/.cursor/cli-config.json"
@@ -1130,20 +1130,127 @@ case_skill() {
 }
 
 case_build_index() {
-  begin "templates/memory: build_index.py lists notes grouped by node"
+  begin "templates/memory: build_index.py groups by node then source, merges projects/<slug>.md across nodes"
   local v="$WORK/vault" out
   rm -rf "$v"; cp -R "$SRC/templates/memory/." "$v/"
   out=$(python3 "$v/scripts/build_index.py")
-  assert "fresh template index unchanged" [ "$out" = "INDEX.md unchanged" ]
-  mkdir -p "$v/nodes/alpha"
+  assert "fresh template index unchanged" [ "$out" = "INDEX.md and projects/ unchanged" ]
+  mkdir -p "$v/nodes/alpha/claude/-home-dev-repositories-app" "$v/nodes/beta/claude/-home-dev-repositories-app" "$v/nodes/beta/claude/-home-dev-repositories-shared" "$v/nodes/beta/grok/global" "$v/nodes/beta/codex"
   printf -- '---\nnode: alpha\ncreated: 2026-10-03\ntags: [backend, db]\n---\n# SurrealDB quirk\n\nbody\n' >"$v/nodes/alpha/surreal.md"
   printf '# Curated\n' >"$v/notes/curated.md"
+  printf '# App build on alpha\n' >"$v/nodes/alpha/claude/-home-dev-repositories-app/MEMORY.md"
+  printf '# App flaky test (beta)\n' >"$v/nodes/beta/claude/-home-dev-repositories-app/flaky.md"
+  printf '# Shared store\n' >"$v/nodes/beta/claude/-home-dev-repositories-shared/MEMORY.md"
+  # shellcheck disable=SC2016  # literal backticks: the ALIASES.md line format
+  printf -- '- `-home-dev-repositories-shared-two` -> `-home-dev-repositories-shared`\n' >"$v/nodes/beta/claude/ALIASES.md"
+  printf '# Grok global\n' >"$v/nodes/beta/grok/global/MEMORY.md"
+  printf 'codex text\n' >"$v/nodes/beta/codex/note.md"
   out=$(python3 "$v/scripts/build_index.py")
-  assert "index updated" [ "$out" = "INDEX.md updated" ]
-  assert "notes line" grep -q '^- \[Curated\](notes/curated.md)$' "$v/INDEX.md"
-  assert "node section" grep -q '^## nodes/alpha$' "$v/INDEX.md"
-  assert "node line with meta" grep -q '^- \[SurrealDB quirk\](nodes/alpha/surreal.md) — node alpha · created 2026-10-03 · tags: backend, db$' "$v/INDEX.md"
+  assert "index + projects written" bash -c "printf '%s' \"\$0\" | grep -q '^updated: INDEX.md, projects/-home-dev-repositories-app.md, projects/-home-dev-repositories-shared-two.md, projects/-home-dev-repositories-shared.md$'" "$out"
+  assert "notes line" grep -Eq '^- \[Curated\]\(notes/curated.md\) — updated [0-9-]{10}$' "$v/INDEX.md"
+  assert "node sections grouped by source, in order" bash -c "printf '%s\n' \"\$(grep -E '^##' '$v/INDEX.md' | tr '\n' ' ')\" | grep -q '^## notes ## nodes/alpha ### notes ### claude ## nodes/beta ### claude ### codex ### grok ## projects $'"
+  assert "hand-written note line with meta and updated" grep -Eq '^- \[SurrealDB quirk\]\(nodes/alpha/surreal.md\) — node alpha · created 2026-10-03 · tags: backend, db · updated [0-9-]{10}$' "$v/INDEX.md"
+  assert "claude line names the project slug; ALIASES.md is not listed as a note" bash -c "grep -Eq '^- \[App flaky test \(beta\)\]\(nodes/beta/claude/-home-dev-repositories-app/flaky.md\) — node beta · project \`-home-dev-repositories-app\` · updated' '$v/INDEX.md' && ! grep -q 'ALIASES.md' '$v/INDEX.md'"
+  assert "projects section lists the slug with the node count" grep -q '^- \[-home-dev-repositories-app\](projects/-home-dev-repositories-app.md) — 2 node(s)$' "$v/INDEX.md"
+  assert "projects/<slug>.md merges both nodes with relative links" bash -c "p='$v/projects/-home-dev-repositories-app.md'; grep -q '^## alpha$' \"\$p\" && grep -q '^## beta$' \"\$p\" && grep -Eq '^- \[App build on alpha\]\(\.\./nodes/alpha/claude/-home-dev-repositories-app/MEMORY.md\) — MEMORY.md · updated [0-9-]{10}$' \"\$p\" && grep -q '(../nodes/beta/claude/-home-dev-repositories-app/flaky.md)' \"\$p\" && grep -q 'generated by scripts/build_index.py' \"\$p\""
+  assert "an alias slug gets its own project view pointing at the canonical files" bash -c "p='$v/projects/-home-dev-repositories-shared-two.md'; grep -q 'Alias of: \`-home-dev-repositories-shared (node beta)\`' \"\$p\" && grep -q '(../nodes/beta/claude/-home-dev-repositories-shared/MEMORY.md)' \"\$p\""
   assert "--check passes when current" python3 "$v/scripts/build_index.py" --check
+  rm -rf "$v/nodes/beta/claude/-home-dev-repositories-shared" "$v/nodes/beta/claude/ALIASES.md"
+  refute "--check fails when a project view is stale" python3 "$v/scripts/build_index.py" --check
+  out=$(python3 "$v/scripts/build_index.py")
+  assert "stale project views are removed (mirror)" bash -c "[ ! -e '$v/projects/-home-dev-repositories-shared.md' ] && [ ! -e '$v/projects/-home-dev-repositories-shared-two.md' ] && [ -f '$v/projects/-home-dev-repositories-app.md' ] && printf '%s' \"\$0\" | grep -q 'projects/-home-dev-repositories-shared.md (removed)'" "$out"
+  end
+}
+
+# mk_memories HOME SLUG — a fake set of native agent memories under HOME:
+# Claude project SLUG (MEMORY.md + a note), a scratch workspace (excluded by
+# default), a >256 KB file, a file with a fake GitHub token (assembled at run
+# time so the fixture itself never contains one), two project slugs symlinked to
+# one shared store, a Codex text memory next to a sqlite file, a Grok MEMORY.md
+# next to its sqlite/wal/shm files.
+mk_memories() {
+  local h=$1 slug=$2 cp="$1/.claude/projects"
+  mkdir -p "$cp/$slug/memory" "$cp/-home-dev-Library-Application-Support-Claude-scratch-workspaces-0a1b2c/memory" \
+           "$cp/-home-dev-repositories-backend" "$cp/-home-dev-repositories-frontend" "$h/shared-store" \
+           "$h/.codex/memories" "$h/.grok/memory-v2/global" "$h/.grok/memory-v2/workspaces/w1"
+  printf '# App memory\n\nbuilds with make test\n' >"$cp/$slug/memory/MEMORY.md"
+  printf '# Flaky test\n\ncommit: 0123456789abcdef0123456789abcdef01234567\n' >"$cp/$slug/memory/flaky.md"
+  printf '# scratch\n' >"$cp/-home-dev-Library-Application-Support-Claude-scratch-workspaces-0a1b2c/memory/MEMORY.md"
+  head -c 270000 /dev/zero | tr '\0' 'x' >"$cp/$slug/memory/huge.md"
+  printf 'remember: token=%s%s\n' 'ghp_' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' >"$cp/$slug/memory/leak.md"
+  printf '# Shared store\n' >"$h/shared-store/MEMORY.md"
+  ln -s "$h/shared-store" "$cp/-home-dev-repositories-backend/memory"
+  ln -s "$h/shared-store" "$cp/-home-dev-repositories-frontend/memory"
+  printf 'codex remembers\n' >"$h/.codex/memories/notes.md"; printf 'SQLite format 3\0\0' >"$h/.codex/memories/memories.sqlite"
+  printf '# Grok global\n' >"$h/.grok/memory-v2/global/MEMORY.md"; printf '# Grok w1\n' >"$h/.grok/memory-v2/workspaces/w1/MEMORY.md"
+  printf 'x' >"$h/.grok/memory-v2/global/index.sqlite"; printf 'x' >"$h/.grok/memory-v2/global/memory_state.sqlite-wal"; printf 'x' >"$h/.grok/memory-v2/global/memory_state.sqlite-shm"
+}
+
+case_memory_capture() {
+  begin "memory sync: captures claude/codex/grok memories (aliases, excludes, size, secret scan), mirrors deletions, quiet when unchanged"
+  local h m slug=-home-dev-repositories-app rc tip out
+  h=$(mk_home kappa ""); m="$h/fleet-memory"
+  mk_memories "$h" "$slug"
+  fleet_as "$h" apply >/dev/null 2>&1
+  fleet_as "$h" memory sync >"$WORK/cap1.log" 2>&1; rc=$?
+  assert "sync exits 0 (see $WORK/cap1.log)" [ "$rc" -eq 0 ] || sed 's/^/     | /' "$WORK/cap1.log"
+  assert "claude memories under nodes/kappa/claude/<slug>/" bash -c "git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/claude/$slug/MEMORY.md && git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/claude/$slug/flaky.md"
+  assert "a commit hash in a memory is not a secret" git --git-dir="$WORK/memory.git" cat-file -e "main:nodes/kappa/claude/$slug/flaky.md"
+  assert "symlinked store captured once under the first slug, alias recorded" bash -c "git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/claude/-home-dev-repositories-backend/MEMORY.md && ! git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/claude/-home-dev-repositories-frontend/MEMORY.md && git --git-dir='$WORK/memory.git' show main:nodes/kappa/claude/ALIASES.md | grep -qx -- '- \`-home-dev-repositories-frontend\` -> \`-home-dev-repositories-backend\`'"
+  refute "scratch workspace excluded by default" bash -c "git --git-dir='$WORK/memory.git' ls-tree -r --name-only main | grep -q scratch"
+  refute "file over FLEET_MEMORY_MAX_KB skipped" git --git-dir="$WORK/memory.git" cat-file -e "main:nodes/kappa/claude/$slug/huge.md"
+  refute "file with a token never committed" git --git-dir="$WORK/memory.git" cat-file -e "main:nodes/kappa/claude/$slug/leak.md"
+  refute "token value not in the vault" bash -c "git --git-dir='$WORK/memory.git' grep -q 'ghp_ABCDEFGHIJ' main"
+  assert "secret hit warned once, named by path, recorded in memory.state" bash -c "[ \"\$(grep -c 'secret scan hit' '$WORK/cap1.log')\" = 1 ] && grep -q 'secret scan hit: claude/$slug/leak.md' '$WORK/cap1.log' && grep -q '^capture_skipped=claude/$slug/leak.md' '$h/.config/fleet/memory.state' && grep -q '^detail=not uploaded (secret scan): claude/$slug/leak.md' '$h/.config/fleet/memory.state'"
+  assert "codex text file captured, sqlite skipped" bash -c "git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/codex/notes.md && ! git --git-dir='$WORK/memory.git' ls-tree -r --name-only main | grep -q sqlite"
+  assert "grok MEMORY.md files captured" bash -c "git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/grok/global/MEMORY.md && git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/grok/workspaces/w1/MEMORY.md"
+  assert "commit subject carries the counts (+7 ~0 -0)" bash -c "git --git-dir='$WORK/memory.git' log -1 --format=%s main | grep -Eq '^memory: kappa [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z \(\+7 ~0 -0\)$'"
+  assert "capture summary logged per source" grep -q 'memory: captured claude files=4 copied=4 skipped_secret=1 skipped_size=1 skipped_excluded=1; codex files=1 copied=1 skipped_excluded=1; grok files=2 copied=2' "$WORK/cap1.log"
+  assert "status detail shows the skipped file" bash -c "HOME='$h' '$ROOT/fleet' status --json 2>/dev/null | grep -q 'not uploaded (secret scan): claude/$slug/leak.md'"
+  tip=$(git --git-dir="$WORK/memory.git" rev-parse main)
+  out=$(fleet_as "$h" memory sync 2>&1); rc=$?
+  assert "second sync: exit 0, quiet, no commit (secret hit not repeated)" bash -c "[ '$rc' -eq 0 ] && [ -z \"\$0\" ] && [ \"\$(git --git-dir='$WORK/memory.git' rev-parse main)\" = '$tip' ]" "$out"
+  rm "$h/.codex/memories/notes.md" "$h/.claude/projects/$slug/memory/flaky.md"
+  printf 'more\n' >>"$h/.claude/projects/$slug/memory/MEMORY.md"
+  fleet_as "$h" memory sync >"$WORK/cap3.log" 2>&1; rc=$?
+  assert "deletions mirrored, modification counted: (+0 ~1 -2)" bash -c "[ '$rc' -eq 0 ] && git --git-dir='$WORK/memory.git' log -1 --format=%s main | grep -q '(+0 ~1 -2)' && ! git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/codex/notes.md && ! git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/claude/$slug/flaky.md && git --git-dir='$WORK/memory.git' show main:nodes/kappa/claude/$slug/MEMORY.md | grep -q '^more$'"
+  assert "empty codex dir pruned locally, nothing outside nodes/kappa touched" bash -c "[ ! -e '$m/nodes/kappa/codex' ] && git --git-dir='$WORK/memory.git' show --name-only --format= main | grep -v '^nodes/kappa/' | grep -q . && exit 1; exit 0"
+  # a hand-written note next to the captured dirs still syncs
+  printf '# by hand\n' >"$m/nodes/kappa/by-hand.md"
+  fleet_as "$h" memory sync >/dev/null 2>&1
+  assert "hand-written note committed alongside (+1 ~0 -0)" bash -c "git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/by-hand.md && git --git-dir='$WORK/memory.git' log -1 --format=%s main | grep -q '(+1 ~0 -0)'"
+  # FLEET_MEMORY_CAPTURE="" switches capture off
+  h=$(mk_home lambda ""); printf 'FLEET_MEMORY_CAPTURE=""\n' >>"$h/.config/fleet/fleet.conf"
+  mk_memories "$h" "$slug"
+  fleet_as "$h" apply >/dev/null 2>&1
+  out=$(fleet_as "$h" memory sync 2>&1); rc=$?
+  assert "FLEET_MEMORY_CAPTURE=\"\": exit 0, quiet, nothing uploaded for lambda" bash -c "[ '$rc' -eq 0 ] && [ -z \"\$0\" ] && ! git --git-dir='$WORK/memory.git' ls-tree -r --name-only main | grep -q '^nodes/lambda/'" "$out"
+  # an exclude glob of the owner's own
+  h=$(mk_home mu ""); printf 'FLEET_MEMORY_CAPTURE_EXCLUDE="*scratch* -home-dev-repositories-app/*"\n' >>"$h/.config/fleet/fleet.conf"
+  mk_memories "$h" "$slug"
+  fleet_as "$h" apply >/dev/null 2>&1; fleet_as "$h" memory sync >/dev/null 2>&1
+  assert "FLEET_MEMORY_CAPTURE_EXCLUDE glob drops a whole project, the rest is uploaded" bash -c "! git --git-dir='$WORK/memory.git' ls-tree -r --name-only main | grep -q '^nodes/mu/claude/$slug/' && git --git-dir='$WORK/memory.git' cat-file -e main:nodes/mu/claude/-home-dev-repositories-backend/MEMORY.md && git --git-dir='$WORK/memory.git' cat-file -e main:nodes/mu/grok/global/MEMORY.md"
+  end
+}
+
+case_memory_capture_two_nodes() {
+  begin "memory: two nodes capture, both see each other's memories, build_index merges them per project"
+  local hn ho slug=-home-dev-repositories-two rc out   # a slug no earlier case uploaded: exactly two nodes
+  hn=$(mk_home nu ""); ho=$(mk_home omicron "")
+  mkdir -p "$hn/.claude/projects/$slug/memory" "$ho/.claude/projects/$slug/memory"
+  printf '# nu knows the build\n' >"$hn/.claude/projects/$slug/memory/MEMORY.md"
+  printf '# omicron knows the tests\n' >"$ho/.claude/projects/$slug/memory/tests.md"
+  fleet_as "$hn" apply >/dev/null 2>&1; fleet_as "$ho" apply >/dev/null 2>&1
+  fleet_as "$hn" memory sync >/dev/null 2>&1; fleet_as "$ho" memory sync >/dev/null 2>&1
+  fleet_as "$hn" memory sync >/dev/null 2>&1; fleet_as "$ho" memory sync >/dev/null 2>&1
+  assert "nu has omicron's memory and its own" bash -c "grep -q 'omicron knows' '$hn/fleet-memory/nodes/omicron/claude/$slug/tests.md' && grep -q 'nu knows' '$hn/fleet-memory/nodes/nu/claude/$slug/MEMORY.md'"
+  assert "omicron has nu's memory" grep -q 'nu knows' "$ho/fleet-memory/nodes/nu/claude/$slug/MEMORY.md"
+  out=$(python3 "$hn/fleet-memory/scripts/build_index.py" 2>&1); rc=$?
+  assert "build_index in a node's clone: exit 0, writes projects/<slug>.md" bash -c "[ '$rc' -eq 0 ] && [ -f '$hn/fleet-memory/projects/$slug.md' ]"
+  assert "projects/<slug>.md lists both nodes' files" bash -c "p='$hn/fleet-memory/projects/$slug.md'; grep -q '^## nu$' \"\$p\" && grep -q '^## omicron$' \"\$p\" && grep -q '(../nodes/nu/claude/$slug/MEMORY.md)' \"\$p\" && grep -q '(../nodes/omicron/claude/$slug/tests.md)' \"\$p\""
+  assert "INDEX.md groups both nodes under claude and lists the project" bash -c "i='$hn/fleet-memory/INDEX.md'; grep -q '^## nodes/nu$' \"\$i\" && grep -q '^## nodes/omicron$' \"\$i\" && grep -q '^- \[$slug\](projects/$slug.md) — 2 node(s)$' \"\$i\""
+  fleet_as "$hn" memory sync >"$WORK/cap-nu.log" 2>&1
+  assert "a locally rebuilt INDEX/projects stays unstaged (outside nodes/nu) and is reported" bash -c "grep -q 'changes outside nodes/nu left unstaged' '$WORK/cap-nu.log' && ! git --git-dir='$WORK/memory.git' cat-file -e main:projects/$slug.md"
   end
 }
 
@@ -1177,6 +1284,8 @@ case_memory_off
 case_memory_sync
 case_memory_concurrent
 case_memory_conflict
+case_memory_capture
+case_memory_capture_two_nodes
 case_pull
 case_pull_retry
 case_pull_concurrent

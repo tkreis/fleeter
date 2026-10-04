@@ -162,10 +162,13 @@ assert "master runs fleet from its clone of the code repo" bash -c "[ \"\$(mexec
 step "master init (non-interactive), secrets"
 # the preflight wants a logged-in tailscale: the status file says Running before any peer exists
 printf '{"BackendState":"Running","Self":{"ID":"nMASTERCNTRL","HostName":"master"},"Peer":{}}\n' | mexec_i sh -c "cat > $MHOME/ts-status.json"
+# the master reaches the memory repo with its own git: the local bare repo instead of GitHub, named "master" in the vault
+mexec sh -c "mkdir -p $MHOME/.config/fleet && printf 'FLEET_MEMORY_REMOTE=/srv/repos/memory.git\nFLEET_MASTER_NAME=master\n' > $MHOME/.config/fleet/fleet.conf"
 # bootstrap API token (fake: tskey-api-kboot-FAKE), "apply" the policy template, GitHub token fallback (no gh in the image)
 printf 'tskey-api-kboot-FAKE\napply\nghtok\n' | mexec_i fleet init master --config-dir $MHOME/fleet-config >"$WORK/init.log" 2>&1; rc=$?
 assert "fleet init master exits 0" [ "$rc" = 0 ] || tail -5 "$WORK/init.log"
 assert "init ran the preflight (tailscale, git identity)" grep -q 'preflight: commands present, Tailscale logged in, git identity e2e' "$WORK/init.log"
+assert "init cloned the memory vault for the master itself and wrote the memory schedule (fleet memory sync)" bash -c "grep -q 'memory vault cloned' '$WORK/init.log' && grep -q 'memory schedule:' '$WORK/init.log' && mexec test -d $MHOME/fleet-memory/.git && mexec test -d $MHOME/fleet-memory/nodes/master && mexec grep -q '^ExecStart=.*/fleet memory sync$' $MHOME/.config/systemd/user/fleet-memory.service"
 assert "config dir recorded in the master's local fleet.conf" bash -c "mfile $MHOME/.config/fleet/fleet.conf | grep -q \"^FLEET_CONFIG_DIR='$MHOME/fleet-config'\""
 assert "vault 0700" [ "$(mexec stat -c %a $VAULT)" = 700 ]
 assert "master ssh key generated" mexec test -f $VAULT/ssh/fleet_master.pub
@@ -386,6 +389,23 @@ nexec "$NB" fleet memory sync >/dev/null 2>&1
 nexec "$NA" fleet memory sync >/dev/null 2>&1
 assert "alpha sees beta's reply" bash -c "nfile $NA $MHOME/fleet-memory/nodes/beta/reply.md | grep -q beta-reply-7"
 assert "beta: memory.state ok with last_sync" bash -c "nfile $NB $MHOME/.config/fleet/memory.state | grep -q '^state=ok' && nfile $NB $MHOME/.config/fleet/memory.state | grep -q '^last_sync='"
+
+# ======================================================================
+step "shared memory: agent memories are uploaded by fleet; beta finds alpha's in projects/<slug>.md (build_index run by hand: no GitHub Action here)"
+SLUG=-home-fleet-repositories-app
+nexec "$NA" sh -c "mkdir -p $MHOME/.claude/projects/$SLUG/memory $MHOME/.claude/projects/-home-fleet-Library-Application-Support-Claude-scratch-workspaces-1/memory && printf '# alpha learned the app build\n\nmake test needs java\n' > $MHOME/.claude/projects/$SLUG/memory/MEMORY.md && printf '# scratch\n' > $MHOME/.claude/projects/-home-fleet-Library-Application-Support-Claude-scratch-workspaces-1/memory/MEMORY.md && printf 'token=%s%s\n' ghp_ ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 > $MHOME/.claude/projects/$SLUG/memory/leak.md"
+nexec "$NA" fleet memory sync >"$WORK/sync-a2.log" 2>&1; rc=$?
+assert "alpha: memory sync captured the Claude memory, skipped the token file (warned) and the scratch workspace, commit counts in the subject" bash -c "[ $rc = 0 ] && grep -q 'secret scan hit: claude/$SLUG/leak.md' '$WORK/sync-a2.log' && mexec git --git-dir=/srv/repos/memory.git cat-file -e main:nodes/alpha/claude/$SLUG/MEMORY.md && ! mexec git --git-dir=/srv/repos/memory.git cat-file -e main:nodes/alpha/claude/$SLUG/leak.md && ! mexec git --git-dir=/srv/repos/memory.git ls-tree -r --name-only main | grep -q scratch && mexec git --git-dir=/srv/repos/memory.git log -1 --format=%s main | grep -Eq '^memory: alpha [0-9T:-]+Z \(\+1 ~0 -0\)$'" || tail -5 "$WORK/sync-a2.log"
+nexec "$NB" fleet memory sync >/dev/null 2>&1
+assert "beta: has alpha's uploaded memory after one sync" bash -c "nfile $NB $MHOME/fleet-memory/nodes/alpha/claude/$SLUG/MEMORY.md | grep -q 'alpha learned the app build'"
+nexec "$NB" python3 $MHOME/fleet-memory/scripts/build_index.py >"$WORK/index-b.log" 2>&1; rc=$?
+assert "beta: build_index.py writes projects/<slug>.md listing alpha's file, INDEX.md groups nodes/alpha by source" bash -c "[ $rc = 0 ] && nfile $NB $MHOME/fleet-memory/projects/$SLUG.md | grep -q '^## alpha$' && nfile $NB $MHOME/fleet-memory/projects/$SLUG.md | grep -q '(../nodes/alpha/claude/$SLUG/MEMORY.md)' && nfile $NB $MHOME/fleet-memory/INDEX.md | grep -q '^## nodes/alpha$' && nfile $NB $MHOME/fleet-memory/INDEX.md | grep -q '^### claude$' && nfile $NB $MHOME/fleet-memory/INDEX.md | grep -q '(projects/$SLUG.md) — 1 node(s)$'" || cat "$WORK/index-b.log"
+mexec sh -c "mkdir -p $MHOME/.claude/projects/$SLUG/memory && printf '# the master knows the release\n' > $MHOME/.claude/projects/$SLUG/memory/MEMORY.md"
+mexec fleet memory sync >"$WORK/sync-m.log" 2>&1; rc=$?
+assert "master: memory sync uploads its own agent memory under nodes/master, committed as the user" bash -c "[ $rc = 0 ] && grep -q 'committed nodes/master (+1 ~0 -0)' '$WORK/sync-m.log' && mexec git --git-dir=/srv/repos/memory.git cat-file -e main:nodes/master/claude/$SLUG/MEMORY.md && [ \"\$(mexec git --git-dir=/srv/repos/memory.git log -1 --format=%an main)\" = e2e ]" || tail -5 "$WORK/sync-m.log"
+nexec "$NA" fleet memory sync >/dev/null 2>&1
+assert "alpha: sees the master's memory too" bash -c "nfile $NA $MHOME/fleet-memory/nodes/master/claude/$SLUG/MEMORY.md | grep -q 'master knows the release'"
+assert "fleet list: the master row (state master, memory ok) comes first, nodes say master false" bash -c "mexec fleet list --offline --json | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d[0]; assert m[\"master\"] is True and m[\"name\"]==\"master\" and m[\"state\"]==\"master\" and m[\"memory\"]==\"ok\" and m[\"memory_last_sync\"]; assert all(x[\"master\"] is False for x in d[1:])' && mexec fleet list --offline | sed -n 2p | grep -Eq '^master +[^ ]+ +yes +master +- +- +- +ok \([0-9]+[mhd]\) +- +[0-9.]+$'"
 
 # ======================================================================
 step "trust model: nodes cannot reach the master"

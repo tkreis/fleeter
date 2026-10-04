@@ -10,6 +10,12 @@ appears in argv or in a process listing:
                                 is used as the Bearer token instead of the OAuth
                                 client (fleet init master / fleet policy apply)
 
+Both vault files are age ciphertexts (`<name>.age`, lib/vault.sh): they are
+decrypted through `vault_cat` (the identity comes from the key backend and
+reaches age on a pipe) into memory only; a plaintext file from before
+encryption is still read. tailscale.json is written encrypted to
+vault/recipient.txt when the vault has one.
+
 Base URLs are overridable for tests: FLEET_TS_API, FLEET_GH_API.
 
 Verified API facts (2026-10-03, Tailscale API v2 OpenAPI https://api.tailscale.com/api/v2
@@ -62,6 +68,7 @@ import difflib
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -79,14 +86,59 @@ def vault():
     return v
 
 
-def load_json(path):
+def fleet_root():
+    return os.environ.get("FLEET_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def vault_read(name):
+    """Plaintext bytes of the vault item NAME: `<name>.age` decrypted by
+    lib/vault.sh's vault_cat (key backend -> pipe -> age; nothing on disk), or
+    the legacy plaintext file. None when the item does not exist."""
+    p = os.path.join(vault(), name)
+    if not os.path.isfile(p + ".age"):
+        if os.path.isfile(p):
+            with open(p, "rb") as f:
+                return f.read()
+        return None
+    root = fleet_root()
+    env = dict(os.environ, FLEET_ROOT=root)
+    r = subprocess.run(["bash", "-c", '. "$1/lib/common.sh" && fleet_load_config && . "$1/lib/vault.sh" && vault_cat "$2"',
+                        "_", root, p + ".age"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    if r.returncode != 0:
+        fail("cannot decrypt %s.age (vault key unreachable? fleet vault status) %s"
+             % (p, r.stderr.decode(errors="replace").strip()[-200:]))
+    return r.stdout
+
+
+def load_vault_json(name):
+    raw = vault_read(name)
+    if raw is None:
+        fail("missing %s (run: fleet init master)" % os.path.join(vault(), name))
     try:
-        with open(path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        fail("missing %s (run: fleet init master)" % path)
+        return json.loads(raw.decode())
     except ValueError as e:
-        fail("invalid JSON in %s: %s" % (path, e))
+        fail("invalid JSON in %s: %s" % (name, e))
+
+
+def write_vault_json(name, text):
+    """Write a vault item: encrypted to vault/recipient.txt (`age -R`, plaintext
+    only on age's stdin, tmp + rename, 0600) when the vault has a recipient;
+    a plaintext 0600 file only on a vault from before encryption."""
+    p = os.path.join(vault(), name)
+    rcpt = os.path.join(vault(), "recipient.txt")
+    if not os.path.isfile(rcpt):
+        write_private(p, text)
+        return
+    tmp = p + ".age.tmp.%d" % os.getpid()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        r = subprocess.run(["age", "-R", rcpt], input=text.encode(), stdout=f, stderr=subprocess.PIPE)
+    if r.returncode != 0:
+        os.unlink(tmp)
+        fail("age encryption of %s failed: %s" % (name, r.stderr.decode(errors="replace").strip()))
+    os.replace(tmp, p + ".age")
+    if os.path.isfile(p):
+        os.unlink(p)
 
 
 def fail(msg, code=1):
@@ -219,7 +271,7 @@ def ts_auth():
     boot = bootstrap_token()
     if boot:
         return boot, "-"
-    creds = load_json(os.path.join(vault(), "tailscale.json"))
+    creds = load_vault_json("tailscale.json")
     return ts_token(creds), (creds.get("tailnet") or "-")
 
 
@@ -265,9 +317,9 @@ def ts_cmd(args):
         r = request("POST", "%s/tailnet/%s/keys" % (base, tailnet), h, data=body)
         if not r or "key" not in r or not r.get("id"):
             fail("client create returned no id/key")
-        write_private(os.path.join(vault(), "tailscale.json"),
-                      json.dumps({"oauth_client_id": r["id"], "oauth_client_secret": r["key"],
-                                  "tailnet": tailnet}) + "\n")
+        write_vault_json("tailscale.json",
+                         json.dumps({"oauth_client_id": r["id"], "oauth_client_secret": r["key"],
+                                     "tailnet": tailnet}) + "\n")
         print(r["id"])
     elif sub == "key-delete":
         request("DELETE", "%s/tailnet/%s/keys/%s" % (base, tailnet, urllib.parse.quote(args[1])), h,
@@ -434,7 +486,7 @@ def policy_cmd(args):
 # ---------- GitHub (token fallback; lib/master.sh prefers `gh api`) ----------
 
 def gh_cmd(args):
-    creds = load_json(os.path.join(vault(), "github.json"))
+    creds = load_vault_json("github.json")
     token = creds.get("token", "")
     if not token:
         fail("github.json lacks token")

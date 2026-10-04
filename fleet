@@ -48,7 +48,11 @@ Master:
   config publish [--yes] [--no-capture]   capture this machine's harness config into the config repo, commit, push
   skill install                     install fleeter's `fleet` agent skill into this machine's skill dirs
   policy check|apply                verify the tailnet policy / merge the fleet rules into it (templates/tailscale-policy.hujson)
-  doctor                            vault modes, policy, tokens, isolation probes, schedules
+  vault status                      encryption at rest: key backend, recipient, key reachable, plaintext left
+  vault encrypt                     encrypt a vault from before 0.3.0 in place (idempotent)
+  vault rotate-key                  new vault key, every secret re-encrypted, old key removed
+  vault export FILE                 passphrase-protected (age -p) backup of the whole vault
+  doctor                            vault modes + encryption, policy, tokens, isolation probes, schedules
 
 Node:
   join                              join the tailnet and enrol with the master
@@ -93,6 +97,11 @@ usage_for() {
     policy)             echo "fleet policy check | fleet policy apply" ;;
     "policy check")     echo "fleet policy check" ;;
     "policy apply")     echo "fleet policy apply" ;;
+    vault)              echo "fleet vault status | fleet vault encrypt | fleet vault rotate-key | fleet vault export FILE" ;;
+    "vault status")     echo "fleet vault status" ;;
+    "vault encrypt")    echo "fleet vault encrypt" ;;
+    "vault rotate-key") echo "fleet vault rotate-key" ;;
+    "vault export")     echo "fleet vault export FILE" ;;
     doctor)             echo "fleet doctor" ;;
     join)               echo "fleet join    (invite code from the prompt, FLEET_INVITE_CODE or FLEET_INVITE_FILE)" ;;
     apply)              echo "fleet apply [--from-master DIGEST]" ;;
@@ -170,7 +179,7 @@ esac
 # `fleet t3 status --help` both print the right line.
 sub=""
 case "$cmd" in
-  init|secrets|files|proxy|t3|config|policy|memory|skill|schedule)
+  init|secrets|files|proxy|t3|config|policy|memory|skill|schedule|vault)
     sub=${1:-}
     if help_wanted "$sub"; then usage_for "$cmd"; exit 0; fi
     [ $# -gt 0 ] && shift
@@ -185,6 +194,7 @@ case "$cmd" in
       memory)  subcommand memory "sync" "$sub" ;;
       skill)   subcommand skill "install" "$sub" ;;
       schedule) subcommand schedule "install" "$sub" ;;
+      vault)   subcommand vault "status encrypt rotate-key export" "$sub" ;;
     esac
     cmd="$cmd $sub" ;;
 esac
@@ -218,6 +228,10 @@ case "$cmd" in
   "config publish")  arg_check "$cmd" 0 "--yes -y --no-capture" "$@"; cmd_config_publish "$@" ;;
   "policy check"|"policy apply") arg_check "$cmd" 0 "" "$@"; cmd_policy "$sub" ;;
   "skill install")   arg_check "$cmd" 0 "" "$@"; harness_skill_install ;;
+  "vault status")    arg_check "$cmd" 0 "" "$@"; cmd_vault_status "$@" ;;
+  "vault encrypt")   arg_check "$cmd" 0 "" "$@"; cmd_vault_encrypt "$@" ;;
+  "vault rotate-key") arg_check "$cmd" 0 "" "$@"; cmd_vault_rotate_key "$@" ;;
+  "vault export")    arg_check "$cmd" 1 "" "$@"; cmd_vault_export "$@" ;;
   doctor)            arg_check "$cmd" 0 "" "$@"; cmd_doctor "$@" ;;
   panel)             die "the control panel is not part of this version" "use fleet nodes --live, fleet kick, and the Tailscale admin console" ;;
   join)              arg_check "$cmd" 0 "" "$@"; cmd_join "$@" ;;

@@ -5,6 +5,8 @@
 # Portability: bash 3.2, no assoc arrays/mapfile, no GNU-only flags, no
 # `timeout`, no flock, no sed -i. Secrets never in argv: HTTP goes through
 # lib/api.py (reads the vault files itself) or `gh api` (keyring-backed).
+# Secrets at rest are age ciphertexts (lib/vault.sh): this file reads them
+# with vault_read/vault_cat into pipes or memory and writes with vault_write.
 
 # ---------- small helpers ----------
 
@@ -115,7 +117,10 @@ vault_require() { [ -d "$FLEET_VAULT/nodes" ] || die "vault not initialised" "ru
 
 master_key() { echo "$FLEET_VAULT/ssh/fleet_master"; }
 
-# digest_key_ensure — vault/digest.key: 32 random bytes (hex), 0600, never shipped.
+# digest_key_ensure — vault/digest.key: 32 random bytes (hex), 0600, never
+# shipped. Legacy: only a vault that still holds plaintext secrets needs it
+# (desired_digest keys their fingerprints with it); `fleet vault encrypt`
+# removes it once everything is ciphertext.
 digest_key_ensure() {
   [ -f "$FLEET_VAULT/digest.key" ] && return 0
   mkdir -p "$FLEET_VAULT"
@@ -141,20 +146,27 @@ read_secret_opt() {
 
 profile_valid() { case "$1" in minimal|full) return 0 ;; *) return 1 ;; esac; }
 
-# secrets_env PROFILE — concatenated env for the profile (minimal, + full).
+# secrets_env PROFILE — concatenated env for the profile (minimal, + full),
+# decrypted to stdout. Returns 1 when a file cannot be decrypted, so a caller
+# never ships an empty env for a locked vault.
 secrets_env() {
-  [ -f "$FLEET_VAULT/secrets/minimal.env" ] && cat "$FLEET_VAULT/secrets/minimal.env"
-  [ "$1" = full ] && [ -f "$FLEET_VAULT/secrets/full.env" ] && cat "$FLEET_VAULT/secrets/full.env"
+  local p
+  for p in minimal full; do
+    [ "$p" = full ] && [ "$1" != full ] && continue
+    vault_has "$FLEET_VAULT/secrets/$p.env" || continue
+    vault_read "$FLEET_VAULT/secrets/$p.env" || return 1
+  done
   return 0
 }
 
 # secret_names PROFILE — sorted names only.
 secret_names() { secrets_env "$1" | grep -o '^[A-Za-z_][A-Za-z0-9_]*=' | tr -d '=' | LC_ALL=C sort -u; }
 
-# files_list PROFILE — sorted relative paths under vault/files/<profile>.
+# files_list PROFILE — sorted relative paths under vault/files/<profile>, as
+# they land on the node (the `.age` of an encrypted item stripped).
 files_list() {
   [ -d "$FLEET_VAULT/files/$1" ] || return 0
-  (cd "$FLEET_VAULT/files/$1" && find . -type f ! -name '.DS_Store' | sed 's|^\./||' | LC_ALL=C sort)
+  (cd "$FLEET_VAULT/files/$1" && find . -type f ! -name '.DS_Store' ! -name '*.rotating' | sed 's|^\./||; s|\.age$||' | LC_ALL=C sort -u)
 }
 
 # repo_rev DIR — git HEAD of a checkout, or a tree hash when there is no commit yet.
@@ -164,40 +176,53 @@ repo_rev() {
 code_rev()   { repo_rev "$FLEET_ROOT"; }
 config_rev() { if [ -d "$FLEET_CONFIG_DIR" ]; then repo_rev "$FLEET_CONFIG_DIR"; else echo none; fi; }
 
-# desired_digest PROFILE — sha256 over (code rev + config rev, HMAC-SHA256
-# keyed with vault/digest.key over the profile's secret file bytes and every
-# mirrored file's path + content). A changed secret value or file content
-# changes the digest; the key never leaves the vault, so the digest reveals nothing.
+# desired_digest PROFILE — sha256 over the code rev + config rev and, for the
+# profile's secret files and every mirrored file, the item's path and
+# fingerprint: the sha256 of its ciphertext (`.age`), which needs no key, so
+# reconcile and `fleet list` can tell "behind" with the vault locked. A
+# changed value changes the ciphertext (age uses a fresh file key every time),
+# so re-encrypting even the same value changes the digest once. Items still in
+# plaintext (a vault before `fleet vault encrypt`) are fingerprinted with the
+# legacy HMAC keyed by vault/digest.key, so the digest never reveals a value.
 desired_digest() {
-  digest_key_ensure
+  [ -n "$(vault_plain_items)" ] && digest_key_ensure
   python3 - "$FLEET_VAULT" "$1" "$(code_rev)+$(config_rev)" <<'PY'
 import hashlib, hmac, os, sys
 vault, profile, rev = sys.argv[1:4]
-key = bytes.fromhex(open(os.path.join(vault, "digest.key")).read().strip())
-h = hmac.new(key, digestmod=hashlib.sha256)
-h.update(b"secrets\0")
+keyf = os.path.join(vault, "digest.key")
+key = bytes.fromhex(open(keyf).read().strip()) if os.path.isfile(keyf) else None
+
+def fingerprint(path):
+    if os.path.isfile(path + ".age"):
+        return hashlib.sha256(open(path + ".age", "rb").read()).hexdigest()
+    if os.path.isfile(path):
+        data = open(path, "rb").read()
+        if key is None:
+            sys.stderr.write("digest: %s is plaintext and vault/digest.key is missing\n" % path)
+            sys.exit(1)
+        return hmac.new(key, data, hashlib.sha256).hexdigest()
+    return ""
+
+h = hashlib.sha256()
+h.update(rev.encode() + b"\n")
 for p in ["minimal"] + (["full"] if profile == "full" else []):
-    f = os.path.join(vault, "secrets", p + ".env")
-    if os.path.isfile(f):
-        h.update(open(f, "rb").read())
-    h.update(b"\0")
-h.update(b"files\0")
+    h.update(("secrets/%s.env\0%s\0" % (p, fingerprint(os.path.join(vault, "secrets", p + ".env")))).encode())
 root = os.path.join(vault, "files", profile)
-rels = []
+rels = set()
 for d, _, fs in os.walk(root):
     for n in fs:
-        if n != ".DS_Store":
-            rels.append(os.path.relpath(os.path.join(d, n), root))
+        if n == ".DS_Store" or n.endswith(".rotating"):
+            continue
+        rel = os.path.relpath(os.path.join(d, n), root)
+        rels.add(rel[:-4] if rel.endswith(".age") else rel)
 for rel in sorted(rels):
-    h.update(rel.encode() + b"\0")
-    h.update(open(os.path.join(root, rel), "rb").read())
-    h.update(b"\0")
-print(hashlib.sha256((rev + "\n" + h.hexdigest() + "\n").encode()).hexdigest())
+    h.update(("files/%s\0%s\0" % (rel, fingerprint(os.path.join(root, rel)))).encode())
+print(h.hexdigest())
 PY
 }
 
 cmd_secrets_set() {
-  local name="" profile=full val q esc f
+  local name="" profile=full val q esc f cur
   while [ $# -gt 0 ]; do
     case "$1" in
       --profile) profile=${2:-}; shift ;;
@@ -209,21 +234,28 @@ cmd_secrets_set() {
   printf '%s' "$name" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$' || die "invalid secret name: $name"
   profile_valid "$profile" || die "profile must be minimal or full"
   vault_init
+  vault_recipient_require
+  f="$FLEET_VAULT/secrets/$profile.env"
+  # the current env, decrypted into memory (needs the key); then the new file is
+  # encrypted straight from the pipe to the recipient, tmp + mv
+  cur=""
+  if vault_has "$f"; then cur=$(vault_read "$f") || die "cannot decrypt secrets/$profile.env" "$(vault_locked_hint)"; fi
   read_secret val "value for $name"
   q="'"; esc=${val//$q/$q\\$q$q}
-  f="$FLEET_VAULT/secrets/$profile.env"
-  { if [ -f "$f" ]; then grep -v "^$name=" "$f" || true; fi; printf "%s='%s'\n" "$name" "$esc"; } | atomic_write "$f" 0600
-  val=""; esc=""
+  { [ -z "$cur" ] || printf '%s\n' "$cur" | grep -v "^$name=" || true; printf "%s='%s'\n" "$name" "$esc"; } | vault_write "$f.age"
+  rm -f "$f"                       # a plaintext copy from before encryption
+  val=""; esc=""; cur=""
   ok "stored $name in profile $profile"
   audit "secrets.set" "$name" ok
 }
 
 cmd_secrets_list() {
   vault_require
-  local p n
+  local p n env
   for p in minimal full; do
-    [ -f "$FLEET_VAULT/secrets/$p.env" ] || continue
-    grep -o '^[A-Za-z_][A-Za-z0-9_]*=' "$FLEET_VAULT/secrets/$p.env" | tr -d '=' | LC_ALL=C sort | while IFS= read -r n; do
+    vault_has "$FLEET_VAULT/secrets/$p.env" || continue
+    env=$(vault_read "$FLEET_VAULT/secrets/$p.env") || die "cannot decrypt secrets/$p.env" "$(vault_locked_hint)"
+    printf '%s\n' "$env" | grep -o '^[A-Za-z_][A-Za-z0-9_]*=' | tr -d '=' | LC_ALL=C sort | while IFS= read -r n; do
       printf '%-40s %s\n' "$n" "$p"
     done
   done
@@ -245,9 +277,10 @@ cmd_files_add() {
   case "$abs" in "$home"/*) ;; *) die "path must be under \$HOME: $abs" ;; esac
   rel=${abs#"$home"/}
   vault_init
+  vault_recipient_require
   dest="$FLEET_VAULT/files/$profile/$rel"
-  mkdir -p "$(dirname "$dest")"
-  atomic_write "$dest" 0600 <"$abs"
+  vault_write "$dest.age" <"$abs"      # encrypted straight from the source file
+  rm -f "$dest"
   ok "mirrored ~/$rel into profile $profile"
   audit "files.add" "$rel" ok
 }
@@ -259,13 +292,14 @@ cmd_proxy_import() {
   local src=${1:-${FLEET_CLIPROXY_DIR:-$HOME/cli-proxy-api}} dest f b n=0
   [ -f "$src/conf/config.yaml" ] || die "no $src/conf/config.yaml" "pass the CLIProxyAPI dir: fleet proxy import DIR"
   vault_init
+  vault_recipient_require
   dest="$FLEET_VAULT/files/full/.cli-proxy-api"
   mkdir -p "$dest/auth"; chmod 0700 "$dest" "$dest/auth"
-  atomic_write "$dest/config.yaml" 0600 <"$src/conf/config.yaml"
+  vault_write "$dest/config.yaml.age" <"$src/conf/config.yaml"; rm -f "$dest/config.yaml"
   for f in "$src"/auth/*.json; do
     [ -f "$f" ] || continue
     b=$(basename "$f")
-    atomic_write "$dest/auth/$b" 0600 <"$f"
+    vault_write "$dest/auth/$b.age" <"$f"; rm -f "$dest/auth/$b"
     n=$((n + 1))
   done
   ok "imported CLIProxyAPI config.yaml + $n auth file(s) into profile full"
@@ -542,16 +576,17 @@ github_setup() {
         *) warn "github: $slug missing; deploy keys for it will fail until it exists" ;;
       esac
     done
-    [ -f "$FLEET_VAULT/github.json" ] && log "vault/github.json is no longer needed (gh is used); delete it when convenient"
+    vault_has "$FLEET_VAULT/github.json" && log "vault/github.json is no longer needed (gh is used); delete it when convenient"
     return 0
   fi
-  if [ ! -f "$FLEET_VAULT/github.json" ] || [ "$reconfigure" = 1 ]; then
+  if ! vault_has "$FLEET_VAULT/github.json" || [ "$reconfigure" = 1 ]; then
     log "GitHub fine-grained token: Administration read/write on $(for repo in $(key_repos); do printf '%s ' "$(repo_slug "$repo")"; done)"
     read_secret_opt tok "GitHub token (empty to skip for now)"
     if [ -n "$tok" ]; then
       printf '%s\n' "$tok" | python3 -c 'import json,sys; print(json.dumps({"token":sys.stdin.readline().rstrip("\n")}))' \
-        | atomic_write "$FLEET_VAULT/github.json" 0600
-      ok "wrote vault/github.json"
+        | vault_write "$FLEET_VAULT/github.json.age"
+      rm -f "$FLEET_VAULT/github.json"
+      ok "wrote vault/github.json.age"
     else
       warn "no GitHub token: enrolment cannot register deploy keys until you rerun 'fleet init master --reconfigure'"
     fi
@@ -677,7 +712,7 @@ cmd_policy() {
   vault_require
   case "$sub" in
     check)
-      [ -f "$FLEET_VAULT/tailscale.json" ] || die "no Tailscale OAuth client in vault" "run: fleet init master"
+      vault_has "$FLEET_VAULT/tailscale.json" || die "no Tailscale OAuth client in vault" "run: fleet init master"
       case "$(policy_check_live; echo $?)" in
         0) ok "policy: live tailnet policy isolates $FLEET_NODE_TAG" ;;
         2) die "policy: could not read the live policy" "the OAuth client needs the policy_file:read scope; rerun: fleet init master --reconfigure" ;;
@@ -730,6 +765,7 @@ init_preflight() {
   for c in ssh ssh-keygen python3 git tar gzip base64; do have "$c" || missing="$missing $c"; done
   [ -z "$missing" ] || die "missing commands:$missing" \
     "install them (macOS: xcode-select --install; Debian/Ubuntu: sudo apt install git python3 openssh-client), then rerun: fleet init master"
+  age_ensure                       # the vault is encrypted with it (lib/vault.sh)
   if [ -z "${FLEET_TS_STATUS_JSON:-}" ] && ! tailscale_bin >/dev/null; then
     die "the Tailscale CLI is not installed on this machine" \
       "install Tailscale (https://tailscale.com/download), log in to your tailnet, then rerun: fleet init master"
@@ -741,7 +777,7 @@ init_preflight() {
   name=$(cd / && git config --get user.name 2>/dev/null || true); email=$(cd / && git config --get user.email 2>/dev/null || true)
   [ -n "$name" ] && [ -n "$email" ] || die "git has no identity on this machine (user.name / user.email)" \
     "git config --global user.name 'Your Name' && git config --global user.email you@example.com   (fleet config publish and the memory seed commit as you)"
-  if [ -n "${FLEET_GH_API:-}" ] || [ -f "$FLEET_VAULT/github.json" ] || gh_cli; then
+  if [ -n "${FLEET_GH_API:-}" ] || vault_has "$FLEET_VAULT/github.json" || gh_cli; then
     :
   elif have gh; then
     log "GitHub: gh is installed but not logged in; init asks for one browser approval (gh auth login --web)"
@@ -766,8 +802,8 @@ cmd_init_master() {
   config_dir_setup "$cdir"
   [ -f "$FLEET_CONFIG_DIR/fleet.conf" ] || warn "no fleet.conf in $FLEET_CONFIG_DIR (see examples/fleet-config/fleet.conf)"
   vault_init
-  digest_key_ensure
   ok "vault $FLEET_VAULT (0700)"
+  vault_key_ensure                 # encrypted from the first secret on; the key sits in the backend
 
   if [ ! -f "$(master_key)" ]; then
     ssh-keygen -q -t ed25519 -N '' -C "fleet-master@$(hostname -s 2>/dev/null || hostname)" -f "$(master_key)" </dev/null
@@ -779,7 +815,7 @@ cmd_init_master() {
   # node gets the extra authorized_keys line and ~/.ssh/config is never touched.
   if [ "${FLEET_T3_REMOTE:-0}" = 1 ]; then t3_client_key_ensure; fi
 
-  if [ ! -f "$FLEET_VAULT/tailscale.json" ] || [ "$reconfigure" = 1 ]; then
+  if ! vault_has "$FLEET_VAULT/tailscale.json" || [ "$reconfigure" = 1 ]; then
     with_bootstrap_token ts_bootstrap
   else
     policy_ensure_readonly
@@ -1096,7 +1132,7 @@ cmd_invite() {
     esac; shift
   done
   vault_require
-  [ -f "$FLEET_VAULT/tailscale.json" ] || die "no Tailscale OAuth client in vault" "run: fleet init master"
+  vault_has "$FLEET_VAULT/tailscale.json" || die "no Tailscale OAuth client in vault" "run: fleet init master"
   if [ -z "$profile" ]; then
     if [ "$ephemeral" = true ]; then profile=$FLEET_EPHEMERAL_PROFILE; else profile=$FLEET_DEFAULT_PROFILE; fi
   fi
@@ -1384,11 +1420,9 @@ cmd_list() {
   printf '%s\n' "$peers" >"$tmpd/peers"
   : >"$tmpd/provisioning"
   for id in $(registry_ids); do node_provisioning "$id" && echo "$id" >>"$tmpd/provisioning"; done
-  # the desired digest per profile; only when the vault has its key (list never writes the vault)
+  # the desired digest per profile: computed over the ciphertexts, no key needed
   : >"$tmpd/digests"
-  if [ -f "$FLEET_VAULT/digest.key" ]; then
-    for p in minimal full; do printf '%s\t%s\n' "$p" "$(desired_digest "$p")" >>"$tmpd/digests"; done
-  fi
+  for p in minimal full; do printf '%s\t%s\n' "$p" "$(desired_digest "$p")" >>"$tmpd/digests"; done
   if [ "$offline" = 0 ]; then
     mkdir -p "$tmpd/status"
     list_collect_status "$tmpd/status" "$peers"
@@ -1426,9 +1460,16 @@ ship_tree() {
 # worker (see provision_locked); rechecks the registry before every step so a
 # concurrent kick stops it before anything else is shipped.
 provision_node() {
-  local id=$1 name profile digest fdir names files applied_cc want_cc
+  local id=$1 name profile digest fdir names files applied_cc want_cc payload
   name=$(registry_get "$id" name); profile=$(registry_get "$id" profile)
   digest=$(desired_digest "$profile")
+  # the vault key must be readable before anything is shipped (a locked login
+  # keychain on a scheduled run): skip this node, the next run retries
+  if vault_encrypted && ! vault_unlocked; then
+    warn "$name: provision skipped, the vault key is unreachable ($(vault_backend_describe)); $(vault_locked_hint); sync/reconcile retry on their own"
+    audit provision "$name" "skip vault-locked"
+    return 4
+  fi
   log "provision $name ($id, profile $profile)"
   # 0. a node enrolled before host keys were pinned gets pinned on its next provision
   known_hosts_has "$(registry_get "$id" dnsname)" || host_key_pin "$(registry_get "$id" user)" "$(registry_get "$id" dnsname)" || true
@@ -1446,17 +1487,21 @@ provision_node() {
   ship_tree "$id" "$FLEET_CONFIG_DIR" '~/.local/share/fleet-config' "$FLEET_CONFIG_REPO" \
     || { audit provision "$name" "fail config"; return 1; }
 
-  # 2. secrets
+  # 2. secrets: decrypted into memory first (a decryption failure must never
+  #    ship an empty env), then piped straight into the node's ssh session
   provision_abort_if_revoked "$id" secrets && return 3
-  secrets_env "$profile" | node_ssh "$id" 'umask 077; mkdir -p ~/.config/fleet; cat > ~/.config/fleet/secrets.env.tmp && mv ~/.config/fleet/secrets.env.tmp ~/.config/fleet/secrets.env' \
-    || { audit provision "$name" "fail secrets"; return 1; }
+  payload=$(secrets_env "$profile") || { warn "$name: cannot decrypt the secrets; $(vault_locked_hint)"; audit provision "$name" "fail secrets-decrypt"; return 1; }
+  { [ -z "$payload" ] || printf '%s\n' "$payload"; } | node_ssh "$id" 'umask 077; mkdir -p ~/.config/fleet; cat > ~/.config/fleet/secrets.env.tmp && mv ~/.config/fleet/secrets.env.tmp ~/.config/fleet/secrets.env' \
+    || { payload=""; audit provision "$name" "fail secrets"; return 1; }
+  payload=""
 
-  # 3. mirrored files: unpacked into a private staging dir on the node and
+  # 3. mirrored files: a tar built in memory from the decrypted items (lib/vault.sh,
+  #    identity through a pipe), unpacked into a private staging dir on the node and
   #    moved into place one by one (same filesystem: an atomic rename each)
   provision_abort_if_revoked "$id" files && return 3
   fdir="$FLEET_VAULT/files/$profile"
   if [ -d "$fdir" ] && [ -n "$(files_list "$profile")" ]; then
-    tar -C "$fdir" -cf - . | node_ssh "$id" "$PROVISION_FILES_SCRIPT" \
+    { vault_identity 2>/dev/null || true; } | vault_tar files "$fdir" | node_ssh "$id" "$PROVISION_FILES_SCRIPT" \
       || { audit provision "$name" "fail files"; return 1; }
   fi
 
@@ -2160,21 +2205,31 @@ doctor_isolation() {
 }
 
 cmd_doctor() {
-  local fails=0 f id m rc
+  local fails=0 f id m rc plain
   vault_require
   for f in "$FLEET_VAULT" "$FLEET_VAULT/secrets" "$FLEET_VAULT/ssh" "$FLEET_VAULT/nodes" "$FLEET_VAULT/files"; do
     [ -d "$f" ] || continue
     m=$(mode_of "$f")
     if [ "$m" = 700 ]; then ok "dir $f $m"; else warn "dir $f is $m, want 700"; fails=$((fails + 1)); fi
   done
-  for f in "$FLEET_VAULT"/secrets/*.env "$FLEET_VAULT/tailscale.json" "$FLEET_VAULT/github.json" "$FLEET_VAULT/digest.key" \
+  for f in "$FLEET_VAULT"/secrets/* "$FLEET_VAULT/tailscale.json" "$FLEET_VAULT/tailscale.json.age" "$FLEET_VAULT/github.json" "$FLEET_VAULT/github.json.age" \
+           "$FLEET_VAULT/digest.key" "$FLEET_HOME/vault.key" \
            "$FLEET_VAULT/ssh/fleet_master" "$FLEET_VAULT/ssh/t3_client" "$FLEET_VAULT/ssh/known_hosts" "$(t3_ssh_include)" "$FLEET_VAULT"/nodes/*.json; do
     [ -f "$f" ] || continue
     m=$(mode_of "$f")
     if [ "$m" = 600 ]; then :; else warn "file $f is $m, want 600"; fails=$((fails + 1)); fi
   done
   ok "file modes checked"
-  [ -f "$FLEET_VAULT/digest.key" ] || { warn "digest.key missing (run: fleet init master)"; fails=$((fails + 1)); }
+  # encryption at rest (lib/vault.sh): a recipient, a reachable key, no plaintext left
+  if vault_encrypted; then
+    if vault_unlocked; then ok "vault key: reachable ($(vault_backend_describe))"
+    else warn "vault key: UNREACHABLE ($(vault_backend_describe)); scheduled sync/reconcile cannot provision until it is: $(vault_locked_hint)"; fails=$((fails + 1)); fi
+    plain=$(vault_plain_items)
+    if [ -z "$plain" ]; then ok "vault: every secret is encrypted (age; $(vault_age_items | grep -c . || true) file(s))"
+    else warn "vault: plaintext secrets present: $(printf '%s' "$plain" | tr '\n' ' '); run: fleet vault encrypt"; fails=$((fails + 1)); fi
+  else
+    warn "vault: not encrypted at rest (plaintext secrets, from before 0.3.0); run: fleet vault encrypt"; fails=$((fails + 1))
+  fi
   if [ -d "$FLEET_CONFIG_DIR" ]; then
     if [ -d "$FLEET_CONFIG_DIR/.git" ] && [ -n "$(git -C "$FLEET_CONFIG_DIR" status --porcelain 2>/dev/null)" ]; then
       warn "config dir $FLEET_CONFIG_DIR has uncommitted changes; nodes only get what is pushed (fleet config publish)"
@@ -2186,7 +2241,7 @@ cmd_doctor() {
   [ -n "${FLEET_MEMORY_REPO:-}" ] || log "FLEET_MEMORY_REPO is empty: shared memory is off"
   if [ -f "$(t3_client_key)" ]; then ok "t3 remote access: client key present (fleet t3 status)"; else log "t3 remote access: off (FLEET_T3_REMOTE=1 or fleet t3 setup enables it)"; fi
 
-  if [ -f "$FLEET_VAULT/tailscale.json" ]; then
+  if vault_has "$FLEET_VAULT/tailscale.json"; then
     if api ts check >/dev/null 2>&1; then ok "tailscale oauth: token exchange works"; else warn "tailscale oauth: token exchange FAILED"; fails=$((fails + 1)); fi
     rc=0; policy_check_live || rc=$?
     case "$rc" in
@@ -2196,7 +2251,7 @@ cmd_doctor() {
     esac
   else warn "tailscale oauth: not configured"; fails=$((fails + 1)); fi
   if gh_cli; then ok "github: gh logged in as $(gh_login)"
-  elif [ -f "$FLEET_VAULT/github.json" ]; then
+  elif vault_has "$FLEET_VAULT/github.json"; then
     if m=$(api gh user 2>/dev/null) && [ -n "$m" ]; then ok "github token: ok ($m)"; else warn "github token: FAILED"; fails=$((fails + 1)); fi
   else warn "github: neither gh login nor a token (deploy keys cannot be registered)"; fi
 

@@ -8,8 +8,9 @@
 #                         hooks/servers dropped). Run by `fleet config publish`.
 #   harness_apply         node: render $FLEET_CONFIG_DIR/{AGENTS.md,harness/,skills/} into $HOME.
 #   harness_status        node: one line per harness: <name> <ok|drift> <detail>
-#   harness_secret_scan   DIR: python regex scan for secret-looking values;
-#                         prints hits, exit 1 if any.
+#   harness_secret_scan   DIR: python regex scan for secret-looking values
+#                         (patterns in lib/secretscan.py, shared with the memory
+#                         capture); prints hits, exit 1 if any.
 #
 # Template placeholders are ONLY the brace form with an upper-case name:
 #   ${HOME}, ${FLEET_NODE} (the node name, see harness_node_name),
@@ -212,48 +213,10 @@ def cmd_claude_json(argv):
     os.replace(tmp, path)
     print('changed')
 
-# ----- secret scan -----
+# ----- secret scan (patterns and file scanner live in lib/secretscan.py, shared with lib/memory_capture.py) -----
 
-SECRET_PATTERNS = [
-    ('openai/anthropic key', r'\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}'),
-    ('github token', r'\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}'),
-    ('github pat', r'\bgithub_pat_[A-Za-z0-9_]{20,}'),
-    ('gitlab token', r'\bglpat-[A-Za-z0-9_-]{16,}'),
-    ('xai key', r'\bxai-[A-Za-z0-9]{16,}'),
-    ('tailscale key', r'\btskey-[A-Za-z0-9-]{10,}'),
-    ('aws key id', r'\bAKIA[0-9A-Z]{16}\b'),
-    ('jwt', r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'),
-    ('context7 key', r'\bctx7sk-[0-9a-fA-F-]{20,}'),
-    ('datadog app key', r'\bddapp_[A-Za-z0-9]{20,}'),
-    ('langfuse key', r'\b[ps]k-lf-[0-9a-fA-F-]{20,}'),
-    ('supabase key', r'\bsb_(?:publishable|secret)_[A-Za-z0-9_-]{16,}'),
-    ('slack token', r'\bxox[abpr]-[A-Za-z0-9-]{10,}'),
-    ('private key', r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
-]
-# 32+ char hex/base64 run in a value position (after : or =), with at least 2 digits.
-VALUE_RUN = re.compile(r'[:=]\s*["\']?([A-Za-z0-9+/=_-]{32,})')
-MACHINE_PATH = re.compile(r'/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/')
-SKIP_DIRS = {'.git', 'node_modules', '__pycache__'}
-
-def scan_file(path):
-    hits = []
-    try:
-        data = open(path, 'rb').read()
-    except Exception:
-        return hits
-    if b'\x00' in data[:4096]: return hits
-    text = data.decode('utf-8', 'replace')
-    for ln, line in enumerate(text.splitlines(), 1):
-        for label, pat in SECRET_PATTERNS:
-            if re.search(pat, line): hits.append((path, ln, label))
-        for m in VALUE_RUN.finditer(line):
-            v = m.group(1)
-            if '${' in line[max(0, m.start() - 2):m.end() + 2]: continue
-            if sum(c.isdigit() for c in v) < 2: continue
-            if '/' in v and not re.fullmatch(r'[A-Za-z0-9+/=]+', v): continue  # path-like
-            hits.append((path, ln, 'long token-like value'))
-        if MACHINE_PATH.search(line): hits.append((path, ln, 'machine home path'))
-    return hits
+sys.path.insert(0, os.path.join(os.environ['FLEET_ROOT'], 'lib'))
+from secretscan import SECRET_PATTERNS, SKIP_DIRS, scan_file  # noqa: E402
 
 def cmd_scan(argv):
     (root,), _ = parse_vars(argv)

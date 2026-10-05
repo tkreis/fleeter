@@ -488,7 +488,8 @@ assert "alpha: tailscale logout ran (fleet leave + supervisor)" grep -q '^logout
 assert "alpha: supervisor logged the shutdown" bash -c "docker logs $NA 2>&1 | grep -q 'logging out of the tailnet'"
 refute "alpha: leave stopped the daemon itself (supervisor pidfile workaround not needed)" bash -c "docker logs $NA 2>&1 | grep -q 'daemon.pid removed'"
 refute "alpha: the remote leave removed the forwarded AWS credentials" docker cp "$NA:$MHOME/.config/fleet/aws" "$WORK/alpha-aws-after-kick"
-assert "alpha: the fleet block left ~/.aws/config, the file itself stays" bash -c "docker cp $NA:$MHOME/.aws/config - 2>/dev/null | tar -xOf - 2>/dev/null | grep -q . && ! docker cp $NA:$MHOME/.aws/config - 2>/dev/null | tar -xOf - | grep -q 'fleet aws'"
+# alpha had no ~/.aws/config of its own, so removing the block removed the file
+refute "alpha: the fleet block (the whole ~/.aws/config here) is gone too" docker cp "$NA:$MHOME/.aws/config" "$WORK/alpha-aws-config-after-kick"
 assert "alpha: daemon ran its own guarded leave once" bash -c "docker logs $NA 2>&1 | grep -c 'fleet daemon stopping' | grep -qx 1"
 refute "provision refuses the revoked node" mexec fleet provision alpha
 write_status false true

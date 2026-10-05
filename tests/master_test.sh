@@ -743,14 +743,14 @@ EOF
 : >"$SSH_LOG"
 out=$(bash "$FLEET" list 2>"$T/list.err"); rc=$?
 assert "list exits 0 with an unreachable node in the fleet" [ "$rc" = 0 ]
-assert "list header: NAME HOST ONLINE STATE SYNCED LAST PROVISION TOOLS MEMORY PROXY FLEET" bash -c "printf '%s\n' \"\$0\" | head -1 | grep -Eq '^NAME +HOST +ONLINE +STATE +SYNCED +LAST PROVISION +TOOLS +MEMORY +PROXY +FLEET$'" "$out"
+assert "list header: NAME HOST ONLINE STATE SYNCED LAST PROVISION TOOLS MEMORY PROXY FLEET" bash -c "printf '%s\n' \"\$0\" | head -1 | grep -Eq '^NAME +HOST +ONLINE +STATE +SYNCED +LAST PROVISION +TOOLS +MEMORY +PROXY +AWS +FLEET$'" "$out"
 assert "list: alpha online, provisioned, synced yes, tools summarised (9 ok, 1 login: cursor), memory ok, proxy ok, fleet 0.3.0" \
-  bash -c "printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +yes +[0-9]+[mhd] +9 ok, 1 login: cursor +ok +ok +0\.3\.0$'" "$out"
+  bash -c "printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +yes +[0-9]+[mhd] +9 ok, 1 login: cursor +ok +ok +- +0\.3\.0$'" "$out"
 assert "list: unr online but not answering -> unreachable, synced from the registry (behind), no live columns" \
-  bash -c "printf '%s\n' \"\$0\" | grep -Eq '^unr +fleet-unr +yes +provisioned +behind +[0-9]+[mhd] +unreachable +- +- +-$'" "$out"
+  bash -c "printf '%s\n' \"\$0\" | grep -Eq '^unr +fleet-unr +yes +provisioned +behind +[0-9]+[mhd] +unreachable +- +- +- +-$'" "$out"
 assert "list: off is registered but not on the tailnet -> online no, no ssh attempted" \
   bash -c "printf '%s\n' \"\$0\" | grep -Eq '^off +fleet-off +no +provisioned +behind ' && ! grep -q 'fleet-off' '$SSH_LOG'" "$out"
-assert "list: unregistered tagged peer shown as unknown" bash -c "printf '%s\n' \"\$0\" | grep -Eq '^fleet-beta +fleet-beta +yes +unknown +- +- +- +- +- +-$'" "$out"
+assert "list: unregistered tagged peer shown as unknown" bash -c "printf '%s\n' \"\$0\" | grep -Eq '^fleet-beta +fleet-beta +yes +unknown +- +- +- +- +- +- +-$'" "$out"
 refute "list ignores untagged peers" printf '%s' "$out" | grep -q laptop
 assert "list asked every online registered node once (alpha, unr), with the status command" bash -c "[ \"\$(grep -c 'fleet-alpha.tail1.ts.net ~/.local/bin/fleet status --json' '$SSH_LOG')\" = 1 ] && [ \"\$(grep -c 'fleet-unr.tail1.ts.net' '$SSH_LOG')\" = 1 ]"
 out=$(bash "$FLEET" list --json 2>/dev/null); rc=$?
@@ -782,7 +782,7 @@ out=$(bash "$FLEET" list 2>/dev/null)
 assert "list: a node whose applied revs differ from the master's is behind" bash -c "printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +behind '" "$out"
 : >"$SSH_LOG"
 out=$(bash "$FLEET" list --offline 2>/dev/null); rc=$?
-assert "list --offline exits 0, no ssh at all, registry + tailnet columns only" bash -c "[ $rc = 0 ] && [ ! -s '$SSH_LOG' ] && printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +behind +[0-9]+[mhd] +- +- +- +-$'" "$out"
+assert "list --offline exits 0, no ssh at all, registry + tailnet columns only" bash -c "[ $rc = 0 ] && [ ! -s '$SSH_LOG' ] && printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +behind +[0-9]+[mhd] +- +- +- +- +-$'" "$out"
 assert "list --offline --json: reachable null, synced from the registry" bash -c "bash '$FLEET' list --offline --json 2>/dev/null | python3 -c '
 import json,sys
 d={x[\"name\"]: x for x in json.load(sys.stdin)}; a=d[\"alpha\"]
@@ -1488,10 +1488,10 @@ assert m[\"memory\"]==\"ok\" and m[\"memory_last_sync\"] and m[\"fleet\"] and m[
 assert all(x[\"master\"] is False and \"memory_last_sync\" not in x for x in d[1:]) and \"alpha\" in {x[\"name\"] for x in d[1:]}
 '" "$out"
 out=$(mm list --offline 2>/dev/null)
-assert "list table: the master row comes first with STATE master and MEMORY ok (<age>)" bash -c "printf '%s\n' \"\$0\" | sed -n 2p | grep -Eq '^ctrl-mac +[^ ]+ +yes +master +- +- +- +ok \([0-9]+[mhd]\) +- +[0-9.]+$'" "$out"
+assert "list table: the master row comes first with STATE master and MEMORY ok (<age>)" bash -c "printf '%s\n' \"\$0\" | sed -n 2p | grep -Eq '^ctrl-mac +[^ ]+ +yes +master +- +- +- +ok \([0-9]+[mhd]\) +- +- +[0-9.]+$'" "$out"
 # without a memory repo the master row says off and the memory schedule is removed again
 out=$(FLEET_MEMORY_SEED=1 FLEET_MEMORY_REMOTE="" FLEET_MEMORY_REPO="" bash -c "printf 'FLEET_MEMORY_REPO=\"\"\n' >>'$FLEET_HOME/fleet.conf'; bash '$FLEET' schedule install 2>&1; bash '$FLEET' list --offline 2>/dev/null | sed -n 2p"); rc=$?
-assert "FLEET_MEMORY_REPO unset: schedule install removes the memory timer, list shows memory off on the master row" bash -c "printf '%s' \"\$0\" | grep -q 'memory schedule removed' && [ ! -e '$MP' ] && printf '%s\n' \"\$0\" | tail -1 | grep -Eq '^ctrl-mac +[^ ]+ +yes +master +- +- +- +off +- '" "$out"
+assert "FLEET_MEMORY_REPO unset: schedule install removes the memory timer, list shows memory off on the master row" bash -c "printf '%s' \"\$0\" | grep -q 'memory schedule removed' && [ ! -e '$MP' ] && printf '%s\n' \"\$0\" | tail -1 | grep -Eq '^ctrl-mac +[^ ]+ +yes +master +- +- +- +off +- +- '" "$out"
 grep -v '^FLEET_MASTER_NAME=\|^FLEET_MEMORY_REPO=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
 rm -rf "$HOME/fleet-memory" "$HOME/.claude/projects"; rm -f "$FLEET_HOME/memory.state"
 

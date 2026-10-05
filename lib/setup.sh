@@ -149,7 +149,7 @@ setup_gh_login() {
 # setup_config_repo OWNER NAME DIR TOOLS MEMORY_URL KEEP_AWAKE PROXY — the
 # config repo checkout in DIR: reused, cloned, or started from the example.
 setup_config_repo() {
-  local owner=$1 name=$2 dir=$3 tools=$4 mem=$5 awake=$6 proxy=$7 slug origin
+  local owner=$1 name=$2 dir=$3 tools=$4 mem=$5 awake=$6 proxy=$7 aws=${8:-} slug origin
   slug="$owner/$name"
   if [ -d "$dir/.git" ]; then
     origin=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
@@ -177,10 +177,11 @@ setup_config_repo() {
   setup_conf_render "$dir/fleet.conf" FLEET_TOOLS "$tools"
   setup_conf_render "$dir/fleet.conf" FLEET_KEEP_AWAKE "$awake"
   [ "$proxy" = 1 ] && setup_conf_render "$dir/fleet.conf" FLEET_PROXY_MODE local
+  [ -n "$aws" ] && setup_conf_render "$dir/fleet.conf" FLEET_AWS_PROFILES "$aws"
   git -C "$dir" -c init.defaultBranch=main init -q
   git -C "$dir" add -A
   git -C "$dir" commit -q -m "start fleet config"
-  ok "config repo: $dir (fleet.conf rendered: tools \"$tools\", memory ${mem:-off}, keep awake $awake; committed)"
+  ok "config repo: $dir (fleet.conf rendered: tools \"$tools\", memory ${mem:-off}, keep awake $awake, aws profiles \"${aws:-none}\"; committed)"
   setup_confirm "Create the private GitHub repo $slug and push $dir there?" \
     || die "stopped: $slug not created ($dir is kept)" "rerun fleet setup, or create it yourself: gh repo create $slug --private --source $dir --push"
   gh repo create "$slug" --private --source "$dir" --push >/dev/null \
@@ -277,11 +278,12 @@ setup_proxy() {
 # ---------- the command ----------
 
 cmd_setup() {
-  local owner="" cname="" cdir="" memory="" mrepo="" tools="" proxy="" awake="" claude_tok="" slug login memurl toolsl def
+  local owner="" cname="" cdir="" memory="" mrepo="" tools="" proxy="" awake="" claude_tok="" aws_profiles="" aws_asked="" slug login memurl toolsl def
   SETUP_YES=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --yes|-y)         SETUP_YES=1 ;;
+      --aws-profiles)   aws_profiles=${2:-}; aws_asked=1; shift ;;
       --github-owner)   owner=${2:-}; shift ;;
       --config-repo)    cname=${2:-}; shift ;;
       --config-dir)     cdir=${2:-}; shift ;;
@@ -346,10 +348,17 @@ cmd_setup() {
   if [ -z "$awake" ]; then
     if setup_yn "Keep nodes awake (they never system-sleep; for always-on machines, never the master)?" y; then awake=1; else awake=0; fi
   fi
+  # AWS SSO: only asked when this machine has an AWS config; the default (none)
+  # pushes nothing, and production profiles are refused whatever the answer
+  if [ -z "$aws_asked" ] && [ -f "${AWS_CONFIG_FILE:-$HOME/.aws/config}" ]; then
+    log "AWS SSO: fleet can forward the short-lived role credentials of named profiles from ~/.aws/config to the nodes"
+    log "(the SSO login itself stays here; anything matching *prod* *production* *prd* is refused). Space separated, empty = none."
+    setup_ask aws_profiles "AWS profiles to forward (e.g. dev)" ""
+  fi
   memurl=""; [ "$memory" = 1 ] && memurl="git@github.com:$owner/$mrepo.git"
 
   setup_step 3 "config repo $owner/$cname in $cdir"
-  setup_config_repo "$owner" "$cname" "$cdir" "$toolsl" "$memurl" "$awake" "$proxy"
+  setup_config_repo "$owner" "$cname" "$cdir" "$toolsl" "$memurl" "$awake" "$proxy" "$aws_profiles"
 
   setup_step 4 "memory repo"
   if [ "$memory" = 1 ]; then setup_memory_repo "$owner/$mrepo"; else setup_skip "memory repo: shared memory is off"; fi

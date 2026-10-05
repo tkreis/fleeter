@@ -150,6 +150,47 @@ _dev_install_cli() {
   _dev_bin glab >/dev/null || _dev_install_glab_linux
 }
 
+# ---------- aws CLI (FLEET_AWS_CLI=1) ----------
+#
+# For `fleet aws`: the nodes run the AWS CLI with the role credentials the
+# master forwards (lib/aws.sh). Per the AWS CLI User Guide ("Installing or
+# updating to the latest version of the AWS CLI", 2026-10-05): macOS via
+# Homebrew is a third-party package (fine here, brew is the node's package
+# manager anyway); Linux: `curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"`
+# (or `-aarch64.zip`), `unzip`, then `./aws/install -i DIR -b DIR` — "You can
+# install without sudo if you specify directories that you already have write
+# permissions to" (`--install-dir`/`-i`, `--bin-dir`/`-b`; `-u` updates an
+# existing install dir in place). `aws update` refreshes an installer-made
+# install. unzip comes from the base plug-in.
+_dev_aws_dir() { echo "$HOME/.local/aws-cli"; }
+
+_dev_install_awscli() {
+  local brew tmp arch upd=""
+  [ "${FLEET_AWS_CLI:-1}" = 1 ] || return 0
+  _dev_bin aws >/dev/null && return 0
+  case "$(fleet_os)" in
+    macos)
+      brew=$(_dev_brew) || { warn "brew missing; aws CLI not installed"; return 0; }
+      log "brew install awscli"
+      HOMEBREW_NO_AUTO_UPDATE=1 "$brew" install awscli || die "brew install awscli failed" ;;
+    linux)
+      have unzip || { warn "unzip missing (base plug-in); aws CLI not installed"; return 0; }
+      case "$(uname -m)" in x86_64|amd64) arch=x86_64 ;; aarch64|arm64) arch=aarch64 ;; *) warn "aws CLI: no installer for $(uname -m)"; return 0 ;; esac
+      tmp=$(mktemp -d) || die "mktemp failed"
+      [ -d "$(_dev_aws_dir)" ] && upd="-u"
+      log "installing the aws CLI (awscli-exe-linux-$arch.zip -> $(_dev_aws_dir), $FLEET_BIN/aws)"
+      mkdir -p "$FLEET_BIN"
+      # shellcheck disable=SC2086  # $upd is an optional flag
+      if curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$arch.zip" -o "$tmp/awscliv2.zip" \
+         && (cd "$tmp" && unzip -q awscliv2.zip) \
+         && "$tmp/aws/install" -i "$(_dev_aws_dir)" -b "$FLEET_BIN" $upd >/dev/null; then
+        rm -rf "$tmp"
+      else
+        rm -rf "$tmp"; die "aws CLI install failed" "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+      fi ;;
+  esac
+}
+
 # ---------- docker ----------
 
 _dev_install_docker() {
@@ -234,22 +275,25 @@ tool_devtools_install() {
   _dev_install_npm_globals
   _dev_install_uv
   _dev_install_cli
+  _dev_install_awscli
   _dev_install_docker
   ok "devtools converged"
 }
 
 tool_devtools_update() {
-  local m u brew gh gl cur latest
+  local m u brew gh gl cur latest a
   if m=$(_dev_bin mise); then "$m" self-update -y >/dev/null 2>&1 || true; fi
   if u=$(_dev_bin uv); then "$u" self update >/dev/null 2>&1 || true; fi
   # shellcheck disable=SC2086  # intentional word split over package names
   [ -z "${FLEET_NPM_GLOBALS:-}" ] || _dev_mx npm update -g --no-fund --no-audit $FLEET_NPM_GLOBALS >/dev/null 2>&1 || true
   if [ "$(fleet_os)" = macos ]; then
     if brew=$(_dev_brew); then
-      HOMEBREW_NO_AUTO_UPDATE=1 "$brew" upgrade gh glab colima docker docker-compose >/dev/null 2>&1 || true
+      HOMEBREW_NO_AUTO_UPDATE=1 "$brew" upgrade gh glab awscli colima docker docker-compose >/dev/null 2>&1 || true
     fi
     return 0
   fi
+  # the aws CLI from the official installer (ours lives in ~/.local/aws-cli): `aws update`
+  if [ -d "$(_dev_aws_dir)" ] && a=$(_dev_bin aws); then "$a" update >/dev/null 2>&1 || true; fi
   # Linux: refresh the release tarballs when a newer tag exists.
   if gh=$(_dev_bin gh); then
     cur=$("$gh" --version 2>/dev/null | awk 'NR==1{print $3}'); latest=$(_dev_gh_latest 2>/dev/null)
@@ -283,6 +327,9 @@ tool_devtools_status() {
   for c in uv gh glab; do
     if _dev_bin "$c" >/dev/null; then det="$det $c"; else miss="$miss $c"; fi
   done
+  if [ "${FLEET_AWS_CLI:-1}" = 1 ]; then
+    if _dev_bin aws >/dev/null; then det="$det aws"; else miss="$miss aws"; fi
+  fi
   if fleet_in_container; then det="$det docker=skipped"
   elif have docker; then
     if docker info >/dev/null 2>&1; then det="$det docker"; else det="$det docker=daemon-down"; fi

@@ -294,7 +294,7 @@ for n in ("alpha", "beta"):
     assert x["applied"]["source"] == "node" and x["memory"] == "ok" and x["fleet"] and x["proxy"] == "off" and x["provisioned_age"]
 assert d["alpha"]["profile"] == "full" and d["beta"]["profile"] == "minimal" and d["beta"]["ephemeral"] is True
 EOF
-assert "fleet list table: header and both rows (provisioned, synced yes)" bash -c "o=\$(mexec fleet list); printf '%s\n' \"\$o\" | head -1 | grep -Eq '^NAME +HOST +ONLINE +STATE +SYNCED +LAST PROVISION +TOOLS +MEMORY +PROXY +FLEET$' && printf '%s\n' \"\$o\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +yes +[0-9]+[mhd] ' && printf '%s\n' \"\$o\" | grep -Eq '^beta +fleet-beta +yes +provisioned +yes +[0-9]+[mhd] .* ok +off +[0-9.]+$'"
+assert "fleet list table: header and both rows (provisioned, synced yes)" bash -c "o=\$(mexec fleet list); printf '%s\n' \"\$o\" | head -1 | grep -Eq '^NAME +HOST +ONLINE +STATE +SYNCED +LAST PROVISION +TOOLS +MEMORY +PROXY +AWS +FLEET$' && printf '%s\n' \"\$o\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +yes +[0-9]+[mhd] ' && printf '%s\n' \"\$o\" | grep -Eq '^beta +fleet-beta +yes +provisioned +yes +[0-9]+[mhd] .* ok +off +- +[0-9.]+$'"
 assert "fleet list --offline: no ssh, reachable null, synced from the registry" bash -c "mexec fleet list --offline --json | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"alpha\"][\"reachable\"] is None and d[\"alpha\"][\"synced\"]==\"yes\" and d[\"alpha\"][\"applied\"][\"source\"]==\"registry\"'"
 
 # ======================================================================
@@ -405,7 +405,7 @@ mexec fleet memory sync >"$WORK/sync-m.log" 2>&1; rc=$?
 assert "master: memory sync uploads its own agent memory under nodes/master, committed as the user" bash -c "[ $rc = 0 ] && grep -q 'committed nodes/master (+1 ~0 -0)' '$WORK/sync-m.log' && mexec git --git-dir=/srv/repos/memory.git cat-file -e main:nodes/master/claude/$SLUG/MEMORY.md && [ \"\$(mexec git --git-dir=/srv/repos/memory.git log -1 --format=%an main)\" = e2e ]" || tail -5 "$WORK/sync-m.log"
 nexec "$NA" fleet memory sync >/dev/null 2>&1
 assert "alpha: sees the master's memory too" bash -c "nfile $NA $MHOME/fleet-memory/nodes/master/claude/$SLUG/MEMORY.md | grep -q 'master knows the release'"
-assert "fleet list: the master row (state master, memory ok) comes first, nodes say master false" bash -c "mexec fleet list --offline --json | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d[0]; assert m[\"master\"] is True and m[\"name\"]==\"master\" and m[\"state\"]==\"master\" and m[\"memory\"]==\"ok\" and m[\"memory_last_sync\"]; assert all(x[\"master\"] is False for x in d[1:])' && mexec fleet list --offline | sed -n 2p | grep -Eq '^master +[^ ]+ +yes +master +- +- +- +ok \([0-9]+[mhd]\) +- +[0-9.]+$'"
+assert "fleet list: the master row (state master, memory ok) comes first, nodes say master false" bash -c "mexec fleet list --offline --json | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d[0]; assert m[\"master\"] is True and m[\"name\"]==\"master\" and m[\"state\"]==\"master\" and m[\"memory\"]==\"ok\" and m[\"memory_last_sync\"]; assert all(x[\"master\"] is False for x in d[1:])' && mexec fleet list --offline | sed -n 2p | grep -Eq '^master +[^ ]+ +yes +master +- +- +- +ok \([0-9]+[mhd]\) +- +- +[0-9.]+$'"
 
 # ======================================================================
 step "trust model: nodes cannot reach the master"

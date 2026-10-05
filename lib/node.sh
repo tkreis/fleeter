@@ -824,6 +824,7 @@ node_write_status() {
   FLEET_ST_AWAKE_LID="$(node_awake_lid_state)" \
   FLEET_ST_POWER_DONE="$(cat "$FLEET_HOME/power_done" 2>/dev/null || true)" \
   FLEET_ST_LAN="$(node_lan_info)" \
+  FLEET_ST_AWS="$(node_aws_status_json 2>/dev/null || true)" \
   python3 - "$tmp" <<'PY' | atomic_write "$FLEET_HOME/status.json" 0600
 import json, os, re, sys, time
 e = os.environ.get
@@ -852,6 +853,11 @@ if os.path.isfile(sp):
             if m:
                 ages[m.group(1)] = days
 lan = (e("FLEET_ST_LAN") or "").split("\t")
+try:
+    aws = json.loads(e("FLEET_ST_AWS") or "")
+    assert isinstance(aws, dict) and "state" in aws
+except Exception:
+    aws = {"profiles": 0, "expires": None, "state": "none"}
 print(json.dumps({
     "fleet": e("FLEET_ST_VERSION"), "name": e("FLEET_ST_NAME"), "os": e("FLEET_ST_OS"),
     "container": e("FLEET_ST_CONTAINER") == "true",
@@ -863,6 +869,7 @@ print(json.dumps({
     "lid_set_at_join": "+lid" in (e("FLEET_ST_POWER_DONE") or ""),
     "lan_ips": [ip for ip in lan[0].split(",") if ip],
     "ethernet": lan[1] if len(lan) > 1 and lan[1] else "no",
+    "aws": aws,
     "token_age_days": ages,
     "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 }, indent=2))
@@ -892,6 +899,12 @@ if d.get("awake_lid") == "on":
 print("awake     %s%s" % (d.get("awake", "n/a"), lid_note))
 if d.get("lan_ips"):
     print("lan       %s  ethernet %s" % (" ".join(d["lan_ips"]), d.get("ethernet", "no")))
+a = d.get("aws") or {}
+if a.get("state") in ("ok", "expired"):
+    print("aws       %s  %d profile%s, expire %s%s" % (a["state"], a.get("profiles") or 0, "" if a.get("profiles") == 1 else "s",
+          a.get("expires") or "-", "  (on the master: aws sso login, then fleet aws push)" if a["state"] == "expired" else ""))
+else:
+    print("aws       none")
 for k, v in sorted(d["tools"].items()):
     print("tool      %-12s %-8s %s" % (k, v["state"], v["detail"]))
 for k, v in sorted(d["token_age_days"].items()):
@@ -981,6 +994,7 @@ cmd_leave() {
     warn "pkill not available; stop harness processes yourself"
   fi
   node_cliproxy_stop
+  node_aws_remove || true     # lib/aws.sh: the forwarded AWS role credentials and the fleet block in ~/.aws/config
   ts=$(node_ts_cli)
   if [ -n "$ts" ]; then
     if "$ts" logout >/dev/null 2>&1; then ok "tailscale logged out"; else warn "tailscale logout failed; run it manually"; fi

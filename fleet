@@ -35,6 +35,8 @@ Master:
   files add PATH [--profile P]      mirror a file under $HOME (e.g. a .env) to nodes
   proxy import [DIR]                copy the CLIProxyAPI config.yaml (client key, routing) into the vault (default ~/cli-proxy-api)
   proxy login NODE [PROVIDER] [--yes]   log NODE's proxy into claude|codex|codex-device|antigravity: OAuth in your browser through an ssh tunnel
+  aws push [--profile P]... [--node NODE]...   forward the allowed AWS SSO profiles' role credentials (FLEET_AWS_PROFILES) to the online nodes
+  aws login [--profile P]... [-- AWS_ARGS]     aws sso login here (first allowed profile by default), then fleet aws push
   invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]   print a one-line join command
   list [--json] [--offline]         fleet overview: online, state, synced, tools, memory, proxy per node (start here)
   nodes [--live]                    compact registry table (--live: ask each node for its tool states)
@@ -69,8 +71,10 @@ Node:
   memory sync [--reset]             commit, pull --rebase, push the memory vault (--reset clears a conflict)
   login [TOOL]                      open login page or start device-code flow
   status [--json]                   versions, logins, digest, memory state
-  leave                             stop timers and harness processes, tailscale logout
+  leave                             stop timers and harness processes, tailscale logout, drop the AWS credentials
   daemon                            foreground scheduler (containers)
+  aws creds PROFILE                 credential_process of the fleet block in ~/.aws/config: the stored role credentials while valid
+  aws receive                       (run by the master) store a credential bundle from stdin
 
 Global: --version, --help; every command accepts -h/--help and then does nothing else.
 `fleeter` is the same command under its project name (~/.local/bin/fleeter).
@@ -80,7 +84,7 @@ EOF
 # usage_for CMD — the synopsis of one command ("t3 setup", "memory sync", ...).
 usage_for() {
   case "$1" in
-    setup)              echo 'fleet setup [--yes] [--github-owner OWNER] [--config-repo NAME] [--config-dir DIR] [--memory|--no-memory] [--memory-repo NAME] [--tools minimal|agents|full|"LIST"] [--proxy|--no-proxy] [--keep-awake|--no-keep-awake] [--claude-token|--no-claude-token]' ;;
+    setup)              echo 'fleet setup [--yes] [--github-owner OWNER] [--config-repo NAME] [--config-dir DIR] [--memory|--no-memory] [--memory-repo NAME] [--tools minimal|agents|full|"LIST"] [--proxy|--no-proxy] [--keep-awake|--no-keep-awake] [--claude-token|--no-claude-token] [--aws-profiles "LIST"]' ;;
     init|"init master") echo "fleet init master [--config-dir DIR] [--reconfigure]" ;;
     secrets)            echo "fleet secrets set NAME [--profile minimal|full] | fleet secrets list" ;;
     "secrets set")      echo "fleet secrets set NAME [--profile minimal|full]" ;;
@@ -89,6 +93,11 @@ usage_for() {
     proxy)              echo "fleet proxy import [DIR] | fleet proxy login NODE [claude|codex|codex-device|antigravity] [--yes]" ;;
     "proxy import")     echo "fleet proxy import [DIR]" ;;
     "proxy login")      echo "fleet proxy login NODE [claude|codex|codex-device|antigravity] [--yes]" ;;
+    aws)                echo "fleet aws push [--profile P]... [--node NODE]... | fleet aws login [--profile P]... [-- AWS_ARGS...] | fleet aws creds PROFILE | fleet aws receive" ;;
+    "aws push")         echo "fleet aws push [--profile P]... [--node NODE]...    (profiles: FLEET_AWS_PROFILES minus FLEET_AWS_DENY; --profile only narrows)" ;;
+    "aws login")        echo "fleet aws login [--profile P]... [-- AWS_ARGS...]    (aws sso login on this machine, then fleet aws push)" ;;
+    "aws creds")        echo "fleet aws creds PROFILE    (node: the credential_process of the fleet block in ~/.aws/config)" ;;
+    "aws receive")      echo "fleet aws receive    (node: a credential bundle from the master on stdin)" ;;
     invite)             echo "fleet invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]" ;;
     list)               echo "fleet list [--json] [--offline]" ;;
     nodes)              echo "fleet nodes [--live]" ;;
@@ -147,14 +156,17 @@ usage_fail() {
 
 # arg_check CMD MAXPOS FLAGS ARGS... — reject what CMD does not take: an
 # unknown flag, or more than MAXPOS positional arguments. FLAGS is space
-# separated; a flag written with a trailing ':' consumes the next argument.
-# Runs before the command, so a typo never executes anything.
+# separated; a flag written with a trailing ':' consumes the next argument; a
+# literal `--` in FLAGS means everything after a `--` belongs to another
+# program and is not checked. Runs before the command, so a typo never
+# executes anything.
 arg_check() {
   local cmd=$1 maxpos=$2 flags=$3 npos=0 a f hit
   shift 3
   while [ $# -gt 0 ]; do
     a=$1; shift
     case "$a" in
+      --) case " $flags " in *" -- "*) return 0 ;; esac; usage_fail "$cmd" "unknown flag: --" ;;
       -*)
         hit=""
         for f in $flags; do
@@ -195,7 +207,7 @@ esac
 # `fleet t3 status --help` both print the right line.
 sub=""
 case "$cmd" in
-  init|secrets|files|proxy|t3|config|policy|memory|skill|schedule|vault)
+  init|secrets|files|proxy|t3|config|policy|memory|skill|schedule|vault|aws)
     sub=${1:-}
     if help_wanted "$sub"; then usage_for "$cmd"; exit 0; fi
     [ $# -gt 0 ] && shift
@@ -204,6 +216,7 @@ case "$cmd" in
       secrets) subcommand secrets "set list" "$sub" ;;
       files)   subcommand files "add" "$sub" ;;
       proxy)   subcommand proxy "import login" "$sub" ;;
+      aws)     subcommand aws "push login creds receive" "$sub" ;;
       t3)      subcommand t3 "setup status revoke" "$sub" ;;
       config)  subcommand config "publish" "$sub" ;;
       policy)  subcommand policy "check apply" "$sub" ;;
@@ -224,13 +237,17 @@ case "$cmd" in
 esac
 
 case "$cmd" in
-  setup)             arg_check "$cmd" 0 "--yes -y --github-owner: --config-repo: --config-dir: --memory --no-memory --memory-repo: --tools: --proxy --no-proxy --keep-awake --no-keep-awake --claude-token --no-claude-token" "$@"; cmd_setup "$@" ;;
+  setup)             arg_check "$cmd" 0 "--yes -y --github-owner: --config-repo: --config-dir: --memory --no-memory --memory-repo: --tools: --proxy --no-proxy --keep-awake --no-keep-awake --claude-token --no-claude-token --aws-profiles:" "$@"; cmd_setup "$@" ;;
   "init master")     arg_check "$cmd" 0 "--config-dir: --reconfigure" "$@"; cmd_init_master "$@" ;;
   "secrets set")     arg_check "$cmd" 1 "--profile:" "$@"; cmd_secrets_set "$@" ;;
   "secrets list")    arg_check "$cmd" 0 "" "$@"; cmd_secrets_list "$@" ;;
   "files add")       arg_check "$cmd" 1 "--profile:" "$@"; cmd_files_add "$@" ;;
   "proxy import")    arg_check "$cmd" 1 "" "$@"; cmd_proxy_import "$@" ;;
   "proxy login")     arg_check "$cmd" 2 "--yes -y" "$@"; cmd_proxy_login "$@" ;;
+  "aws push")        arg_check "$cmd" 0 "--profile: --node:" "$@"; cmd_aws_push "$@" ;;
+  "aws login")       arg_check "$cmd" 0 "--profile: --" "$@"; cmd_aws_login "$@" ;;
+  "aws creds")       arg_check "$cmd" 1 "" "$@"; [ $# -eq 1 ] || usage_fail "$cmd" "profile name required"; cmd_aws_creds "$@" ;;
+  "aws receive")     arg_check "$cmd" 0 "" "$@"; cmd_aws_receive "$@" ;;
   invite)            arg_check "$cmd" 0 "--ephemeral --profile: --name: --user: --code-only" "$@"; cmd_invite "$@" ;;
   ssh)               cmd_ssh "$@" ;;
   list)              arg_check "$cmd" 0 "--json --offline" "$@"; cmd_list "$@" ;;

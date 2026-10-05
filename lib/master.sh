@@ -1299,10 +1299,12 @@ sync_push_tools() {
 # checkout ($FLEET_ROOT) and the config checkout ($FLEET_CONFIG_DIR) from their
 # upstream when clean and behind (a code update re-executes this command once
 # so the new code runs the rest), (b) reconcile: enrol new nodes, provision
-# every node whose desired state changed, (c) every FLEET_PUSH_TOOLS_EVERY
-# minutes run `fleet update` on the online provisioned nodes. Under the master
-# lock (vault/locks/.sync); a second sync, or a reconcile, skips while it runs.
-# Quiet when nothing happened.
+# every node whose desired state changed, (c) with FLEET_AWS_PROFILES set,
+# forward the allowed AWS SSO profiles' role credentials to the online nodes
+# on the FLEET_AWS_REFRESH_MINUTES cadence (lib/aws.sh), (d) every
+# FLEET_PUSH_TOOLS_EVERY minutes run `fleet update` on the online provisioned
+# nodes. Under the master lock (vault/locks/.sync); a second sync, or a
+# reconcile, skips while it runs. Quiet when nothing happened.
 cmd_sync() {
   vault_require
   local l rc=0
@@ -1325,6 +1327,7 @@ cmd_sync() {
   fleet_load_config          # a config fast-forward may have changed fleet.conf
   sync_publish_skills        # lib/skills.sh: local skills missing from the config repo -> commit + push
   reconcile_run || rc=$?
+  sync_aws_push "$(ts_peers)"   # lib/aws.sh: the allowed AWS SSO profiles' role credentials, on their cadence
   sync_push_tools "$(ts_peers)"
   lock_release "$l" $$
   trap - EXIT
@@ -1534,6 +1537,16 @@ def age(s):
     if d < 86400: return "%dh" % (d // 3600)
     return "%dd" % (d // 86400)
 
+def aws_cell(a):
+    """AWS column: `ok 3h` (earliest expiry ahead), `expired`, `-` (none / not reached)."""
+    if not isinstance(a, dict) or a.get("state") in (None, "none"):
+        return "-"
+    if a.get("state") == "expired":
+        return "expired"
+    left = iso_epoch(a.get("expires") or "") - now
+    if left < 0: return "expired"
+    return "ok %s" % ("%dm" % (left // 60) if left < 3600 else "%dh" % (left // 3600))
+
 peers = {}
 for line in open(peers_f):
     parts = line.rstrip("\n").split("\t")
@@ -1614,6 +1627,7 @@ for fn in sorted(os.listdir(nodes_dir)):
         "desired": desired, "applied": applied, "tools": tools, "memory": memory, "proxy": proxy,
         "fleet": (live or {}).get("fleet") if live else None,
         "awake": (live or {}).get("awake") if live else None,
+        "aws": (live.get("aws") if isinstance(live.get("aws"), dict) else None) if live else None,
         "missing_since": r.get("missing_since") or "", "cleanup_pending": list(r.get("pending_cleanup") or []),
     })
 rows.sort(key=lambda x: (x["name"], x["id"]))
@@ -1629,7 +1643,7 @@ for pid in sorted(peers, key=lambda k: peers[k]["host"]):
         "synced": None, "provisioned": None, "provisioned_age": None,
         "desired": {"code": None, "config": None, "digest": None},
         "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
-        "tools": {}, "memory": None, "proxy": None, "fleet": None, "awake": None, "missing_since": "", "cleanup_pending": [], "master": False,
+        "tools": {}, "memory": None, "proxy": None, "fleet": None, "awake": None, "aws": None, "missing_since": "", "cleanup_pending": [], "master": False,
     })
 if len(master) >= 4:
     mem_state, mem_sync = master[2], master[3]
@@ -1641,7 +1655,7 @@ if len(master) >= 4:
         "desired": {"code": want_code or None, "config": want_config or None, "digest": None},
         "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
         "tools": {}, "memory": mem_state, "memory_last_sync": None if mem_sync == "-" else mem_sync,
-        "proxy": None, "fleet": os.environ.get("FLEET_VERSION"), "awake": None, "missing_since": "", "cleanup_pending": [], "master": True,
+        "proxy": None, "fleet": os.environ.get("FLEET_VERSION"), "awake": None, "aws": None, "missing_since": "", "cleanup_pending": [], "master": True,
     })
 
 if mode == "json":
@@ -1649,7 +1663,7 @@ if mode == "json":
     sys.exit(0)
 
 def dash(v): return "-" if v in (None, "") else str(v)
-head = ["NAME", "HOST", "ONLINE", "STATE", "SYNCED", "LAST PROVISION", "TOOLS", "MEMORY", "PROXY", "FLEET"]
+head = ["NAME", "HOST", "ONLINE", "STATE", "SYNCED", "LAST PROVISION", "TOOLS", "MEMORY", "PROXY", "AWS", "FLEET"]
 table = []
 for x in rows:
     if x["state"] == "revoked":
@@ -1664,7 +1678,7 @@ for x in rows:
     if x["master"] and x.get("memory_last_sync"):
         mem = "%s (%s)" % (mem, age(x["memory_last_sync"]) or "-")
     table.append([x["name"], dash(x["host"]), "yes" if x["online"] else "no", x["state"], dash(x["synced"]),
-                  dash(x["provisioned_age"]), tools, mem, dash(x["proxy"]), dash(x["fleet"])])
+                  dash(x["provisioned_age"]), tools, mem, dash(x["proxy"]), aws_cell(x.get("aws")), dash(x["fleet"])])
 widths = [len(h) for h in head]
 for row in table:
     for i, c in enumerate(row):
@@ -2373,6 +2387,12 @@ cmd_kick() {
     printf 'Rotate these secrets (the node still holds them): %s\n' "$n"
   else
     printf 'No secrets were sent to %s.\n' "$name"
+  fi
+  # AWS role credentials (fleet aws push) are removed by the remote `fleet
+  # leave` above; a node that was not reachable keeps them until they expire
+  # (hours at most) and gets no new ones: it is revoked, so no push reaches it.
+  if [ "$stop_failed" = 1 ] && [ -n "$(json_list "$(registry_path "$id")" aws_profiles 2>/dev/null)" ]; then
+    printf 'AWS credentials on %s could not be removed; they expire on their own and no further push reaches a revoked node.\n' "$name"
   fi
   audit kick "$name" "done$results"
 }

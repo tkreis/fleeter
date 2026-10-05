@@ -350,6 +350,54 @@ runs `apply` when `<code>+<config>` differs from `applied_commit` — unless
 `--no-apply`. `fleet daemon` dispatches jobs through `$FLEET_BIN/fleet` once it
 exists and `exec`s itself from there after a pull changed the code checkout.
 
+## `fleet setup` (master) — `lib/setup.sh`
+
+The guided first-time setup; everything it does is also reachable by hand.
+Nine steps, each `[n/9]` with `ok` or `skip`, so a rerun converges:
+
+1. `init_preflight` (the init master checks), then the GitHub CLI logged in
+   (`gh auth login -h github.com --web --git-protocol ssh` after a yes/no);
+   dies when `FLEET_GH_API` forces the token path (setup creates repos via gh).
+2. Owner: `--github-owner`, else asked with `gh api user --jq .login` as default.
+3. Config repo `OWNER/NAME` (`--config-repo`, default `fleet-config`) in DIR
+   (`--config-dir`, default `~/fleet-config`, `~` expanded, parent created,
+   physical path): a checkout whose `origin` ends in `OWNER/NAME[.git]` is
+   reused; another checkout or a plain directory there is an error; else
+   `gh repo view` → `gh repo clone OWNER/NAME DIR -- --quiet`; else
+   `examples/fleet-config` copied, `fleet.conf` rendered (`KEY="VALUE"`, the
+   trailing comment kept: `FLEET_CODE_REPO` = this checkout's origin, as https
+   when OWNER does not own it; `FLEET_CONFIG_REPO=git@github.com:OWNER/NAME.git`;
+   `FLEET_MEMORY_REPO` = `git@github.com:OWNER/MEM.git` or `""`; `FLEET_TOOLS`
+   = the preset or list, `cliproxy` added/removed by the proxy answer;
+   `FLEET_KEEP_AWAKE`; `FLEET_PROXY_MODE=local` with the proxy), committed
+   (`start fleet config`), confirmed, `gh repo create OWNER/NAME --private
+   --source DIR --push`.
+4. Memory repo (`--memory`, default on; `--memory-repo`, default
+   `fleet-memory`): `gh repo view`, else confirmed `gh repo create … --private`
+   (empty; `memory_seed` fills it).
+5. `cmd_init_master --config-dir DIR` in-process, unless the vault, the
+   Tailscale client, the master key, the reconcile schedule and the recorded
+   config dir are already in place.
+6. Claude: skipped when `CLAUDE_CODE_OAUTH_TOKEN` is in profile minimal or
+   `claude` is missing; otherwise (`--claude-token`, or a yes at the prompt;
+   `--yes` without a terminal and without the flag skips)
+   `claude setup-token | setup_token_filter | cmd_secrets_set CLAUDE_CODE_OAUTH_TOKEN --profile minimal`
+   — the filter strips colour codes and keeps the `sk-ant-oat…` word (else
+   the last word). Then, interactively, more names → `cmd_secrets_set` each.
+7. Proxy (`--proxy`, default only when `$FLEET_CLIPROXY_DIR/conf/config.yaml`
+   exists): `cmd_proxy_import`, skipped when `files/full/.cli-proxy-api/config.yaml.age` exists.
+8. `cmd_config_publish --yes`, then `cmd_doctor` (problems are a warning).
+9. The next commands. Audited `setup - ok`.
+
+Defaults on a rerun come from the loaded config (`FLEET_CONFIG_REPO`,
+`FLEET_MEMORY_REPO`, `FLEET_TOOLS`, `FLEET_KEEP_AWAKE`) when
+`$FLEET_CONFIG_DIR/fleet.conf` exists and `--config-dir` was not given.
+`--yes` answers every question with its default and confirms the creations;
+without it, EOF at a confirmation is a no. Refuses on a node (`enrol.json`).
+`SETUP.md` (served at `/SETUP.md` on the site, body of `skills/fleet-setup`)
+documents the same flow for a coding agent; `tests/master_test.sh` checks that
+every `fleet …` line in its code blocks is accepted by the CLI.
+
 ## `fleet sync` (master)
 
 One run, under `vault/locks/.sync`:

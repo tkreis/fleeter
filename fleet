@@ -28,7 +28,8 @@ fleet — personal agent fleet
 Usage: fleet COMMAND [ARGS]   (fleet COMMAND --help shows one command)
 
 Master:
-  init master [--config-dir DIR] [--reconfigure]   set up this machine as the master
+  setup [--yes] [--github-owner O] [--tools P] ...   first-time setup, guided: config repo, memory repo, init master, Claude token, publish, doctor (start here)
+  init master [--config-dir DIR] [--reconfigure]   set up this machine as the master (what setup runs in its step 5)
   secrets set NAME [--profile P]    store a secret (hidden prompt or stdin); P = minimal|full
   secrets list                      names and profiles only
   files add PATH [--profile P]      mirror a file under $HOME (e.g. a .env) to nodes
@@ -79,6 +80,7 @@ EOF
 # usage_for CMD — the synopsis of one command ("t3 setup", "memory sync", ...).
 usage_for() {
   case "$1" in
+    setup)              echo 'fleet setup [--yes] [--github-owner OWNER] [--config-repo NAME] [--config-dir DIR] [--memory|--no-memory] [--memory-repo NAME] [--tools minimal|agents|full|"LIST"] [--proxy|--no-proxy] [--keep-awake|--no-keep-awake] [--claude-token|--no-claude-token]' ;;
     init|"init master") echo "fleet init master [--config-dir DIR] [--reconfigure]" ;;
     secrets)            echo "fleet secrets set NAME [--profile minimal|full] | fleet secrets list" ;;
     "secrets set")      echo "fleet secrets set NAME [--profile minimal|full]" ;;
@@ -222,6 +224,7 @@ case "$cmd" in
 esac
 
 case "$cmd" in
+  setup)             arg_check "$cmd" 0 "--yes -y --github-owner: --config-repo: --config-dir: --memory --no-memory --memory-repo: --tools: --proxy --no-proxy --keep-awake --no-keep-awake --claude-token --no-claude-token" "$@"; cmd_setup "$@" ;;
   "init master")     arg_check "$cmd" 0 "--config-dir: --reconfigure" "$@"; cmd_init_master "$@" ;;
   "secrets set")     arg_check "$cmd" 1 "--profile:" "$@"; cmd_secrets_set "$@" ;;
   "secrets list")    arg_check "$cmd" 0 "" "$@"; cmd_secrets_list "$@" ;;

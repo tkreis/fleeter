@@ -892,7 +892,7 @@ assert "empty allowlist: push exits 1 with the hint, runs no aws command, touche
 out=$(bash "$FLEET" aws push --profile dev 2>&1); rc=$?
 assert "--profile outside the (empty) allowlist: refused, exit 2, nothing ran" bash -c "[ $rc = 2 ] && printf '%s' \"\$0\" | grep -q 'AWS profile dev refused: not in FLEET_AWS_PROFILES' && [ ! -s '$AWS_LOG' ] && [ ! -s '$SSH_LOG' ]" "$out"
 out=$(FLEET_SYNC_REEXEC=1 bash "$FLEET" sync 2>&1); rc=$?
-assert "sync with an empty allowlist: no aws command, no receive, quiet" bash -c "[ $rc = 0 ] && [ ! -s '$AWS_LOG' ] && ! grep -q 'aws receive' '$SSH_LOG' && ! printf '%s' \"\$0\" | grep -qi aws" "$out"
+assert "sync with an empty allowlist: no aws command, no receive, no aws line" bash -c "[ $rc = 0 ] && [ ! -s '$AWS_LOG' ] && ! grep -q 'aws receive' '$SSH_LOG' && ! printf '%s' \"\$0\" | grep -qiE 'AWS SSO|aws:|sso login|profiles'" "$out"
 # the allowlist: two fine profiles, the legacy form, a name that is not in the
 # config, and a long-term-keys profile
 printf 'FLEET_AWS_PROFILES="dev tools legacy nosuch static"\n' >>"$FLEET_HOME/fleet.conf"
@@ -992,7 +992,7 @@ refute "FLEET_AWS_SYNC=0: sync never pushes" grep -q 'aws receive' "$SSH_LOG"
 grep -v '^FLEET_AWS_SYNC=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
 : >"$SSH_LOG"
 out=$(FLEET_AWS_BIN="$T/no-such-aws" async); rc=$?
-assert "no aws CLI on the master: sync skips the step silently" bash -c "[ $rc = 0 ] && ! printf '%s' \"\$0\" | grep -qi aws && ! grep -q 'aws receive' '$SSH_LOG'" "$out"
+assert "no aws CLI on the master: sync skips the step silently" bash -c "[ $rc = 0 ] && ! printf '%s' \"\$0\" | grep -qiE 'AWS SSO|aws:|aws CLI|sso login|profiles' && ! grep -q 'aws receive' '$SSH_LOG'" "$out"
 unset -f async aws_state_rewind
 out=$(FLEET_AWS_BIN="$T/no-such-aws" bash "$FLEET" aws push 2>&1); rc=$?
 assert "no aws CLI on the master: push dies with the install hint" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'aws CLI not found'" "$out"

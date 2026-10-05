@@ -118,8 +118,17 @@ case "$1 $2" in
   "auth status") [ -f "$GH_STATE/logged-in" ] ;;
   "auth login")  touch "$GH_STATE/logged-in" ;;
   "repo view")   [ ! -f "$GH_STATE/missing-$(printf '%s' "$3" | tr / _)" ] ;;
-  "repo create") rm -f "$GH_STATE/missing-$(printf '%s' "$3" | tr / _)" ;;
-  "api user")    echo example ;;
+  "repo create")
+    slug=$3; rm -f "$GH_STATE/missing-$(printf '%s' "$slug" | tr / _)"
+    # fleet setup: `--source DIR --push` makes a bare remote under $GH_STATE/remotes and, like gh, adds origin + upstream
+    src=""; shift 3; while [ $# -gt 0 ]; do case "$1" in --source) src=$2; shift ;; esac; shift; done
+    if [ -n "$src" ]; then
+      mkdir -p "$GH_STATE/remotes/$(dirname "$slug")"
+      git -c init.defaultBranch=main init -q --bare "$GH_STATE/remotes/$slug.git"
+      git -C "$src" remote add origin "$GH_STATE/remotes/$slug.git" && git -C "$src" push -q -u origin HEAD
+    fi ;;
+  "repo clone")  git clone -q "$GH_STATE/remotes/$3.git" "$4" ;;
+  "api user")    echo "${GH_FAKE_LOGIN:-example}" ;;
   "api -X")
     case "$3" in
       POST)   cat >/dev/null; n=$(cat "$GH_STATE/counter" 2>/dev/null || echo 100); n=$((n + 1)); echo "$n" >"$GH_STATE/counter"; echo "$n" ;;
@@ -284,7 +293,7 @@ vault_snap() { (cd "$FLEET_VAULT" && find . -type f | LC_ALL=C sort | while IFS=
 export -f vault_snap
 snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
 HELP_OK=1; HELP_BAD=""
-for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" "proxy login alpha" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" "reboot alpha" "unlock alpha" \
+for c in setup "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" "proxy login alpha" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" "reboot alpha" "unlock alpha" \
          "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" "skill add $HOME/x" "skill list" "skill remove x" "schedule install" doctor join apply pull update "memory sync" login status leave daemon \
          "vault status" "vault encrypt" "vault rotate-key" "vault export $T/never.age" \
          init secrets files proxy t3 config policy memory skill schedule vault; do
@@ -298,7 +307,7 @@ assert "every command with -h/--help exits 0 and prints its synopsis${HELP_BAD}"
 assert "--help ran nothing: vault unchanged, no API call, no ssh, no tailscale logout, no daemon.pid" bash -c "[ \"\$(vault_snap)\" = \"\$0\" ] && [ \"\$(grep -c '' '$API_LOG')\" = $api0 ] && [ ! -s '$SSH_LOG' ] && [ ! -s '$T/ts.log' ] && [ ! -f '$FLEET_HOME/daemon.pid' ]" "$snap0"
 assert "fleet secrets set --help did not consume stdin into the vault; vault export --help wrote nothing" bash -c "[ -z \"\$(ls '$FLEET_VAULT/secrets')\" ] && [ ! -e '$T/never.age' ]"
 BAD_OK=1; BAD_BAD=""
-for c in "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
+for c in "setup --bogus" "setup extra" "setup --tools" "setup --github-owner" "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
          "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "list --bogus" "list extra" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
          "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" \
          "reboot --bogus alpha" "reboot a b" "unlock --bogus alpha" "unlock --host" "unlock a b" "proxy frob" "proxy import a b" "proxy login --bogus alpha" "proxy login a b c" \
@@ -1926,6 +1935,130 @@ rm -f "$T/proxy-verify-fail"
 refute "no refresh token from the node ever reached the master's logs or output" grep -rq 'rt-OLD-FAKE' "$SSH_ARGV" "$PL_DOCKER_LOG" "$PL_CURL_LOG" "$FLEET_VAULT/audit.log"
 rm -f "$FLEET_VAULT/nodes/nPROXYCNTRL.json"; rm -rf "$PXNH" "$PXV"; write_status ""
 echo '[{"nodeId":"nAAAACNTRL"}]' >"$DEVICES_JSON"
+
+# ======================================================================
+echo "== fleet setup: one command from nothing to a master (fake gh, fake tailscale, fake claude)"
+SBIN="$T/setupbin"; mkdir -p "$SBIN"
+# fake claude: `setup-token` chats on stderr and prints the token (with colour codes) on stdout
+cat >"$SBIN/claude" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = setup-token ] || { echo "fake claude: unsupported: $*" >&2; exit 2; }
+printf 'Opening browser to sign in...\n' >&2
+printf '\033[1mLong-lived authentication token:\033[0m\n\033[32msk-ant-oat01-CANARYsetup-FAKE\033[0m\n'
+EOF
+chmod +x "$SBIN/claude"
+# sfleet HOME GHSTATE ARGS... — fleet in its own HOME with the fake gh (no token path), fake claude, this tailnet view
+sfleet() { local h=$1 g=$2; shift 2; env PATH="$SBIN:$T/ghbin:$PATH" FLEET_GH_API= GH_STATE="$g" HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_VAULT="$h/.config/fleet/vault" FLEET_TS_STATUS_JSON="$T/status-setup.json" bash "$FLEET" "$@"; }
+write_status '' "$T/status-setup.json"
+SH="$T/setup-home"; SGH="$T/ghstate-setup"; SCFG="$SH/fleet-config"; SV="$SH/.config/fleet/vault"
+mkdir -p "$SH" "$SGH"; touch "$SGH/logged-in" "$SGH/missing-alice_fleet-config" "$SGH/missing-alice_fleet-memory"
+printf '%s\n' "$ALLOW_ALL" >"$ACL"       # the live policy needs the typed `apply`: init master's own prompt, after setup's questions
+: >"$GH_LOG"
+out=$(printf 'tskey-api-ksetup-FAKE\napply\n' | sfleet "$SH" "$SGH" setup --yes --github-owner alice --tools agents --no-keep-awake --no-proxy --claude-token 2>&1); rc=$?
+assert "setup --yes exits 0" [ "$rc" = 0 ]
+assert "all 9 steps reported as [n/9]" bash -c "for i in 1 2 3 4 5 6 7 8 9; do printf '%s' \"\$0\" | grep -q \"\\[\$i/9\\]\" || exit 1; done" "$out"
+assert "owner from the flag, not from gh (which says example)" printf '%s' "$out" | grep -q 'GitHub owner: alice (logged in as example)'
+assert "config repo started from the example in ~/fleet-config: AGENTS.md, harness/, the starter skill in the first commit 'start fleet config'" bash -c "[ -f '$SCFG/AGENTS.md' ] && [ -d '$SCFG/harness' ] && git -C '$SCFG' log --format=%s | grep -qx 'start fleet config' && git -C '$SCFG' ls-tree -r --name-only \"\$(git -C '$SCFG' rev-list --max-parents=0 HEAD)\" | grep -qx 'skills/fleet-notes/SKILL.md'"
+assert "fleet.conf rendered: config + memory repos for alice, agents preset, keep awake 0, no YOU left in a value, comments kept" bash -c "grep -q '^FLEET_CONFIG_REPO=\"git@github.com:alice/fleet-config.git\"' '$SCFG/fleet.conf' && grep -q '^FLEET_MEMORY_REPO=\"git@github.com:alice/fleet-memory.git\"  *# shared memory' '$SCFG/fleet.conf' && grep -qx 'FLEET_TOOLS=\"base devtools claude codex cursor chrome\"' '$SCFG/fleet.conf' && grep -q '^FLEET_KEEP_AWAKE=\"0\"  *# nodes never' '$SCFG/fleet.conf' && ! grep -q '^[^#]*YOU/' '$SCFG/fleet.conf'"
+refute "the first publish did not pin fleeter's bundled fleet skill into the config repo (capture excludes it like sync does)" [ -e "$SCFG/skills/fleet" ]
+assert "FLEET_CODE_REPO: this checkout's origin, as https when alice does not own it (or the public default)" grep -Eq '^FLEET_CODE_REPO="https://github.com/[^"]*fleeter[^"]*"' "$SCFG/fleet.conf"
+assert "gh: repo view found nothing, then repo create --private --source DIR --push; the memory repo created private and empty" bash -c "grep -qx 'repo view alice/fleet-config' '$GH_LOG' && grep -qx 'repo create alice/fleet-config --private --source $SCFG --push' '$GH_LOG' && grep -qx 'repo view alice/fleet-memory' '$GH_LOG' && grep -qx 'repo create alice/fleet-memory --private' '$GH_LOG'"
+assert "the config repo's origin has the start commit and HEAD (publish pushed)" bash -c "git --git-dir='$SGH/remotes/alice/fleet-config.git' log --format=%s main | grep -qx 'start fleet config' && [ \"\$(git --git-dir='$SGH/remotes/alice/fleet-config.git' rev-parse main)\" = \"\$(git -C '$SCFG' rev-parse HEAD)\" ]"
+assert "init master ran: config dir recorded, vault with the OAuth client and master key, reconcile schedule, fleeter alias, fleet skill" bash -c "grep -qx \"FLEET_CONFIG_DIR='$SCFG'\" '$SH/.config/fleet/fleet.conf' && [ -f '$SV/tailscale.json.age' ] && [ -f '$SV/ssh/fleet_master' ] && { [ -f '$SH/Library/LaunchAgents/dev.fleet.reconcile.plist' ] || [ -f '$SH/.config/systemd/user/fleet-reconcile.timer' ]; } && [ -L '$SH/.local/bin/fleeter' ] && [ -f '$SH/.claude/skills/fleet/SKILL.md' ]"
+assert "bootstrap token used and revoked, policy applied" bash -c "grep -q '^DELETE /api/v2/tailnet/-/keys/ksetup$' '$API_LOG' && python3 '$ROOT/lib/api.py' policy check '$ROOT/templates/tailscale-policy.hujson' '$ACL' tag:fleet-node"
+assert "claude setup-token piped into the vault: CLAUDE_CODE_OAUTH_TOKEN in profile minimal, colour codes stripped" bash -c "HOME='$SH' FLEET_HOME='$SH/.config/fleet' FLEET_VAULT='$SV' vcat '$SV/secrets/minimal.env.age' | grep -qx \"CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-CANARYsetup-FAKE'\""
+refute "the token canary is nowhere in plaintext: not in the output, the gh log, the config repo, or any unencrypted file under the setup HOME" bash -c "printf '%s' \"\$0\" | grep -q CANARYsetup || grep -rq CANARYsetup '$GH_LOG' '$SCFG' || find '$SH' -type f ! -name '*.age' -exec grep -l CANARYsetup {} + | grep -q ." "$out"
+refute "setup output never shows the bootstrap token or the client secret" printf '%s' "$out" | grep -Eq 'ksetup-FAKE|tskey-client'
+assert "publish and doctor ran, next steps printed (invite, spawn.sh, list), audited" bash -c "printf '%s' \"\$0\" | grep -q 'committed\|nothing to commit' && printf '%s' \"\$0\" | grep -q 'file modes checked' && printf '%s' \"\$0\" | grep -q 'fleet invite --name NAME' && printf '%s' \"\$0\" | grep -q 'docker/spawn.sh 1' && printf '%s' \"\$0\" | grep -q 'fleet list' && grep -q ' setup - ok' '$SV/audit.log'" "$out"
+: >"$GH_LOG"; h1=$(git -C "$SCFG" rev-parse HEAD)
+out=$(sfleet "$SH" "$SGH" setup --yes </dev/null 2>&1); rc=$?
+assert "rerun with --yes alone: exit 0, owner alice and the recorded dir from fleet.conf, config repo / memory repo / init / Claude token skipped, nothing created on GitHub, no new commit" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'GitHub owner: alice' && printf '%s' \"\$0\" | grep -q \"skip config repo: $SCFG is a checkout of alice/fleet-config\" && printf '%s' \"\$0\" | grep -q 'skip memory repo: alice/fleet-memory exists' && printf '%s' \"\$0\" | grep -q 'skip init master:' && printf '%s' \"\$0\" | grep -q 'skip Claude login: CLAUDE_CODE_OAUTH_TOKEN is in the vault' && ! grep -q 'repo create' '$GH_LOG' && ! grep -q 'auth login' '$GH_LOG' && [ \"\$(git -C '$SCFG' rev-parse HEAD)\" = '$h1' ]" "$out"
+refute "the rerun asked nothing (no prompt text in the output)" printf '%s' "$out" | grep -q '\]: '
+# --no-memory, a custom tool list with --proxy, a config.yaml to import, no claude on PATH
+SH2="$T/setup-home2"; SGH2="$T/ghstate-setup2"; SCFG2="$SH2/repos/cfg"; SV2="$SH2/.config/fleet/vault"
+mkdir -p "$SH2/cli-proxy-api/conf" "$SGH2"; touch "$SGH2/logged-in" "$SGH2/missing-example_cfg"
+printf 'api-keys:\n  - sk-client-SETUP2-FAKE\n' >"$SH2/cli-proxy-api/conf/config.yaml"
+cp "$T/acl.template.bak" "$ACL"          # already isolating: init asks for no `apply`
+: >"$GH_LOG"
+out=$(printf 'tskey-api-ksetup2-FAKE\n' | env PATH="$T/ghbin:$PATH" GH_STATE="$SGH2" HOME="$SH2" FLEET_GH_API= FLEET_HOME="$SH2/.config/fleet" FLEET_VAULT="$SV2" FLEET_TS_STATUS_JSON="$T/status-setup.json" bash "$FLEET" setup --yes --config-repo cfg --config-dir "$SH2/repos/cfg" --no-memory --tools "base claude" --proxy --keep-awake 2>&1); rc=$?
+assert "setup --no-memory --tools 'base claude' --proxy exits 0, owner from gh (example)" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'GitHub owner: example'" "$out"
+assert "fleet.conf: FLEET_MEMORY_REPO empty, cliproxy appended to the list, proxy mode local, keep awake 1; repo example/cfg created and pushed from the nested dir" bash -c "grep -q '^FLEET_MEMORY_REPO=\"\"' '$SCFG2/fleet.conf' && grep -qx 'FLEET_TOOLS=\"base claude cliproxy\"' '$SCFG2/fleet.conf' && grep -q '^FLEET_PROXY_MODE=\"local\"' '$SCFG2/fleet.conf' && grep -q '^FLEET_KEEP_AWAKE=\"1\"' '$SCFG2/fleet.conf' && grep -qx 'repo create example/cfg --private --source $SCFG2 --push' '$GH_LOG' && git --git-dir='$SGH2/remotes/example/cfg.git' rev-parse main >/dev/null"
+refute "no memory repo looked up or created, no memory schedule" bash -c "grep -q 'fleet-memory' '$GH_LOG' || ls '$SH2/Library/LaunchAgents/dev.fleet.memory.plist' '$SH2/.config/systemd/user/fleet-memory.timer' 2>/dev/null | grep -q ."
+assert "memory step and Claude step reported: shared memory off; --yes without a terminal and without --claude-token runs no claude setup-token (not installed, or needs the terminal), no secret stored" bash -c "printf '%s' \"\$0\" | grep -q 'skip memory repo: shared memory is off' && printf '%s' \"\$0\" | grep -q 'Claude Code is not installed here\|claude setup-token needs your terminal; not run' && [ ! -e '$SV2/secrets/minimal.env.age' ]" "$out"
+assert "proxy step imported ~/cli-proxy-api/conf/config.yaml into the vault (full profile, encrypted), the client key nowhere in plaintext" bash -c "[ -f '$SV2/files/full/.cli-proxy-api/config.yaml.age' ] && ! find '$SH2/.config' -type f ! -name '*.age' -exec grep -l SETUP2-FAKE {} + | grep -q . && ! printf '%s' \"\$0\" | grep -q SETUP2-FAKE" "$out"
+# the repo already exists on GitHub: clone it, render nothing, keep its fleet.conf
+SH3="$T/setup-home3"; SGH3="$T/ghstate-setup3"; SV3="$SH3/.config/fleet/vault"
+mkdir -p "$SH3" "$SGH3/remotes/example"; touch "$SGH3/logged-in"
+git clone -q --bare "$CFG" "$SGH3/remotes/example/fleet-config.git"
+: >"$GH_LOG"
+out=$(printf 'tskey-api-ksetup3-FAKE\n' | sfleet "$SH3" "$SGH3" setup --yes --no-memory --no-claude-token 2>&1); rc=$?
+assert "existing example/fleet-config: cloned into ~/fleet-config (gh repo clone), no repo create, its fleet.conf untouched, init ran against it, Claude step skipped by flag" bash -c "[ $rc = 0 ] && grep -qx 'repo clone example/fleet-config $SH3/fleet-config -- --quiet' '$GH_LOG' && ! grep -q 'repo create' '$GH_LOG' && cmp -s '$SH3/fleet-config/fleet.conf' '$CFG/fleet.conf' && grep -qx \"FLEET_CONFIG_DIR='$SH3/fleet-config'\" '$SH3/.config/fleet/fleet.conf' && [ -f '$SV3/tailscale.json.age' ] && printf '%s' \"\$0\" | grep -q 'Claude login skipped'" "$out"
+# answers typed at the prompts (stdin), one extra secret, an existing gh login; the creation is confirmed with Enter
+SH4="$T/setup-home4"; SGH4="$T/ghstate-setup4"; SV4="$SH4/.config/fleet/vault"
+mkdir -p "$SH4" "$SGH4"; touch "$SGH4/logged-in" "$SGH4/missing-carol_mycfg"
+: >"$GH_LOG"
+# owner, repo name, dir (default), memory n, tools minimal, proxy n, awake y, create [Enter], tailscale token, Claude? n, secret MY_KEY / profile full / value, finish
+out=$(printf 'carol\nmycfg\n\nn\nminimal\nn\ny\n\ntskey-api-ksetup4-FAKE\nn\nMY_KEY\nfull\nmy-value-SETUP4-FAKE\n\n' | sfleet "$SH4" "$SGH4" setup 2>&1); rc=$?
+assert "interactive run: every question asked in order with its default shown, exit 0" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'owns the fleet repos \[example\]: ' && printf '%s' \"\$0\" | grep -q 'config repo (carol/<name>) \[fleet-config\]: ' && printf '%s' \"\$0\" | grep -q 'local checkout of the config repo \[$SH4/fleet-config\]: ' && printf '%s' \"\$0\" | grep -q 'Enable shared memory? \[Y/n\]: ' && printf '%s' \"\$0\" | grep -q 'tools preset \[agents\]: ' && printf '%s' \"\$0\" | grep -q 'Run CLIProxyAPI on every node.*\[y/N\]: ' && printf '%s' \"\$0\" | grep -q 'Keep nodes awake.*\[Y/n\]: ' && printf '%s' \"\$0\" | grep -q 'Create the private GitHub repo carol/mycfg and push $SH4/fleet-config there? \[Y/n\] '" "$out"
+assert "answers applied: carol/mycfg in ~/fleet-config, memory off, minimal tools, keep awake 1, created and pushed; the extra secret MY_KEY stored in profile full" bash -c "grep -q '^FLEET_CONFIG_REPO=\"git@github.com:carol/mycfg.git\"' '$SH4/fleet-config/fleet.conf' && grep -q '^FLEET_MEMORY_REPO=\"\"' '$SH4/fleet-config/fleet.conf' && grep -qx 'FLEET_TOOLS=\"base devtools claude\"' '$SH4/fleet-config/fleet.conf' && grep -q '^FLEET_KEEP_AWAKE=\"1\"' '$SH4/fleet-config/fleet.conf' && grep -qx 'repo create carol/mycfg --private --source $SH4/fleet-config --push' '$GH_LOG' && HOME='$SH4' FLEET_HOME='$SH4/.config/fleet' FLEET_VAULT='$SV4' vcat '$SV4/secrets/full.env.age' | grep -qx \"MY_KEY='my-value-SETUP4-FAKE'\""
+refute "the typed secret value is nowhere in plaintext" bash -c "printf '%s' \"\$0\" | grep -q SETUP4-FAKE || find '$SH4' -type f ! -name '*.age' -exec grep -l SETUP4-FAKE {} + | grep -q ." "$out"
+# no --yes and no answer (EOF) at the creation question: nothing is created on GitHub, the checkout is kept
+SH5="$T/setup-home5"; SGH5="$T/ghstate-setup5"
+mkdir -p "$SH5" "$SGH5"; touch "$SGH5/logged-in" "$SGH5/missing-bob_c"
+: >"$GH_LOG"
+out=$(sfleet "$SH5" "$SGH5" setup --github-owner bob --config-repo c --no-memory --tools minimal --no-proxy --keep-awake --no-claude-token </dev/null 2>&1); rc=$?
+assert "EOF at 'create the repo?' stops setup (exit 1) with the manual command; the rendered checkout is kept; no repo create, no init" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'stopped: bob/c not created' && printf '%s' \"\$0\" | grep -q 'gh repo create bob/c --private --source $SH5/fleet-config --push' && [ -f '$SH5/fleet-config/fleet.conf' ] && ! grep -q 'repo create' '$GH_LOG' && [ ! -e '$SH5/.config/fleet/vault' ]" "$out"
+# guards and helpers
+out=$(sfleet "$SH5" "$SGH5" setup --yes --github-owner bob --tools "base bogus" --no-memory --no-proxy </dev/null 2>&1); rc=$?
+assert "an unknown tool in --tools dies before anything is created" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'unknown tool: bogus' && ! grep -q 'repo create' '$GH_LOG'" "$out"
+assert "--tools full --no-proxy drops cliproxy; --tools minimal --proxy adds it" bash -c "cd '$ROOT' && . lib/common.sh && fleet_load_config && . lib/setup.sh && [ \"\$(setup_tools_with_proxy \"\$(setup_tools_resolve full)\" 0)\" = 'base devtools claude codex cursor chrome grok t3code' ] && [ \"\$(setup_tools_with_proxy \"\$(setup_tools_resolve minimal)\" 1)\" = 'base devtools claude cliproxy' ]"
+assert "the token filter takes the sk-ant-oat word, else the last word, strips colours; empty input prints nothing" bash -c "cd '$ROOT' && . lib/common.sh && . lib/setup.sh && [ \"\$(printf 'x\n\033[1mToken:\033[0m \033[32msk-ant-oat01-A\033[0m\nbye\n' | setup_token_filter)\" = sk-ant-oat01-A ] && [ \"\$(printf 'the token is\nabc\n' | setup_token_filter)\" = abc ] && [ -z \"\$(printf '' | setup_token_filter)\" ]"
+mkdir -p "$SH5/.config/fleet"; : >"$SH5/.config/fleet/enrol.json"
+out=$(sfleet "$SH5" "$SGH5" setup --yes </dev/null 2>&1); rc=$?
+assert "setup refuses on a node (enrol.json)" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'this machine is a fleet node'" "$out"
+rm -f "$SH5/.config/fleet/enrol.json"
+write_status ""; printf '%s\n' "$ALLOW_ALL" >"$ACL"
+
+# ======================================================================
+echo "== install.sh: links, the setup hint, FLEETER_SETUP=1 without a terminal"
+ISRC="$T/inst-src"; IH="$T/inst"; mkdir -p "$ISRC"
+# a plain git repo of this tree (the checkout may be a worktree or a read-only mount the installer cannot clone from)
+(cd "$ROOT" && tar -cf - --exclude .git --exclude tests/.e2e-work .) | (cd "$ISRC" && tar -xf -)
+( cd "$ISRC" && git -c init.defaultBranch=main init -q && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -q -m src )
+# install.sh requires curl (the one-liner downloads it with curl) but never runs it: a stub for hosts without curl (slim containers)
+mkdir -p "$T/instbin-fake"; printf '#!/usr/bin/env bash\nexit 0\n' >"$T/instbin-fake/curl"; chmod +x "$T/instbin-fake/curl"
+out=$(PATH="$T/instbin-fake:$PATH" HOME="$T/inst-home" FLEETER_DIR="$IH/share" FLEETER_BIN="$IH/bin" FLEETER_REPO="$ISRC" FLEETER_REF=main bash "$ROOT/install.sh" 2>&1); rc=$?
+assert "install.sh: exit 0, fleet + fleeter linked into FLEETER_BIN, the hint names fleet setup and SETUP.md" bash -c "[ $rc = 0 ] && [ -L '$IH/bin/fleet' ] && [ -L '$IH/bin/fleeter' ] && [ -x '$IH/share/fleet' ] && printf '%s' \"\$0\" | grep -q 'fleet setup' && printf '%s' \"\$0\" | grep -q 'https://tkreis.github.io/fleeter/SETUP.md' && bash '$IH/bin/fleet' --version | grep -q '^fleet '" "$out"
+out=$(PATH="$T/instbin-fake:$PATH" HOME="$T/inst-home" FLEETER_DIR="$IH/share" FLEETER_BIN="$IH/bin" FLEETER_REPO="$ISRC" FLEETER_REF=main FLEETER_SETUP=1 FLEETER_TTY=/nonexistent bash "$ROOT/install.sh" 2>&1); rc=$?
+assert "FLEETER_SETUP=1 without a terminal: the update ran, setup was not started, the hint says to run it" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'updating' && printf '%s' \"\$0\" | grep -q 'no terminal' && printf '%s' \"\$0\" | grep -q 'fleet setup' && [ ! -e '$T/inst-home/.config' ]" "$out"
+refute "the installer never ran setup (no fleet state under the install HOME)" [ -e "$T/inst-home/.config/fleet" ]
+
+# ======================================================================
+echo "== SETUP.md (the agent's instructions) and skills/fleet-setup: every fleet command line is one the CLI accepts; the skill body is SETUP.md"
+SETUP_OK=1; SETUP_BAD=""
+# every `fleet ...` segment inside the fenced code blocks (pipelines and && chains split), without placeholders
+while IFS= read -r seg; do
+  seg=${seg#"${seg%%[! ]*}"}; seg=${seg#\$ }
+  case "$seg" in fleet\ *) ;; *) continue ;; esac
+  seg=${seg%%#*}
+  # shellcheck disable=SC2086  # the segment is meant to split into words
+  set -- $seg; shift
+  scmd=$1; shift
+  case "$scmd" in init|secrets|files|proxy|t3|config|policy|memory|skill|schedule|vault) scmd="$scmd $1"; shift ;; esac
+  # shellcheck disable=SC2086
+  out=$(bash "$FLEET" $scmd --help 2>&1); rc=$?
+  if [ "$rc" != 0 ] || ! printf '%s' "$out" | grep -q '^fleet '; then SETUP_OK=0; SETUP_BAD="$SETUP_BAD [$scmd -> rc $rc]"; continue; fi
+  [ "$scmd" = ssh ] && continue           # the rest is the remote command
+  for w in "$@"; do
+    case "$w" in --*) f=${w%%=*}; printf '%s' "$out" | grep -q -- "$f" || { SETUP_OK=0; SETUP_BAD="$SETUP_BAD [$scmd: $f not in the synopsis]"; } ;; esac
+  done
+done <<EOF
+$(awk '/^```/ { f = !f; next } f { gsub(/&&|\|\||\||;/, "\n"); print }' "$ROOT/SETUP.md")
+EOF
+assert "every fleet command in SETUP.md's code blocks is accepted: --help exits 0 and lists each flag used${SETUP_BAD}" [ "$SETUP_OK" = 1 ]
+assert "SETUP.md stays under 200 lines and never asks for a secret in the chat" bash -c "[ \"\$(wc -l <'$ROOT/SETUP.md' | tr -d ' ')\" -lt 200 ] && ! grep -qi 'paste .*token.* here' '$ROOT/SETUP.md'"
+assert "skills/fleet-setup/SKILL.md = frontmatter (name: fleet-setup, description) + SETUP.md, byte for byte" bash -c "head -1 '$ROOT/skills/fleet-setup/SKILL.md' | grep -qx -- '---' && grep -qx 'name: fleet-setup' '$ROOT/skills/fleet-setup/SKILL.md' && grep -q '^description: .*set up' '$ROOT/skills/fleet-setup/SKILL.md' && sed '1,/^---\$/d' '$ROOT/skills/fleet-setup/SKILL.md' | cmp -s - '$ROOT/SETUP.md'"
+assert "the pages workflow publishes SETUP.md next to install.sh" grep -q 'cp SETUP.md site/SETUP.md' "$ROOT/.github/workflows/pages.yml"
 
 # ======================================================================
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

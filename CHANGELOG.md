@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 — 2026-10-05
+
+### Fixed
+
+- `fleet list` showed a busy Mac node as `unreachable`: its `fleet status` takes about 10 s (one check per tool), exactly the old per-node cap. `FLEET_LIST_SECS` now defaults to 30.
+
 ## 0.5.0 — 2026-10-05
 
 First-time setup is one command, or one sentence to your coding agent.

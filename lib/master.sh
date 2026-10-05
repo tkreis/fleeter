@@ -1475,10 +1475,10 @@ node_provisioning() {
 }
 
 # list_collect_status OUTDIR PEERS — `fleet status --json` from every online,
-# non-revoked node in parallel, each capped (FLEET_LIST_SECS, default 10 s),
+# non-revoked node in parallel, each capped (FLEET_LIST_SECS, default 30 s),
 # into OUTDIR/<id>. A node that did not answer leaves no file.
 list_collect_status() {
-  local outdir=$1 peers=$2 id secs=${FLEET_LIST_SECS:-10}
+  local outdir=$1 peers=$2 id secs=${FLEET_LIST_SECS:-30}
   for id in $(registry_ids); do
     node_revoked "$id" && continue
     peer_online "$peers" "$id" || continue

@@ -1526,6 +1526,14 @@ case_memory_capture() {
   assert "concurrent memory syncs: both exit 0, no capture error" bash -c "[ '$r1' -eq 0 ] && [ '$r2' -eq 0 ] && ! grep -q 'capture failed' '$WORK/par1.log' '$WORK/par2.log'"
   assert "...the change was uploaded exactly once" bash -c "git --git-dir='$WORK/memory.git' show main:nodes/kappa/claude/$slug/MEMORY.md | grep -qx parallel && [ \"\$(git --git-dir='$WORK/memory.git' log --format=%s main | grep -c '(+0 ~1 -0)')\" -ge 1 ]"
   assert "memory lock released" [ ! -d "$h/.config/fleet/locks/memory" ]
+  # a clone made while the vault was empty (unborn branch) adopts the remote once it has history
+  local hu
+  hu=$(mk_home nu ""); fleet_as "$hu" apply >/dev/null 2>&1
+  rm -rf "$hu/fleet-memory"; git -c init.defaultBranch=main init -q "$hu/fleet-memory"
+  git -C "$hu/fleet-memory" remote add origin "$WORK/memory.git"
+  mk_memories "$hu" "$slug"
+  fleet_as "$hu" memory sync >"$WORK/unborn.log" 2>&1; rc=$?
+  assert "unborn clone: sync exits 0, adopts the remote, uploads (see $WORK/unborn.log)" bash -c "[ '$rc' -eq 0 ] && grep -q 'adopted the remote history' '$WORK/unborn.log' && git --git-dir='$WORK/memory.git' cat-file -e main:nodes/nu/claude/$slug/MEMORY.md && git --git-dir='$WORK/memory.git' cat-file -e main:nodes/kappa/claude/$slug/MEMORY.md"
   # FLEET_MEMORY_CAPTURE="" switches capture off
   h=$(mk_home lambda ""); printf 'FLEET_MEMORY_CAPTURE=""\n' >>"$h/.config/fleet/fleet.conf"
   mk_memories "$h" "$slug"

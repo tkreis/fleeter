@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 — 2026-10-05
+
+### Fixed
+
+- A node that cloned the memory repo while it was still empty never synced afterwards (`Updating an unborn branch with changes added to the index`). `fleet memory sync` now adopts the remote history first and commits the node's captures on top.
+
 ## 0.4.1 — 2026-10-05
 
 ### Fixed

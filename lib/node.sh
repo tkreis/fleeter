@@ -485,6 +485,23 @@ cmd_memory_sync() {
   return "$rc"
 }
 
+# node_memory_adopt_remote DIR — a clone made while the memory repo was still
+# empty has no commits (unborn branch). Once the remote has a branch, `pull`
+# refuses ("Updating an unborn branch with changes added to the index"), so the
+# node never syncs. Adopt the remote history first; files this node captured
+# (nodes/<name>/, absent on the remote) stay in the working tree and are
+# committed by the normal flow on top.
+node_memory_adopt_remote() {
+  local dir=$1 branch
+  memory_git -C "$dir" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && return 0
+  branch=$(memory_git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo main)
+  memory_git -C "$dir" fetch --quiet origin "$branch" >/dev/null 2>&1 || return 0
+  memory_git -C "$dir" reset --quiet "origin/$branch" >/dev/null 2>&1 || return 0
+  memory_git -C "$dir" checkout --quiet "origin/$branch" -- . >/dev/null 2>&1 || true
+  memory_git -C "$dir" branch --quiet --set-upstream-to "origin/$branch" >/dev/null 2>&1 || true
+  log "memory: adopted the remote history (this clone was made while the vault was empty)"
+}
+
 node_memory_sync_run() {
   local reset=0 name dir sf branch attempt delay others ahead counts
   [ "${1:-}" = --reset ] && reset=1
@@ -511,6 +528,7 @@ node_memory_sync_run() {
     return 0
   fi
   [ "$reset" -eq 1 ] && node_kv_set "$sf" state ok
+  node_memory_adopt_remote "$dir"
 
   mkdir -p "$dir/nodes/$name"
   if ! fleet_is_master; then

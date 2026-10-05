@@ -1499,7 +1499,7 @@ master_memory_state() {
 # WANT_CODE WANT_CONFIG NOW OFFLINE — the table or the JSON array (CONTRACT
 # "fleet list --json"). STATUS_DIR may be empty (--offline). The master itself
 # is the first row (state `master`, "master": true) with its memory state;
-# FLEET_LIST_MASTER = "<name> <host> <memory state> <last sync>".
+# FLEET_LIST_MASTER = "<name> <host> <memory state> <last sync> <awake_lid>".
 list_render() {
   python3 - "$@" <<'PY'
 import json, os, sys, calendar, time
@@ -1619,6 +1619,7 @@ for fn in sorted(os.listdir(nodes_dir)):
         "desired": desired, "applied": applied, "tools": tools, "memory": memory, "proxy": proxy,
         "fleet": (live or {}).get("fleet") if live else None,
         "awake": (live or {}).get("awake") if live else None,
+        "awake_lid": (live or {}).get("awake_lid") if live else None,
         "aws": (live.get("aws") if isinstance(live.get("aws"), dict) else None) if live else None,
         "missing_since": r.get("missing_since") or "", "cleanup_pending": list(r.get("pending_cleanup") or []),
     })
@@ -1635,7 +1636,7 @@ for pid in sorted(peers, key=lambda k: peers[k]["host"]):
         "synced": None, "provisioned": None, "provisioned_age": None,
         "desired": {"code": None, "config": None, "digest": None},
         "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
-        "tools": {}, "memory": None, "proxy": None, "fleet": None, "awake": None, "aws": None, "missing_since": "", "cleanup_pending": [], "master": False,
+        "tools": {}, "memory": None, "proxy": None, "fleet": None, "awake": None, "awake_lid": None, "aws": None, "missing_since": "", "cleanup_pending": [], "master": False,
     })
 if len(master) >= 4:
     mem_state, mem_sync = master[2], master[3]
@@ -1647,7 +1648,9 @@ if len(master) >= 4:
         "desired": {"code": want_code or None, "config": want_config or None, "digest": None},
         "applied": {"code": None, "config": None, "digest": None, "at": None, "source": None},
         "tools": {}, "memory": mem_state, "memory_last_sync": None if mem_sync == "-" else mem_sync,
-        "proxy": None, "fleet": os.environ.get("FLEET_VERSION"), "awake": None, "aws": None, "missing_since": "", "cleanup_pending": [], "master": True,
+        "proxy": None, "fleet": os.environ.get("FLEET_VERSION"), "awake": None,
+        "awake_lid": master[4] if len(master) > 4 else None,   # the master's own lid setting (fleet power lid)
+        "aws": None, "missing_since": "", "cleanup_pending": [], "master": True,
     })
 
 if mode == "json":
@@ -1705,7 +1708,7 @@ cmd_list() {
     mkdir -p "$tmpd/status"
     list_collect_status "$tmpd/status" "$peers"
   fi
-  FLEET_LIST_MASTER="$(node_name) $(hostname -s 2>/dev/null || hostname) $(master_memory_state)" \
+  FLEET_LIST_MASTER="$(node_name) $(hostname -s 2>/dev/null || hostname) $(master_memory_state) $(node_awake_lid_state)" \
   list_render "$([ "$json" = 1 ] && echo json || echo table)" "$FLEET_VAULT/nodes" "$tmpd/peers" \
     "$([ "$offline" = 0 ] && echo "$tmpd/status")" "$tmpd/digests" "$tmpd/provisioning" \
     "$(code_rev)" "$(config_rev)" "$(now_epoch)" "$offline"

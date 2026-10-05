@@ -348,11 +348,10 @@ cmd_setup() {
   if [ -z "$awake" ]; then
     if setup_yn "Keep nodes awake (they never system-sleep; for always-on machines, never the master)?" y; then awake=1; else awake=0; fi
   fi
-  # AWS SSO: only asked when this machine has an AWS config; the default (none)
-  # pushes nothing, and production profiles are refused whatever the answer
+  # AWS SSO: only asked when this machine has an AWS config; the default (none) pushes nothing
   if [ -z "$aws_asked" ] && [ -f "${AWS_CONFIG_FILE:-$HOME/.aws/config}" ]; then
-    log "AWS SSO: fleet can forward the short-lived role credentials of named profiles from ~/.aws/config to the nodes"
-    log "(the SSO login itself stays here; anything matching *prod* *production* *prd* is refused). Space separated, empty = none."
+    log "AWS SSO: fleet pushes only the profiles you list (short-lived role credentials from ~/.aws/config; the SSO login"
+    log "itself stays here). Keep production out of that list. Space separated, empty = none."
     setup_ask aws_profiles "AWS profiles to forward (e.g. dev)" ""
   fi
   memurl=""; [ "$memory" = 1 ] && memurl="git@github.com:$owner/$mrepo.git"

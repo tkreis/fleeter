@@ -37,6 +37,7 @@ Ask only what the defaults do not settle. Each answer maps to a flag below.
 | 4 | GitHub user or organisation for the repos, and the config repo name? | the `gh` login, `fleet-config`, checkout `~/fleet-config` | `--github-owner`, `--config-repo`, `--config-dir` |
 | 5 | Do they use CLIProxyAPI here (`~/cli-proxy-api/conf/config.yaml` exists) and want it on every node? | no (yes only if that file exists) | `--proxy` / `--no-proxy` |
 | 6 | Should nodes never sleep (always-on machines)? For a MacBook node with the lid closed they can later set `FLEET_KEEP_AWAKE_LID=1` in `fleet.conf` (heat and battery caveats). | yes | `--keep-awake` / `--no-keep-awake` |
+| 7 | Do they use AWS SSO (`aws sso login`) here and want the nodes to use it? Which profiles, e.g. `dev`? fleet pushes only the profiles listed in `FLEET_AWS_PROFILES`; keep production out of that list. The SSO login stays on the master; nodes get short-lived role credentials. | none | `--aws-profiles "dev"` |
 
 ## Commands
 
@@ -67,8 +68,8 @@ Ask only what the defaults do not settle. Each answer maps to a flag below.
    above. Flags: `--github-owner OWNER`, `--config-repo NAME`,
    `--config-dir DIR`, `--memory`/`--no-memory`, `--memory-repo NAME`,
    `--tools minimal|agents|full|"LIST"`, `--proxy`/`--no-proxy`,
-   `--keep-awake`/`--no-keep-awake`, `--claude-token`/`--no-claude-token`.
-   Rerunning is safe: finished steps print `skip`.
+   `--keep-awake`/`--no-keep-awake`, `--claude-token`/`--no-claude-token`,
+   `--aws-profiles "LIST"`. Rerunning is safe: finished steps print `skip`.
 
 4. What happens, step by step (`[n/9]` lines; `ok` or `skip`):
 
@@ -92,11 +93,15 @@ Ask only what the defaults do not settle. Each answer maps to a flag below.
    fleet invite --name NAME        # a Mac or Linux box: the user pastes the printed one-liner there, then the code
    docker build -f ~/.local/share/fleeter/docker/Dockerfile -t fleet-node:local ~/.local/share/fleeter && ~/.local/share/fleeter/docker/spawn.sh 1   # or a throwaway container
    fleet list                      # STATE provisioned, SYNCED yes within a few minutes
+   fleet aws push                  # with FLEET_AWS_PROFILES set and the user logged in (aws sso login): the AWS column says ok
    ```
 
    Later changes: edit `~/fleet-config/fleet.conf` and run
    `fleet config publish --no-capture`; more secrets with
    `fleet secrets set NAME --profile minimal` (typed hidden by the user).
+   AWS: `fleet aws login` runs `aws sso login` for the first allowed profile
+   (a browser step for the user) and pushes; `fleet sync` keeps the nodes'
+   credentials fresh afterwards and never logs in by itself.
 
 ## Troubleshooting
 
@@ -112,6 +117,7 @@ Ask only what the defaults do not settle. Each answer maps to a flag below.
 | PROXY `login` / TOOLS `1 login: cliproxy` | user runs `fleet proxy login NODE` on the master (browser needed). |
 | TOOLS `1 login: codex` (or cursor, grok) | user runs `fleet ssh NODE fleet login codex`, or sets the API key secret and runs `fleet reconcile`. |
 | `claude setup-token` not run (no terminal) | user runs `claude setup-token \| fleet secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal` themselves, then `fleet reconcile`. |
+| `AWS SSO session expired` / `fleet list` AWS `expired` | user runs `aws sso login` (or `fleet aws login`) on the master in their own terminal, then `fleet aws push`. |
 
 Full reference: `fleet --help`, the README (Command reference, Config
 reference) and `fleet COMMAND --help`.

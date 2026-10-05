@@ -12,6 +12,10 @@
 #   FLEETER_BIN   link directory      (default ~/.local/bin)
 #   FLEETER_REPO  git URL             (default https://github.com/tkreis/fleeter.git)
 #   FLEETER_REF   branch or tag       (default main)
+#   FLEETER_SETUP=1  run `fleet setup` right after installing. The script's stdin
+#                 is the curl pipe, so setup reads from the terminal (/dev/tty);
+#                 without one it prints the command to run instead.
+#                 (FLEETER_TTY names the terminal device; tests point it elsewhere.)
 #
 # Everything runs inside main(), so a download cut off halfway executes nothing.
 set -eu
@@ -21,6 +25,7 @@ main() {
   local bin=${FLEETER_BIN:-$HOME/.local/bin}
   local repo=${FLEETER_REPO:-https://github.com/tkreis/fleeter.git}
   local ref=${FLEETER_REF:-main}
+  local tty=${FLEETER_TTY:-/dev/tty}
   local c
 
   say() { printf '==> %s\n' "$*"; }
@@ -69,9 +74,18 @@ main() {
       ;;
   esac
 
-  printf '\nNext:\n'
-  printf '  fleet init master        # make this machine the master (Tailscale + GitHub)\n'
-  printf '  fleet invite --name NAME # add a machine\n'
+  if [ "${FLEETER_SETUP:-0}" = 1 ]; then
+    if { : <"$tty"; } 2>/dev/null; then
+      say "running fleet setup (reading from your terminal)"
+      "$dir/fleet" setup <"$tty"
+      return 0
+    fi
+    say "no terminal to ask you questions on (FLEETER_SETUP=1 needs one); run it yourself: fleet setup"
+  fi
+
+  printf '\nNext: run fleet setup (makes this machine the master: config repo, Tailscale, GitHub, the first secret),\n'
+  printf '      or paste https://tkreis.github.io/fleeter/SETUP.md into your coding agent and let it drive.\n'
+  printf '  fleet setup\n'
   printf '  fleet --help\n'
 }
 

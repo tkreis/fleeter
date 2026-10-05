@@ -264,6 +264,7 @@ AGENT_EXCLUDE_MARKERS = tuple(m.strip() for m in os.environ.get('FLEET_CAPTURE_A
 SKILL_EXCLUDE = {
     'synced': 'Claude plugin sync cache (vendor-managed, UUID dirs)',
     '.system': 'Codex vendor-shipped system skills',
+    'fleet': "fleeter's bundled skill (shipped with the code; a copy in the config repo would go stale)",
 }
 for _n in _words('FLEET_SKILL_EXCLUDE'): SKILL_EXCLUDE[_n] = 'excluded by FLEET_SKILL_EXCLUDE'
 RULE_DROP = tuple(['${HOME}', '/Users/', '/home/', '"-e"', '/bin/zsh', 'curl', 'xcodebuild', 'xcrun'] + _words('FLEET_CAPTURE_RULE_DROP'))

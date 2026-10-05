@@ -278,6 +278,7 @@ vault_encrypt_item() {
 # shellcheck disable=SC2016  # a python program, not shell
 VAULT_TAR_PY='import io, os, subprocess, sys, tarfile, time
 mode, root = sys.argv[1], sys.argv[2]
+skip_prefix = sys.argv[3] if len(sys.argv) > 3 else ""
 ident = sys.stdin.buffer.read()
 now = int(time.time())
 
@@ -305,6 +306,8 @@ for d, dirs, fs in os.walk(root):
             continue        # bound to the key of this machine; a restore gets a fresh one from fleet vault encrypt
         p = os.path.join(d, n)
         rel = os.path.relpath(p, root)
+        if mode == "files" and skip_prefix and rel.startswith(skip_prefix):
+            continue        # left in the vault, not shipped
         if n.endswith(".age"):
             members.append((rel[:-4], p, True))
         elif not os.path.isfile(p + ".age"):      # a plaintext shadowed by its .age is stale
@@ -321,8 +324,9 @@ out.close()
 sys.stdout.buffer.flush()
 '
 
-# vault_tar MODE DIR — see VAULT_TAR_PY; the identity is piped in by the caller.
-vault_tar() { python3 -c "$VAULT_TAR_PY" "$1" "$2"; }
+# vault_tar MODE DIR [SKIP_PREFIX] — see VAULT_TAR_PY; the identity is piped in
+# by the caller. SKIP_PREFIX (files mode): members under it are left out.
+vault_tar() { python3 -c "$VAULT_TAR_PY" "$1" "$2" "${3:-}"; }
 
 # ---------- commands ----------
 

@@ -165,8 +165,11 @@ secret_names() { secrets_env "$1" | grep -o '^[A-Za-z_][A-Za-z0-9_]*=' | tr -d '
 # files_list PROFILE — sorted relative paths under vault/files/<profile>, as
 # they land on the node (the `.age` of an encrypted item stripped).
 files_list() {
+  local skip
   [ -d "$FLEET_VAULT/files/$1" ] || return 0
-  (cd "$FLEET_VAULT/files/$1" && find . -type f ! -name '.DS_Store' ! -name '*.rotating' | sed 's|^\./||; s|\.age$||' | LC_ALL=C sort -u)
+  skip=$(files_skip_prefix)
+  (cd "$FLEET_VAULT/files/$1" && find . -type f ! -name '.DS_Store' ! -name '*.rotating' | sed 's|^\./||; s|\.age$||' | LC_ALL=C sort -u) \
+    | { if [ -n "$skip" ]; then grep -v "^$skip" || true; else cat; fi; }
 }
 
 # repo_rev DIR — git HEAD of a checkout, or a tree hash when there is no commit yet.
@@ -210,9 +213,9 @@ config_rev() { if [ -d "$FLEET_CONFIG_DIR" ]; then repo_rev "$FLEET_CONFIG_DIR";
 # legacy HMAC keyed by vault/digest.key, so the digest never reveals a value.
 desired_digest() {
   [ -n "$(vault_plain_items)" ] && digest_key_ensure
-  python3 - "$FLEET_VAULT" "$1" "$(code_rev)+$(config_rev)" <<'PY'
+  python3 - "$FLEET_VAULT" "$1" "$(code_rev)+$(config_rev)" "$(files_skip_prefix)" <<'PY'
 import hashlib, hmac, os, sys
-vault, profile, rev = sys.argv[1:4]
+vault, profile, rev, skip = sys.argv[1:5]
 keyf = os.path.join(vault, "digest.key")
 key = bytes.fromhex(open(keyf).read().strip()) if os.path.isfile(keyf) else None
 
@@ -238,7 +241,10 @@ for d, _, fs in os.walk(root):
         if n == ".DS_Store" or n.endswith(".rotating"):
             continue
         rel = os.path.relpath(os.path.join(d, n), root)
-        rels.add(rel[:-4] if rel.endswith(".age") else rel)
+        rel = rel[:-4] if rel.endswith(".age") else rel
+        if skip and rel.startswith(skip):
+            continue        # not shipped (the proxy OAuth files unless shared), so not part of the digest
+        rels.add(rel)
 for rel in sorted(rels):
     h.update(("files/%s\0%s\0" % (rel, fingerprint(os.path.join(root, rel)))).encode())
 print(h.hexdigest())
@@ -309,24 +315,42 @@ cmd_files_add() {
   audit "files.add" "$rel" ok
 }
 
-# proxy import — copy the master's CLIProxyAPI config + OAuth files into the
-# vault (full profile). Nodes stage them in ~/.cli-proxy-api and adopt them
-# (lib/tools/cliproxy.sh), so a node's refreshed tokens are not overwritten.
+# proxy_auth_shared — FLEET_PROXY_SHARE_AUTH=1: the master's CLIProxyAPI OAuth
+# files are stored and shipped to full nodes (the pre-0.4.3 behaviour). Off by
+# default: the vendors rotate refresh tokens, so two proxies on one login log
+# each other out; every machine logs in on its own (fleet proxy login NODE).
+proxy_auth_shared() { [ "${FLEET_PROXY_SHARE_AUTH:-0}" = 1 ]; }
+
+# files_skip_prefix — a path prefix under files/<profile> that stays in the
+# vault: the proxy OAuth files unless they are meant to be shared.
+files_skip_prefix() { if proxy_auth_shared; then echo ""; else echo "$PROXY_AUTH_PREFIX"; fi; }
+PROXY_AUTH_PREFIX=".cli-proxy-api/auth/"
+
+# proxy import — copy the master's CLIProxyAPI config.yaml (client key,
+# routing) into the vault (full profile); nodes stage it in ~/.cli-proxy-api
+# and adopt it (lib/tools/cliproxy.sh). The OAuth files only with
+# FLEET_PROXY_SHARE_AUTH=1; files imported earlier stay in the vault but are
+# not shipped while the knob is off.
 cmd_proxy_import() {
   local src=${1:-${FLEET_CLIPROXY_DIR:-$HOME/cli-proxy-api}} dest f b n=0
   [ -f "$src/conf/config.yaml" ] || die "no $src/conf/config.yaml" "pass the CLIProxyAPI dir: fleet proxy import DIR"
   vault_init
   vault_recipient_require
   dest="$FLEET_VAULT/files/full/.cli-proxy-api"
-  mkdir -p "$dest/auth"; chmod 0700 "$dest" "$dest/auth"
+  mkdir -p "$dest"; chmod 0700 "$dest"
   vault_write "$dest/config.yaml.age" <"$src/conf/config.yaml"; rm -f "$dest/config.yaml"
-  for f in "$src"/auth/*.json; do
-    [ -f "$f" ] || continue
-    b=$(basename "$f")
-    vault_write "$dest/auth/$b.age" <"$f"; rm -f "$dest/auth/$b"
-    n=$((n + 1))
-  done
-  ok "imported CLIProxyAPI config.yaml + $n auth file(s) into profile full"
+  if proxy_auth_shared; then
+    mkdir -p "$dest/auth"; chmod 0700 "$dest/auth"
+    for f in "$src"/auth/*.json; do
+      [ -f "$f" ] || continue
+      b=$(basename "$f")
+      vault_write "$dest/auth/$b.age" <"$f"; rm -f "$dest/auth/$b"
+      n=$((n + 1))
+    done
+    ok "imported CLIProxyAPI config.yaml + $n auth file(s) into profile full (FLEET_PROXY_SHARE_AUTH=1)"
+  else
+    ok "imported CLIProxyAPI config.yaml into profile full; the OAuth logins stay on this machine (each node: fleet proxy login NODE)"
+  fi
   audit "proxy.import" "-" "ok $n"
 }
 
@@ -1607,7 +1631,7 @@ provision_node() {
   provision_abort_if_revoked "$id" files && return 3
   fdir="$FLEET_VAULT/files/$profile"
   if [ -d "$fdir" ] && [ -n "$(files_list "$profile")" ]; then
-    { vault_identity 2>/dev/null || true; } | vault_tar files "$fdir" | node_ssh "$id" "$PROVISION_FILES_SCRIPT" \
+    { vault_identity 2>/dev/null || true; } | vault_tar files "$fdir" "$(files_skip_prefix)" | node_ssh "$id" "$PROVISION_FILES_SCRIPT" \
       || { audit provision "$name" "fail files"; return 1; }
   fi
 
@@ -1703,6 +1727,10 @@ cmd_provision() {
     shift
   done
   [ -n "$q" ] || die "usage: fleet provision NODE [--refresh-proxy-auth]"
+  if [ "${FLEET_REFRESH_PROXY_AUTH:-0}" = 1 ] && ! proxy_auth_shared; then
+    die "--refresh-proxy-auth needs FLEET_PROXY_SHARE_AUTH=1: the master's CLIProxyAPI OAuth files are not shipped (refresh-token rotation logs the other copies out)" \
+      "log the node into its own accounts instead: fleet proxy login $q"
+  fi
   set -- "$q"
   vault_require
   id=$(registry_find "$1")

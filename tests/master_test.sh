@@ -1779,5 +1779,60 @@ rm -rf "$NODES/fleet-macnode.tail1.ts.net" "$NODES/fleet-pengu.tail1.ts.net"
 echo '[{"nodeId":"nAAAACNTRL"}]' >"$DEVICES_JSON"
 
 # ======================================================================
+echo "== proxy import / provision: config.yaml only by default; the OAuth files only with FLEET_PROXY_SHARE_AUTH=1"
+PXSRC="$T/cliproxy-src"; mkdir -p "$PXSRC/conf" "$PXSRC/auth"
+printf 'api-keys:\n  - "sk-client-FAKE"\n' >"$PXSRC/conf/config.yaml"
+printf '{"refresh_token":"rt-FAKE","email":"user@example.invalid"}\n' >"$PXSRC/auth/claude-user.json"
+PXV="$FLEET_VAULT/files/full/.cli-proxy-api"
+# share_auth 0|1 — the knob through the local fleet.conf (config keys beat the environment)
+share_auth() {
+  grep -v '^FLEET_PROXY_SHARE_AUTH=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+  [ "$1" = 0 ] || printf 'FLEET_PROXY_SHARE_AUTH=%s\n' "$1" >>"$FLEET_HOME/fleet.conf"
+}
+share_auth 0
+out=$(bash "$FLEET" proxy import "$PXSRC" 2>&1); rc=$?
+assert "proxy import (default): exit 0, config.yaml stored as ciphertext, no auth file in the vault, says the logins stay here" bash -c "[ $rc = 0 ] && [ -f '$PXV/config.yaml.age' ] && [ ! -e '$PXV/config.yaml' ] && [ ! -e '$PXV/auth' ] && printf '%s' \"\$0\" | grep -q 'OAuth logins stay on this machine' && printf '%s' \"\$0\" | grep -q 'fleet proxy login NODE'" "$out"
+d_noauth=$(digest_of full)
+share_auth 1
+out=$(bash "$FLEET" proxy import "$PXSRC" 2>&1); rc=$?
+assert "proxy import with FLEET_PROXY_SHARE_AUTH=1: the auth file is stored too (ciphertext, 1 auth file reported)" bash -c "[ $rc = 0 ] && [ -f '$PXV/auth/claude-user.json.age' ] && [ ! -e '$PXV/auth/claude-user.json' ] && printf '%s' \"\$0\" | grep -q '1 auth file'" "$out"
+d_auth=$(digest_of full)
+assert "the stored auth file is in the digest only while it is shipped (knob 1 != knob 0)" bash -c "[ '$d_auth' != '$d_noauth' ] && printf '%s' '$d_auth' | grep -Eqx '[0-9a-f]{64}'"
+share_auth 0
+d_noauth=$(digest_of full)   # the re-import re-encrypted config.yaml, so the digest without the auth file is a new one
+assert "knob back to 0: the auth file stays in the vault, the digest leaves it out again" bash -c "[ -f '$PXV/auth/claude-user.json.age' ] && [ '$d_noauth' != '$d_auth' ]"
+share_auth 1
+assert "knob 1 again without an import: the same digest as before (the stored auth file counts again)" [ "$(digest_of full)" = "$d_auth" ]
+share_auth 0
+# a full-profile Mac node receives config.yaml but not the auth file
+bash "$FLEET" invite --name proxynode >/dev/null 2>&1
+px_pending=$(grep -l '"name": "proxynode"' "$FLEET_VAULT"/nodes/pending/*.json)
+mk_node fleet-proxynode.tail1.ts.net "$(jget "$px_pending" nonce)" macos false
+PX_PEER=',"k15":{"ID":"nPROXYCNTRL","HostName":"fleet-proxynode","DNSName":"fleet-proxynode.tail1.ts.net.","TailscaleIPs":["100.64.0.60"],"Online":true,"Tags":["tag:fleet-node"]}'
+write_status "$PX_PEER"
+echo '[{"nodeId":"nAAAACNTRL"},{"nodeId":"nPROXYCNTRL"}]' >"$DEVICES_JSON"
+PXNH="$NODES/fleet-proxynode.tail1.ts.net"
+: >"$SSH_LOG"
+bash "$FLEET" reconcile >/dev/null 2>&1
+assert "proxynode enrolled + provisioned (profile full)" bash -c "[ \"\$(jget '$FLEET_VAULT/nodes/nPROXYCNTRL.json' state)\" = provisioned ] && [ \"\$(jget '$FLEET_VAULT/nodes/nPROXYCNTRL.json' profile)\" = full ]"
+assert "provision shipped ~/.cli-proxy-api/config.yaml (0600) and no auth file (knob 0)" bash -c "[ -f '$PXNH/.cli-proxy-api/config.yaml' ] && [ \"\$(mode_of '$PXNH/.cli-proxy-api/config.yaml')\" = 600 ] && [ ! -e '$PXNH/.cli-proxy-api/auth' ]"
+assert "registry files_sent lists config.yaml, not the auth file" bash -c "jget '$FLEET_VAULT/nodes/nPROXYCNTRL.json' files_sent | grep -q '\".cli-proxy-api/config.yaml\"' && ! jget '$FLEET_VAULT/nodes/nPROXYCNTRL.json' files_sent | grep -q 'auth/'"
+refute "no .force requested without --refresh-proxy-auth" grep -q 'cli-proxy-api/.force' "$SSH_LOG"
+out=$(bash "$FLEET" provision proxynode --refresh-proxy-auth 2>&1); rc=$?
+assert "--refresh-proxy-auth with knob 0: refused before anything runs, explains the knob and points at fleet proxy login proxynode" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'FLEET_PROXY_SHARE_AUTH=1' && printf '%s' \"\$0\" | grep -q 'fleet proxy login proxynode' && ! grep -q 'cli-proxy-api/.force' '$SSH_LOG'" "$out"
+share_auth 1
+: >"$SSH_LOG"
+out=$(bash "$FLEET" provision proxynode --refresh-proxy-auth 2>&1); rc=$?
+assert "knob 1 + --refresh-proxy-auth: the auth file is shipped (0600) and .force requested" bash -c "[ $rc = 0 ] && [ -f '$PXNH/.cli-proxy-api/auth/claude-user.json' ] && [ \"\$(mode_of '$PXNH/.cli-proxy-api/auth/claude-user.json')\" = 600 ] && grep -q 'cli-proxy-api/.force' '$SSH_LOG' && jget '$FLEET_VAULT/nodes/nPROXYCNTRL.json' files_sent | grep -q 'auth/claude-user.json'" "$out"
+share_auth 0
+rm -rf "$PXNH/.cli-proxy-api"
+bash "$FLEET" provision proxynode >/dev/null 2>&1
+assert "knob 0 again: a later provision ships config.yaml only, even though the auth file is still in the vault" bash -c "[ -f '$PXNH/.cli-proxy-api/config.yaml' ] && [ ! -e '$PXNH/.cli-proxy-api/auth' ] && [ -f '$PXV/auth/claude-user.json.age' ]"
+assert "vault export still carries the stored auth file (only provision leaves it out)" bash -c "printf '%s\n' \"\$0\" | grep -qx 'files/full/.cli-proxy-api/auth/claude-user.json'" "$(export_list)"
+
+rm -f "$FLEET_VAULT/nodes/nPROXYCNTRL.json"; rm -rf "$PXNH" "$PXV"; write_status ""
+echo '[{"nodeId":"nAAAACNTRL"}]' >"$DEVICES_JSON"
+
+# ======================================================================
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

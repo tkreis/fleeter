@@ -2027,11 +2027,17 @@ ISRC="$T/inst-src"; IH="$T/inst"; mkdir -p "$ISRC"
 ( cd "$ISRC" && git -c init.defaultBranch=main init -q && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -q -m src )
 # install.sh requires curl (the one-liner downloads it with curl) but never runs it: a stub for hosts without curl (slim containers)
 mkdir -p "$T/instbin-fake"; printf '#!/usr/bin/env bash\nexit 0\n' >"$T/instbin-fake/curl"; chmod +x "$T/instbin-fake/curl"
-out=$(PATH="$T/instbin-fake:$PATH" HOME="$T/inst-home" FLEETER_DIR="$IH/share" FLEETER_BIN="$IH/bin" FLEETER_REPO="$ISRC" FLEETER_REF=main bash "$ROOT/install.sh" 2>&1); rc=$?
-assert "install.sh: exit 0, fleet + fleeter linked into FLEETER_BIN, the hint names fleet setup and SETUP.md" bash -c "[ $rc = 0 ] && [ -L '$IH/bin/fleet' ] && [ -L '$IH/bin/fleeter' ] && [ -x '$IH/share/fleet' ] && printf '%s' \"\$0\" | grep -q 'fleet setup' && printf '%s' \"\$0\" | grep -q 'https://tkreis.github.io/fleeter/SETUP.md' && bash '$IH/bin/fleet' --version | grep -q '^fleet '" "$out"
-out=$(PATH="$T/instbin-fake:$PATH" HOME="$T/inst-home" FLEETER_DIR="$IH/share" FLEETER_BIN="$IH/bin" FLEETER_REPO="$ISRC" FLEETER_REF=main FLEETER_SETUP=1 FLEETER_TTY=/nonexistent bash "$ROOT/install.sh" 2>&1); rc=$?
-assert "FLEETER_SETUP=1 without a terminal: the update ran, setup was not started, the hint says to run it" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'updating' && printf '%s' \"\$0\" | grep -q 'no terminal' && printf '%s' \"\$0\" | grep -q 'fleet setup' && [ ! -e '$T/inst-home/.config' ]" "$out"
-refute "the installer never ran setup (no fleet state under the install HOME)" [ -e "$T/inst-home/.config/fleet" ]
+if [ "$(id -u)" = 0 ]; then
+  # CI's Debian job runs as root; the installer refuses root by design
+  out=$(PATH="$T/instbin-fake:$PATH" HOME="$T/inst-home" FLEETER_DIR="$IH/share" FLEETER_BIN="$IH/bin" FLEETER_REPO="$ISRC" bash "$ROOT/install.sh" 2>&1); rc=$?
+  assert "install.sh as root: refuses, links nothing" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'not root' && [ ! -e '$IH/bin/fleet' ]" "$out"
+else
+  out=$(PATH="$T/instbin-fake:$PATH" HOME="$T/inst-home" FLEETER_DIR="$IH/share" FLEETER_BIN="$IH/bin" FLEETER_REPO="$ISRC" FLEETER_REF=main bash "$ROOT/install.sh" 2>&1); rc=$?
+  assert "install.sh: exit 0, fleet + fleeter linked into FLEETER_BIN, the hint names fleet setup and SETUP.md" bash -c "[ $rc = 0 ] && [ -L '$IH/bin/fleet' ] && [ -L '$IH/bin/fleeter' ] && [ -x '$IH/share/fleet' ] && printf '%s' \"\$0\" | grep -q 'fleet setup' && printf '%s' \"\$0\" | grep -q 'https://tkreis.github.io/fleeter/SETUP.md' && bash '$IH/bin/fleet' --version | grep -q '^fleet '" "$out"
+  out=$(PATH="$T/instbin-fake:$PATH" HOME="$T/inst-home" FLEETER_DIR="$IH/share" FLEETER_BIN="$IH/bin" FLEETER_REPO="$ISRC" FLEETER_REF=main FLEETER_SETUP=1 FLEETER_TTY=/nonexistent bash "$ROOT/install.sh" 2>&1); rc=$?
+  assert "FLEETER_SETUP=1 without a terminal: the update ran, setup was not started, the hint says to run it" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'updating' && printf '%s' \"\$0\" | grep -q 'no terminal' && printf '%s' \"\$0\" | grep -q 'fleet setup' && [ ! -e '$T/inst-home/.config' ]" "$out"
+  refute "the installer never ran setup (no fleet state under the install HOME)" [ -e "$T/inst-home/.config/fleet" ]
+fi
 
 # ======================================================================
 echo "== SETUP.md (the agent's instructions) and skills/fleet-setup: every fleet command line is one the CLI accepts; the skill body is SETUP.md"

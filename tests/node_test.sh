@@ -885,6 +885,63 @@ case_base_status() {
   end
 }
 
+# N8: the real cliproxy plug-in (local mode) says `login` once the container
+# logged an upstream refresh failure newer than the newest auth file, so
+# `fleet list` shows `1 login: cliproxy` and names the fix; `ok` otherwise.
+case_cliproxy_status() {
+  begin "cliproxy: status is login after invalid_grant newer than the auth file, ok otherwise"
+  local h="$WORK/homes/cliproxy" d out now
+  d="$h/.local/bin"   # what fleet_path_setup puts first on a node's PATH, so a real docker on this machine never wins
+  rm -rf "$h"; mkdir -p "$h/cli-proxy-api/conf" "$h/cli-proxy-api/auth" "$h/.config/fleet" "$d"
+  printf 'api-keys:\n  - "sk-FAKE"\n' >"$h/cli-proxy-api/conf/config.yaml"
+  printf '{"refresh_token":"rt-FAKE"}\n' >"$h/cli-proxy-api/auth/claude-user.json"
+  printf '{"nonce":"n","name":"px","user":"u","os":"linux","arch":"amd64","container":false,"joined":"2026-10-03T09:00:00Z"}' >"$h/.config/fleet/enrol.json"
+  now=$(date -u +%s)
+  python3 -c 'import os, sys; t = int(sys.argv[2]); os.utime(sys.argv[1], (t, t))' "$h/cli-proxy-api/auth/claude-user.json" "$((now - 3600))"
+  # fakes: the proxy answers 200; docker is up and `docker logs` prints $WORK/cliproxy-logs
+  printf '#!/usr/bin/env bash\nprintf 200\n' >"$d/curl"
+  cat >"$d/docker" <<'EOF'
+#!/usr/bin/env bash
+echo "docker $*" >>"$FLEET_TEST_LOG"
+case "$1" in logs) cat "$CLIPROXY_LOGS" 2>/dev/null ;; esac
+exit 0
+EOF
+  chmod +x "$d"/*
+  export CLIPROXY_LOGS="$WORK/cliproxy-logs"
+  st() {   # st [remote] — tool_cliproxy_status with lib/node.sh for the node's name. These tests run in a
+           # container, where the plug-in is always remote, so local mode is forced by overriding its
+           # private probe; fleet_path_setup puts ~/.local/bin (the fakes) first, so PATH is left alone
+    # shellcheck disable=SC2016  # expanded by the inner bash
+    HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_ROOT="$SRC" \
+      bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/node.sh"; . "$FLEET_ROOT/lib/tools/cliproxy.sh"; [ "$1" = remote ] || _cliproxy_remote() { return 1; }; tool_cliproxy_status' _ "${1:-}" 2>/dev/null
+  }
+  : >"$FLEET_TEST_LOG"; rm -f "$CLIPROXY_LOGS"
+  out=$(st)
+  assert "no refresh failure in the logs: ok" bash -c "printf '%s' '$out' | grep -qx 'ok http://127.0.0.1:8317 (200)'"
+  assert "the logs were read with --timestamps --since 24h for the configured container" grep -qx 'docker logs --timestamps --since 24h cli-proxy-api' "$FLEET_TEST_LOG"
+  # a failure logged before the auth file was written (an old login that has since been replaced)
+  python3 -c 'import sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime(int(sys.argv[1]))) + " anthropic_auth.go:659 Token refresh attempt 1 failed: 400 {\"error\": \"invalid_grant\", \"error_description\": \"Refresh token not found or invalid\"}")' "$((now - 7200))" >"$CLIPROXY_LOGS"
+  out=$(st)
+  assert "invalid_grant older than the auth file: still ok" bash -c "printf '%s' '$out' | grep -q '^ok '"
+  # a failure logged after the newest auth file: the login on disk is dead
+  python3 -c 'import sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime(int(sys.argv[1]))) + " anthropic_auth.go:659 Token refresh attempt 1 failed: 400 {\"error\": \"invalid_grant\", \"error_description\": \"Refresh token not found or invalid\"}")' "$((now - 600))" >>"$CLIPROXY_LOGS"
+  out=$(st)
+  assert "invalid_grant newer than the auth file: login, with the fix for the master (fleet proxy login px)" bash -c "printf '%s' '$out' | grep -qx 'login upstream login expired: run on the master: fleet proxy login px'"
+  refute "the status line never carries a token" bash -c "printf '%s' '$out' | grep -q 'rt-FAKE'"
+  # a new login (fresh auth file) clears it without touching the logs
+  python3 -c 'import os, sys; t = int(sys.argv[2]); os.utime(sys.argv[1], (t, t))' "$h/cli-proxy-api/auth/claude-user.json" "$((now - 60))"
+  out=$(st)
+  assert "a newer auth file than the last failure: ok again" bash -c "printf '%s' '$out' | grep -q '^ok '"
+  # remote mode never looks at logs or auth files (through fleet.conf: config keys beat the environment)
+  : >"$FLEET_TEST_LOG"
+  printf 'FLEET_PROXY_MODE=remote\n' >"$h/.config/fleet/fleet.conf"
+  out=$(st remote)
+  assert "remote mode: ok remote, no docker logs read" bash -c "printf '%s' '$out' | grep -q '^ok remote ' && ! grep -q 'docker logs' '$FLEET_TEST_LOG'"
+  rm -f "$h/.config/fleet/fleet.conf"
+  unset -f st; unset CLIPROXY_LOGS
+  end
+}
+
 # N7: harness_capture keeps fleet-managed Codex MCP servers from the template
 # including their nested subtables ([mcp_servers.X.env]).
 case_harness_toml() {
@@ -1615,6 +1672,7 @@ case_sshd
 case_join_power
 case_chrome_wrapper
 case_base_status
+case_cliproxy_status
 case_harness_toml
 case_entrypoint_invite
 case_skill

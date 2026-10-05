@@ -1602,7 +1602,8 @@ for fn in sorted(os.listdir(nodes_dir)):
     proxy = None
     if live:
         px = tools.get("cliproxy")
-        proxy = "off" if px is None else ("ok" if isinstance(px, dict) and px.get("state") == "ok" else "down")
+        st = px.get("state") if isinstance(px, dict) else None
+        proxy = "off" if px is None else ("ok" if st == "ok" else ("login" if st == "login" else "down"))
     rows.append({
         "name": r.get("name") or nid, "id": nid, "host": r.get("hostname") or peer.get("host") or None,
         "dnsname": r.get("dnsname") or peer.get("dnsname") or None, "user": r.get("user"),

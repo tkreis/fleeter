@@ -92,8 +92,11 @@ _cliproxy_render() {
   rm -f "$tmp"
 }
 
-# Move freshly shipped secrets from ~/.cli-proxy-api into the compose tree.
-# The master is the source of truth, so shipped files replace local copies.
+# Move freshly shipped files from ~/.cli-proxy-api into the compose tree.
+# config.yaml (client key, routing) comes from the master on every provision
+# and replaces the local copy. Auth files arrive only with
+# FLEET_PROXY_SHARE_AUTH=1 on the master; normally each node holds its own
+# logins (fleet proxy login NODE) and nothing is staged under auth/.
 _cliproxy_adopt() {
   local dir stage force f
   dir=$(_cliproxy_dir); stage=$(_cliproxy_stage)
@@ -232,6 +235,47 @@ tool_cliproxy_update() {
   (cd "$dir" && docker compose pull -q >/dev/null 2>&1 && docker compose up -d >/dev/null 2>&1) || warn "cliproxy update failed"
 }
 
+# _cliproxy_node_name — this node's name for the hint, when lib/node.sh is loaded.
+_cliproxy_node_name() {
+  if declare -F node_name >/dev/null 2>&1; then node_name; else hostname -s 2>/dev/null || hostname; fi
+}
+
+# _cliproxy_login_expired — true when the container logged an upstream refresh
+# failure (invalid_grant, "Refresh token not found or invalid") in the last
+# 24 h that is newer than the newest auth file: the vendor rotated the refresh
+# token elsewhere (another machine using a copy of the same login), the file
+# on disk is dead, and only a new login on this node brings it back. A
+# failure older than the newest file is from before that file was written.
+_cliproxy_login_expired() {
+  local dir container
+  dir=$(_cliproxy_dir); container=${FLEET_PROXY_CONTAINER:-cli-proxy-api}
+  docker logs --timestamps --since 24h "$container" 2>&1 | grep -E 'invalid_grant|Refresh token not found or invalid' \
+    | python3 -c "$CLIPROXY_EXPIRED_PY" "$dir/auth"
+}
+# The matching log lines on stdin, the auth dir as argv[1]; exit 0 when the
+# latest failure is newer than the newest auth file.
+CLIPROXY_EXPIRED_PY=$(cat <<'PY'
+import glob, os, sys
+from datetime import datetime, timezone
+newest = 0.0
+for f in glob.glob(os.path.join(sys.argv[1], "*.json")):
+    try:
+        newest = max(newest, os.path.getmtime(f))
+    except OSError:
+        pass
+last = None
+for line in sys.stdin:
+    ts = line.split(" ", 1)[0][:19]          # 2026-10-05T07:12:33.123456789Z -> seconds
+    try:
+        t = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        continue
+    if last is None or t > last:
+        last = t
+sys.exit(0 if last is not None and last > newest else 1)
+PY
+)
+
 tool_cliproxy_status() {
   local url code dir
   url=${FLEET_PROXY_URL:-http://127.0.0.1:8317}
@@ -244,7 +288,9 @@ tool_cliproxy_status() {
   have docker || { echo "missing docker"; return 0; }
   [ -f "$dir/conf/config.yaml" ] || { echo "missing conf/config.yaml (full profile)"; return 0; }
   case "$code" in
-    200|401|403) echo "ok $url ($code)" ;;
+    200|401|403)
+      if _cliproxy_login_expired; then echo "login upstream login expired: run on the master: fleet proxy login $(_cliproxy_node_name)"
+      else echo "ok $url ($code)"; fi ;;
     *) if docker info >/dev/null 2>&1; then echo "error container down; run: docker compose -f $dir/compose.yaml up -d"
        else echo "error docker daemon down"; fi ;;
   esac

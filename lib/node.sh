@@ -297,7 +297,7 @@ node_write_env() {
     if [ "$mode" = off ]; then echo 'unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN'; fi
     printf '[ -f %s ] && { set -a; . %s; set +a; }\n' "'$(node_sq "$FLEET_HOME/secrets.env")'" "'$(node_sq "$FLEET_HOME/secrets.env")'"
     # shellcheck disable=SC2016  # generated shell: must expand on the reader's side
-    # Homebrew and Docker Desktop: \`fleet ssh NODE aws …\`, timers and T3's \`sh -l\` start
+    # Homebrew and Docker Desktop: `fleet ssh NODE aws …`, timers and T3's `sh -l` start
     # with a bare PATH that lacks them (brew normally comes from ~/.zprofile only)
     echo 'for _d in /usr/local/bin /opt/homebrew/bin /Applications/Docker.app/Contents/Resources/bin; do [ -d "$_d" ] || continue; case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac; done; unset _d'
     echo 'case ":$PATH:" in *":$HOME/.local/share/mise/shims:"*) ;; *) PATH="$HOME/.local/share/mise/shims:$PATH" ;; esac'

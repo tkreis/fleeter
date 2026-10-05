@@ -174,7 +174,8 @@ vault/
   secrets/minimal.env.age  KEY='value' lines, shell-safe single-quoted, encrypted
   secrets/full.env.age     full = minimal.env + full.env
   files/<profile>/<path under $HOME>.age      mirrored files, encrypted
-  files/full/.cli-proxy-api/{config.yaml,auth/…}.age   CLIProxyAPI state (full only)
+  files/full/.cli-proxy-api/config.yaml.age   CLIProxyAPI client key + routing (full only); auth/….age only with
+                           FLEET_PROXY_SHARE_AUTH=1 — otherwise never shipped, not in the digest, not in files_sent
   ssh/fleet_master, ssh/fleet_master.pub      plain (ssh reads them)
   ssh/t3_client, ssh/t3_client.pub        the key T3 Code uses towards nodes (lib/t3.sh); created by init master / t3 setup
   ssh/known_hosts          pinned node host keys, one plain `<dnsname> ssh-ed25519 <key>` line per node (host_key_pin)
@@ -233,8 +234,11 @@ node that predates pinning on their next contact.
    without `.age`); on the node:
    `umask 077`, `mktemp -d ~/.config/fleet/stage.XXXXXX`, `tar -xf -` into it,
    `mkdir -p` + `mv -f` each file to its path under `$HOME` (same filesystem:
-   an atomic rename), `rm -rf` the staging dir. With `--refresh-proxy-auth`
-   also `touch ~/.cli-proxy-api/.force`.
+   an atomic rename), `rm -rf` the staging dir. Members under
+   `.cli-proxy-api/auth/` are left out of the tar (and of `files_list`, the
+   digest and `files_sent`) unless `FLEET_PROXY_SHARE_AUTH=1`. With
+   `--refresh-proxy-auth` (refused unless that knob is 1) also
+   `touch ~/.cli-proxy-api/.force`.
 4b. T3 client key (only when `vault/ssh/t3_client` exists, i.e. after
    `fleet init master` with `FLEET_T3_REMOTE=1` or after `fleet t3 setup`): the desired
    `authorized_keys` line — `T3_CLIENT_KEY_OPTIONS <type> <key> fleet-t3-client`
@@ -444,7 +448,7 @@ registry. Keys are stable; new ones may be added.
               "source": "node"},  // node = from the node's status; registry = last provision; null = none
   "tools": {"claude": {"state": "ok", "detail": "…"}},   // the node's tools map; {} when not reached
   "memory": "ok",                 // ok | conflict | missing | off | null
-  "proxy": "off",                 // ok | off (cliproxy not in the node's tools) | down | null
+  "proxy": "off",                 // ok | off (cliproxy not in the node's tools) | login (0.4.3: its upstream login expired) | down | null
   "fleet": "0.3.0",               // the node's fleet version, null when not reached
   "awake": "on",                  // 0.3.3: the node's `awake` (on | off | n/a); null when not reached, on the master row and unknown peers
   "missing_since": "", "cleanup_pending": [],
@@ -544,6 +548,34 @@ they are not masked. The master never gets any of it. The lid-closed setting
 (`FLEET_KEEP_AWAKE_LID`, `pmset -a disablesleep 1`) is root-only as well: join
 sets it on laptops, apply only compares the knob with `node_awake_lid_state`
 and logs the undo (`sudo pmset -a disablesleep 0`) or the manual command.
+
+## `fleet proxy login` (master)
+
+`proxy login NODE [claude|codex|codex-device|antigravity] [--yes]` (default
+`claude`): refuses revoked and container nodes, an unknown provider, and —
+before anything runs — a callback port already in use on the master (`nc -z
+localhost <port>`). Ports: claude 54545, codex 1455, antigravity 51121,
+codex-device none. Asks `Proceed? [y/N]` unless `--yes`. Then, over the fleet
+session (master key, pinned host key):
+
+1. `bash -s` on the node: `mkdir -p` the compose dirs, copy `auth/*.json` into
+   `$FLEET_CLIPROXY_DIR/.auth-backup/<UTC>/` (umask 077).
+2. `ssh -t [-L <port>:127.0.0.1:<port> -o ExitOnForwardFailure=yes] … 'cd
+   "<dir>" && docker run --rm -it [-p 127.0.0.1:<port>:<port>] -v "$PWD/conf:/config"
+   -v "$PWD/auth:/root/.cli-proxy-api" -v "$PWD/plugins:/CLIProxyAPI/plugins"
+   $FLEET_PROXY_IMAGE ./CLIProxyAPI -config /config/config.yaml <flag> -no-browser'`;
+   the user opens the printed URL in the browser on the master. A non-zero exit
+   stops here (audit `proxy.login <name> fail <provider> rc=N`).
+3. `bash -s` on the node: `chmod 0600 auth/*.json`, `docker compose up -d
+   --force-recreate` (fallback `docker restart $FLEET_PROXY_CONTAINER`), then
+   with the node's own fleet code `cliproxy_client_key` → `curl -K -` (the key
+   on stdin) against `$FLEET_PROXY_URL/v1/models`, up to
+   `FLEET_PROXY_LOGIN_WAIT_SECS` (30) seconds for a 200. Exit 0 and audit
+   `ok <provider>` on 200; otherwise exit 1 with the status (`verify=<code>`,
+   `restart-failed`, `unverified`).
+
+`<dir>` is `FLEET_CLIPROXY_DIR` with the master's `$HOME` prefix replaced by a
+literal `$HOME` for the node's shell. No token is read, printed or logged.
 
 ## `fleet reboot` / `fleet unlock` (master)
 

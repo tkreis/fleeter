@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.3 — 2026-10-05
+
+Each node logs into its own CLIProxyAPI accounts; the master no longer copies
+its OAuth files around.
+
+### Fixed
+
+- Copied proxy logins died as soon as any copy refreshed: Anthropic (and the
+  other vendors) rotate refresh tokens, so the master's `claude-*.json` shipped
+  to every full node logged the others out — the node's proxy logged
+  `invalid_grant` / "Refresh token not found or invalid" and Claude Code there
+  could not authenticate. Re-copying only moved the breakage. `fleet proxy
+  import` now ships `config.yaml` only (client key, routing); the OAuth files
+  are neither stored nor shipped unless `FLEET_PROXY_SHARE_AUTH=1` (new knob,
+  default 0; documented as breaking when tokens rotate, only for a single node
+  that never runs at the same time as the master). Files imported before stay
+  in the vault but leave the digest and the provision tar while the knob is 0;
+  `fleet provision NODE --refresh-proxy-auth` is refused without it.
+
+### Added
+
+- `fleet proxy login NODE [claude|codex|codex-device|antigravity] [--yes]`
+  (master): the vendor's login container on the node (`FLEET_PROXY_IMAGE`,
+  `-no-browser`) over `ssh -t -L <port>:127.0.0.1:<port>` with the pinned host
+  key, so the OAuth URL it prints is opened in the browser on the master and
+  the callback reaches the node through the tunnel (ports: claude 54545,
+  codex 1455, antigravity 51121; codex-device needs no tunnel). Backs up the
+  node's `auth/*.json` into `.auth-backup/<UTC>/` first, recreates the proxy
+  container afterwards and checks `/v1/models` with the node's client key
+  (read on the node, handed to curl on stdin, never printed). Refuses a busy
+  callback port on the master, containers, and runs nothing without
+  confirmation. Audited as `proxy.login <node> ok|fail <provider>`.
+- `cliproxy` status reports `login` when the container logged a refresh
+  failure (`invalid_grant`, "Refresh token not found or invalid") in the last
+  24 h that is newer than the newest auth file, with the fix in the detail
+  (`run on the master: fleet proxy login <name>`); `fleet list` shows
+  `1 login: cliproxy` and PROXY `login`.
+
+### Upgrade
+
+- Nodes that received copied proxy logins from a master on 0.4.2 or earlier:
+  run `fleet proxy login NODE` once per node (per account) on the master;
+  the copied files are backed up on the node and replaced by the node's own
+  login. Keep using the master's own proxy as before.
+
 ## 0.4.2 — 2026-10-05
 
 ### Fixed

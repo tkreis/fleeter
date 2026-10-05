@@ -190,7 +190,7 @@ every node converges, in install order. Three presets, documented in
 | `cursor` | Cursor CLI (`cursor-agent`) | `CURSOR_API_KEY` or a browser login: `fleet login cursor`; the macOS keychain is locked over ssh, so use the secret there | all |
 | `grok` | Grok Build (`grok`) | `XAI_API_KEY` or a device code: `fleet login grok` | all |
 | `chrome` | a browser (Google Chrome on macOS and Debian/Ubuntu amd64, chromium on arm64 and in containers) plus `chrome-devtools-mcp` and `@playwright/mcp` pinned (`FLEET_CHROME_DEVTOOLS_MCP`, `FLEET_PLAYWRIGHT_MCP`) behind `~/.local/bin/fleet-chrome-mcp` / `fleet-playwright-mcp` wrappers (headless without a display, fleet-owned profile) | none | macOS, apt-based Linux (browser via `fleet join`), containers (chromium baked into the image; `--build-arg FLEET_BROWSER=0` for a slim image without it) |
-| `cliproxy` | CLIProxyAPI in Docker from `templates/cliproxy/` (`FLEET_PROXY_MODE=local`) or just the harness variables for one you run elsewhere (`remote`) | `fleet proxy import` on the master (config.yaml + OAuth files, full profile) | macOS and Linux with Docker; containers always remote |
+| `cliproxy` | CLIProxyAPI in Docker from `templates/cliproxy/` (`FLEET_PROXY_MODE=local`) or just the harness variables for one you run elsewhere (`remote`) | `fleet proxy import` on the master (config.yaml with the client key, full profile), then `fleet proxy login NODE` once per node for its own upstream accounts | macOS and Linux with Docker; containers always remote |
 | `t3code` | the T3 Code desktop app from GitHub releases (self-updating) | none | macOS, Linux with a display; skipped in containers. Remote use of a node from the master's T3 Code is `fleet t3 …` (opt-in, `FLEET_T3_REMOTE`), independent of this plug-in |
 
 `fleet join` reads the fleet's tool list from the invite and skips the
@@ -580,7 +580,8 @@ again + `reconcile`. Nodes a secret was sent to are listed in the registry
 ### Encrypt, inspect and back up the vault
 
 Every secret-bearing file in the vault — the env files, mirrored files, the
-proxy logins, the Tailscale OAuth client, the GitHub fallback token — is an
+proxy config (and its logins, if you share them), the Tailscale OAuth client,
+the GitHub fallback token — is an
 [age](https://age-encryption.org) ciphertext (`<name>.age`). The private key
 never sits in the vault: it is in the **login keychain** on macOS (service
 `fleet-vault`), in **secret-tool** (libsecret) on Linux when installed, or in
@@ -624,12 +625,12 @@ recreated at the same path under the node's `$HOME`, 0600, atomically
 (unpacked into a private staging dir on the node and renamed into place). Its
 ciphertext is part of the digest.
 
-### Share the CLIProxyAPI setup
+### Run CLIProxyAPI on every node, each with its own logins
 
 ```sh
-fleet proxy import                                   # copies conf/config.yaml + auth/*.json from $FLEET_CLIPROXY_DIR into the vault (full profile)
-fleet reconcile
-fleet provision studio --refresh-proxy-auth          # later: overwrite a node's rotated OAuth files from the master
+fleet proxy import                 # copies conf/config.yaml (client key, routing) from $FLEET_CLIPROXY_DIR into the vault (full profile)
+fleet reconcile                    # every full node gets the config and runs its own proxy container
+fleet proxy login studio           # once per node and account: Claude (default) | codex | codex-device | antigravity
 ```
 
 With `cliproxy` in `FLEET_TOOLS`, every `full`-profile node runs its own proxy
@@ -641,9 +642,31 @@ for the harnesses (also via `launchctl setenv` on macOS). The variables are
 exported **only** while the proxy is enabled for that node; otherwise `env.sh`
 unsets them. Containers never run the proxy themselves: give them
 `FLEET_PROXY_MODE=remote` and a reachable `FLEET_PROXY_URL`, or leave
-`cliproxy` out of their tools. Node-side auth files win on later provisions
-because a running proxy refreshes them; `--refresh-proxy-auth` forces the
-master's copies.
+`cliproxy` out of their tools.
+
+**Each machine logs into its own accounts.** `fleet proxy import` ships the
+`config.yaml` only — never the OAuth files under `auth/`. The vendors rotate
+refresh tokens: the moment one proxy refreshes a login, every other copy of
+the same file is dead (`invalid_grant`, "Refresh token not found or invalid",
+and Claude Code on that node says it could not authenticate). Copying fresh
+tokens around only moves the breakage. So `fleet proxy login NODE [claude|
+codex|codex-device|antigravity]` runs the vendor's login container on the node
+itself, with `-no-browser`: it prints an OAuth URL, you open it in the browser
+on the master, and the callback to `localhost:<port>` reaches the container on
+the node through an ssh tunnel the command opens (`codex-device` needs none).
+The node's existing auth files are backed up into
+`$FLEET_CLIPROXY_DIR/.auth-backup/<UTC>/` first; afterwards the proxy container
+is recreated and `/v1/models` is checked with the node's client key (read on
+the node, never printed). Nothing about a token ever passes through the
+master. A node whose login died shows `1 login: cliproxy` in `fleet list`
+(the node's proxy logged a refresh failure newer than its auth files) with the
+command to run.
+
+`FLEET_PROXY_SHARE_AUTH=1` restores the old behaviour — the master's OAuth
+files are imported and shipped, and `fleet provision NODE
+--refresh-proxy-auth` overwrites a node's copies — but it breaks when the
+tokens rotate; only for a single node that never runs at the same time as the
+master.
 
 ### Log a node into Codex, Grok or Cursor
 
@@ -811,7 +834,8 @@ and kick).
 | `fleet secrets set NAME` | `--profile minimal\|full` (default full) | Stores one secret from a hidden prompt or stdin into `vault/secrets/<profile>.env.age` (the current file is decrypted into memory, updated, re-encrypted; needs the vault key). |
 | `fleet secrets list` | | Names and profiles only (decrypts into memory; needs the vault key). |
 | `fleet files add PATH` | `--profile minimal\|full` | Mirrors a file under `$HOME` into the vault, encrypted straight from the source (`files/<profile>/<path>.age`); recreated at the same relative path on nodes. |
-| `fleet proxy import [DIR]` | | Copies CLIProxyAPI `conf/config.yaml` and `auth/*.json` from DIR (default `FLEET_CLIPROXY_DIR`) into the full profile, encrypted. |
+| `fleet proxy import [DIR]` | | Copies CLIProxyAPI `conf/config.yaml` (client key, routing) from DIR (default `FLEET_CLIPROXY_DIR`) into the full profile, encrypted. The OAuth files under `auth/` only with `FLEET_PROXY_SHARE_AUTH=1`; files stored earlier stay in the vault but are not shipped while it is 0. |
+| `fleet proxy login NODE [PROVIDER]` | `--yes` | Logs NODE's own CLIProxyAPI into one upstream account: PROVIDER = `claude` (default, callback port 54545), `codex` (1455), `codex-device` (device code, no tunnel), `antigravity` (51121). Backs up the node's `auth/*.json` into `.auth-backup/<UTC>/`, runs the vendor's login container on the node (`FLEET_PROXY_IMAGE`, `-no-browser`) over `ssh -t -L <port>:127.0.0.1:<port>` with the pinned host key, so the URL it prints is opened in the browser on the master and the callback reaches the node; then recreates the proxy container and checks `/v1/models` with the node's client key (read on the node). Refuses when the port is busy on the master, for containers, and without confirmation. Audited; never sees a token. |
 | `fleet vault status` | | Key backend (and the one the key was created with), recipient, whether the key is reachable now, how many files are encrypted, which are still plaintext. Read-only. |
 | `fleet vault encrypt` | | Migration for a vault from before 0.3.0: creates the key if there is none, encrypts every plaintext secret, env, JSON and mirrored file (each one decrypted again and compared before the plaintext is removed), drops the legacy `digest.key`. Idempotent; refuses when the key backend is unreachable. |
 | `fleet vault rotate-key` | | Generates a new key, stores it as the incoming key, re-encrypts every file (verified), swaps files + recipient, then replaces the old key in the backend. Takes the master lock. A crash leaves a vault that still decrypts; rerun to finish. |
@@ -820,7 +844,7 @@ and kick).
 | `fleet list` | `--json`, `--offline` | The fleet overview: registry + tailnet peers + each online node's `fleet status --json` (parallel, `FLEET_LIST_SECS` = 10 s each). Columns NAME, HOST, ONLINE, STATE, SYNCED, LAST PROVISION, TOOLS, MEMORY, PROXY, FLEET; `--json` a stable array (`docs/CONTRACT.md`); `--offline` skips SSH. Unknown tagged peers listed as `unknown`, nodes that did not answer as `unreachable`; exit 0 regardless. Never writes the vault. |
 | `fleet nodes` | `--live` | Compact registry table (name, id, online, state, profile, age); `--live` adds each node's tool states over SSH. Kept for scripts; `fleet list` supersedes it. |
 | `fleet ssh NODE [COMMAND...]` | | Shell on NODE, or run COMMAND there with the node's fleet environment (`env.sh`) loaded; name resolved through the registry, master key, pinned host key. `fleet ssh NODE --help` is help; anything longer after NODE is the remote command. |
-| `fleet provision NODE` | `--refresh-proxy-auth` | Takes the node lock, ships code and config (when the node has no git checkout of them, or no repo URL is set), secrets, files (via a staging dir), the T3 key line (only when the T3 key exists), runs `fleet pull --no-apply` on the node, then `fleet apply --from-master <digest>`; records the `<code>+<config>` the node reports it applied. NODE = registered name or Tailscale id, never a guessed hostname. |
+| `fleet provision NODE` | `--refresh-proxy-auth` (needs `FLEET_PROXY_SHARE_AUTH=1`) | Takes the node lock, ships code and config (when the node has no git checkout of them, or no repo URL is set), secrets, files (via a staging dir), the T3 key line (only when the T3 key exists), runs `fleet pull --no-apply` on the node, then `fleet apply --from-master <digest>`; records the `<code>+<config>` the node reports it applied. NODE = registered name or Tailscale id, never a guessed hostname. |
 | `fleet reconcile` | | Expires old invites, enrols new tagged peers (nonce check, claims the invite atomically, registers the deploy keys), provisions nodes whose digest differs, retries pending cleanups, tracks missing devices and revokes them after the grace period. Convergent; quiet when nothing to do. Runs every `FLEET_RECONCILE_EVERY` minutes; skips (exit 0) while a `fleet sync` holds the master lock. |
 | `fleet sync` | | The periodic push (timer: `FLEET_SYNC_EVERY`): fast-forward the fleeter and config checkouts from their upstream when clean and behind, publish local-only skills (`FLEET_SYNC_PUBLISH_SKILLS`), `reconcile`, and every `FLEET_PUSH_TOOLS_EVERY` minutes `fleet update` on the online provisioned nodes (parallel, `FLEET_SYNC_UPDATE_SECS` cap each; last run in `vault/sync.json`). Quiet when nothing happened; see "Automatic updates". |
 | `fleet schedule install` | | (Re)install the master timers `reconcile`, `sync` and, with a memory repo, `memory` (`fleet memory sync` every `FLEET_MEMORY_EVERY` min; LaunchAgents `dev.fleet.<job>`, or systemd user timers `fleet-<job>`) with the intervals from `fleet.conf`, and clone the master's memory vault when it is missing. Idempotent; `FLEET_NO_SCHEDULER=1` writes without loading. |
@@ -883,6 +907,7 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_PROXY_CONTAINER` | `cli-proxy-api` | Container name in the rendered compose file (also what `fleet leave` stops). |
 | `FLEET_PROXY_PORT` | `8317` | Host port on 127.0.0.1 the proxy is published on. |
 | `FLEET_CLIPROXY_DIR` | `$HOME/cli-proxy-api` | Compose directory on nodes; default source for `fleet proxy import`. |
+| `FLEET_PROXY_SHARE_AUTH` | `0` | `1`: `fleet proxy import` also stores the master's OAuth files and provision ships them to full nodes (the pre-0.4.3 behaviour; `--refresh-proxy-auth` overwrites a node's copies). Breaks when the vendor rotates refresh tokens: only for a single node that never runs at the same time as the master. `0`: each node logs in on its own with `fleet proxy login NODE`. |
 | `FLEET_T3_REMOTE` | `0` | `1`: `fleet init master` creates the T3 client key, so every node gets the restricted `authorized_keys` line and `~/.ssh/config.d/fleet` is maintained. `0`: only after `fleet t3 setup`. |
 | `FLEET_SKILL_EXCLUDE` | `""` | Skills on the master never captured. |
 | `FLEET_CAPTURE_MACHINE_ONLY` | `""` | Extra words marking MCP servers/hooks as machine-only (dropped on capture). |
@@ -931,7 +956,7 @@ Master, `~/.config/fleet/vault` (0700 dirs, 0600 files; `*.age` = encrypted to `
 ```
 recipient.txt                           the vault's public age recipient (0644) and which key backend holds the private key
 secrets/minimal.env.age, full.env.age   KEY='value' lines, encrypted; full = minimal + full
-files/<profile>/<path under $HOME>.age  mirrored files, encrypted; files/full/.cli-proxy-api/{config.yaml,auth/*}.age
+files/<profile>/<path under $HOME>.age  mirrored files, encrypted; files/full/.cli-proxy-api/config.yaml.age (auth/*.age only with FLEET_PROXY_SHARE_AUTH=1)
 ssh/fleet_master(.pub)                  the key nodes authorize for provisioning (plain: ssh needs it)
 ssh/t3_client(.pub)                     the key T3 Code uses towards nodes (only with FLEET_T3_REMOTE=1 or after fleet t3 setup)
 ssh/known_hosts                         pinned node host keys (read over the fleet session); every ssh is strict once pinned

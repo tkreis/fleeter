@@ -41,6 +41,7 @@ on it (keychain / secret service), see "Vault encryption at rest".
 | Node host keys are pinned | `vault/ssh/known_hosts` (0600) holds each node's ed25519 host key, read with `cat /etc/ssh/ssh_host_ed25519_key.pub` over the authenticated fleet session at enrolment (never `ssh-keyscan`); every later ssh — fleet's own and T3 Code's — runs with `StrictHostKeyChecking yes`, `HostKeyAlgorithms ssh-ed25519` and that file. A key that differs from the pin is refused and reported (`HOST KEY MISMATCH`), never replaced automatically. The pre-boot sshd of a FileVault Mac (`fleet unlock`) may present another key, so it is pinned on first use in a separate `vault/ssh/known_hosts_preboot` and never touches the normal pins. |
 | Restart and pre-boot unlock pass no password through fleet | `fleet reboot` runs `sudo fdesetup authrestart -delayminutes 0` (or `shutdown`/`systemctl`) over an interactive ssh session: sudo and `fdesetup` prompt on the node's TTY, fleet never uses `-inputplist`, `-password` or stdin, and logs only `authrestart|shutdown|systemctl`. `fleet unlock` opens a plain password ssh session (`PubkeyAuthentication=no`, `PreferredAuthentications=keyboard-interactive,password`, no key, no agent) to the Mac's LAN address and the user types at the Mac's own prompt; the audit log records the address and the outcome. Nothing is stored, nothing is in argv or the environment (`tests/master_test.sh` asserts both). |
 | T3 Code reaches a node with a key that can do nothing else | See "T3 Code remote access" below. |
+| OAuth tokens stay on the machine that created them | By default no CLIProxyAPI OAuth file leaves the machine it was created on: `fleet proxy import` stores only `config.yaml` (client key, routing); `fleet proxy login NODE` runs the vendor's login container on the node itself — the browser on the master only follows the printed URL, the callback travels through an ssh tunnel (`-L`, pinned host key) and the token is written on the node; the check afterwards reads the node's client key on the node and hands it to `curl` on stdin. The master logs `proxy.login <node> ok|fail <provider>` and nothing else. `FLEET_PROXY_SHARE_AUTH=1` opts back into copying the master's files. |
 
 ## Vault encryption at rest
 
@@ -49,7 +50,7 @@ What is encrypted, where (`lib/vault.sh`):
 | Item | At rest |
 |---|---|
 | `vault/secrets/minimal.env`, `full.env` | `secrets/<profile>.env.age` |
-| every mirrored file (`fleet files add`), the CLIProxyAPI config + logins (`fleet proxy import`) | `files/<profile>/<path>.age` |
+| every mirrored file (`fleet files add`), the CLIProxyAPI config (`fleet proxy import`; its logins only with `FLEET_PROXY_SHARE_AUTH=1`) | `files/<profile>/<path>.age` |
 | the Tailscale OAuth client, the GitHub fallback token | `tailscale.json.age`, `github.json.age` |
 | `vault/recipient.txt` | plain, 0644: the public recipient and the name of the key backend. Writers (`secrets set`, `files add`, `proxy import`, `lib/api.py` minting the OAuth client) need only this. |
 | `vault/ssh/fleet_master`, `ssh/t3_client`, `ssh/known_hosts`, `ssh/known_hosts_preboot` | plain, 0600: OpenSSH reads them itself. The master key is the credential for every node; it is protected by the 0700 vault and the disk encryption you run, not by age. |
@@ -212,11 +213,14 @@ forward to the server on the node's loopback (`ssh -n -N -L
 - **Shared memory is a prompt-injection return path.** Instructions mitigate;
   they do not prevent a model from following a planted note. Review
   `nodes/**` before promoting anything to `notes/`.
-- **CLIProxyAPI logins are shared.** With `FLEET_PROXY_MODE=local` every
-  `full` node holds copies of the master's OAuth files; a vendor refresh-token
-  rotation on one node can log the others out, and all nodes share the
-  account's rate limits. Node copies win on later provisions;
-  `--refresh-proxy-auth` restores the master's.
+- **CLIProxyAPI logins are per machine, and live on the node.** Each node's
+  `auth/*.json` are the node's own refresh tokens (0600, plus the 0700
+  `.auth-backup/` copies `fleet proxy login` keeps); whoever controls the node
+  controls those accounts until you revoke them at the vendor. With
+  `FLEET_PROXY_SHARE_AUTH=1` the nodes hold copies of the master's files
+  instead: a vendor refresh-token rotation on one machine logs the others out
+  (verified: `invalid_grant`, "Refresh token not found or invalid"), and all of
+  them share the account's rate limits.
 - **`launchctl setenv` (macOS)** puts `ANTHROPIC_AUTH_TOKEN` in one process's
   argv for milliseconds (local user only). It only happens with a local
   CLIProxyAPI (`cliproxy` in `FLEET_TOOLS` and `FLEET_PROXY_MODE=local`);
@@ -278,9 +282,12 @@ M1–M6, `tests/node_test.sh` N1–N8, `tests/e2e.sh`).
    (`claude setup-token` again), `OPENAI_API_KEY`, `CURSOR_API_KEY`,
    `XAI_API_KEY`, `GH_TOKEN`, registry tokens named in `FLEET_DOCKER_LOGINS`,
    the MCP keys from `harness/SECRETS.md`, and — for a `full` node — the
-   CLIProxyAPI client key and the OAuth logins it held (`fleet proxy import`
-   again after re-authenticating the proxy on the master), plus anything in the
-   mirrored files (`files_sent`).
+   CLIProxyAPI client key (`fleet proxy import` again after changing it on the
+   master) and the upstream accounts the node was logged into with `fleet
+   proxy login` (sign that device out at the vendor; with
+   `FLEET_PROXY_SHARE_AUTH=1` they were the master's logins: re-authenticate
+   the proxy on the master and import again), plus anything in the mirrored
+   files (`files_sent`).
 3. `fleet secrets set NAME` for each, `fleet proxy import`, then `fleet
    reconcile` so the remaining nodes receive the new values.
 4. If the node had the memory key: it was deleted by kick; confirm in the

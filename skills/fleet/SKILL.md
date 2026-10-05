@@ -16,7 +16,10 @@ from git on a timer and run the agents. The same command exists as `fleet` and
 - Master: `~/.config/fleet/vault/` exists and `fleet list` works.
 - Node: `~/.config/fleet/enrol.json` exists, `fleet status` works, `fleet list`
   dies with "vault not initialised". Nodes cannot reach the master or each other.
-- Neither: `fleet` is installed but this machine is not in the fleet.
+- Neither: `fleet` is installed but this machine is not in the fleet. To make
+  it the master, follow the `fleet-setup` skill (`skills/fleet-setup/SKILL.md`,
+  the same text as https://tkreis.github.io/fleeter/SETUP.md): it asks the
+  user the right questions and runs `fleet setup` with the matching flags.
 
 ## Cookbook (master unless marked node)
 

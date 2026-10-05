@@ -6,6 +6,7 @@ on:
     paths:
       - "site/**"
       - "install.sh"
+      - "SETUP.md"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -27,8 +28,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions/configure-pages@v6
-      - name: add the installer to the site
-        run: cp install.sh site/install.sh
+      - name: add the installer and the agent setup instructions to the site
+        run: cp install.sh site/install.sh && cp SETUP.md site/SETUP.md
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site

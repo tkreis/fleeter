@@ -1415,6 +1415,148 @@ EOF
   end
 }
 
+# `fleet power lid on|off` and `fleet power status` on the machine itself (a
+# node, or the master: both are MacBooks that joined without the lid opt-in).
+# Fakes on PATH: uname says Darwin, pmset records argv and keeps SleepDisabled
+# in a state file (`-a disablesleep N` writes it unless FAKE_POWER_IGNORE),
+# sysctl answers the model, sudo logs and runs (only reached when the test
+# user is not root; the container's root goes straight to pmset). The
+# commands run as sourced functions on a fake non-container Mac, as in
+# case_awake; the dispatcher (help, bad flags) through the real `fleet`.
+case_power() {
+  begin "power lid: sudo pmset -a disablesleep 1|0 on a Mac laptop, typed yes unless --yes, lid marker kept with join's, read back with pmset -g, non-laptop/Linux/container explain and exit 0, status"
+  local h d="$WORK/power-cmd-bin" out rc N_ENV="" c
+  h=$(mk_home powercmd "")
+  mkdir -p "$d"
+  export FAKE_POWER_LOG="$WORK/power-cmd.log" FAKE_SLEEP_STATE="$WORK/power-cmd.state" FAKE_LAPTOP=1
+  printf '#!/usr/bin/env bash\necho Darwin\n' >"$d/uname"
+  cat >"$d/pmset" <<'EOF'
+#!/usr/bin/env bash
+echo "pmset $*" >>"$FAKE_POWER_LOG"
+case "$*" in
+  "-g") printf 'System-wide power settings:\nCurrently in use:\n standby              1\n SleepDisabled        %s\n sleep                0\n' "$(cat "$FAKE_SLEEP_STATE" 2>/dev/null || echo 0)" ;;
+  "-g batt") if [ -n "${FAKE_LAPTOP:-}" ]; then echo " -InternalBattery-0 (id=1234567)	100%; charged; 0:00 remaining present: true"; else echo "Now drawing from 'AC Power'"; fi ;;
+  "-a disablesleep "*) [ -z "${FAKE_POWER_FAIL:-}" ] || exit 1; [ -n "${FAKE_POWER_IGNORE:-}" ] || printf '%s' "$3" >"$FAKE_SLEEP_STATE" ;;
+esac
+exit 0
+EOF
+  # shellcheck disable=SC2016  # the fakes expand FAKE_HW_MODEL and $* themselves
+  printf '#!/usr/bin/env bash\necho "${FAKE_HW_MODEL:-Mac15,3}"\n' >"$d/sysctl"
+  # shellcheck disable=SC2016
+  printf '#!/usr/bin/env bash\necho "sudo $*" >>"$FAKE_POWER_LOG"\nexec "$@"\n' >"$d/sudo"
+  chmod 755 "$d"/*
+  n() {   # n FUNC [ARGS] — a node.sh function on the fake Mac as a real node (not a container); extra env in N_ENV; FAKE_OS=linux for a Linux box
+    # shellcheck disable=SC2086,SC2016  # N_ENV is a list of VAR=VALUE words; the inner script expands on its own
+    env HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_ROOT="$ROOT" FLEET_BIN="$h/.local/bin" PATH="$d:$PATH" $N_ENV \
+      bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/node.sh"; fleet_in_container() { return 1; }
+               [ -z "${FAKE_OS:-}" ] || uname() { if [ "$1" = -s ]; then echo "$FAKE_OS"; else command uname "$@"; fi; }
+               "$@"' bash "$@"
+  }
+  # on, --yes: caveats + undo, exactly pmset -a disablesleep 1 (through sudo unless root), marker, read back
+  : >"$FAKE_POWER_LOG"; printf 0 >"$FAKE_SLEEP_STATE"
+  out=$(n cmd_power_lid on --yes </dev/null 2>&1); rc=$?
+  assert "lid on --yes: exit 0" [ "$rc" -eq 0 ]
+  assert "ran exactly pmset -a disablesleep 1, once" bash -c "[ \"\$(grep -c '^pmset -a' '$FAKE_POWER_LOG')\" = 1 ] && grep -qx 'pmset -a disablesleep 1' '$FAKE_POWER_LOG'"
+  if [ "$(id -u)" -ne 0 ]; then assert "through sudo" grep -qx 'sudo pmset -a disablesleep 1' "$FAKE_POWER_LOG"; fi
+  assert "caveats: heat and battery as two warn lines, and the undo command" bash -c "[ \"\$(printf '%s\n' '$out' | grep -c '^warn ')\" = 2 ] && printf '%s' '$out' | grep -q 'heat' && printf '%s' '$out' | grep -q 'battery' && printf '%s' '$out' | grep -q 'undo: fleet power lid off  (or: sudo pmset -a disablesleep 0)'"
+  assert "read back: now disabled (pmset -g: SleepDisabled 1); pmset -g asked before and after" bash -c "printf '%s' '$out' | grep -q 'lid: sleep with the lid closed is now disabled (pmset -g: SleepDisabled 1)' && [ \"\$(grep -c '^pmset -g\$' '$FAKE_POWER_LOG')\" -ge 2 ]"
+  assert "marker: power_done created (0600) with the word lid after a timestamp, not +lid" bash -c "[ \"\$(stat -c %a '$h/.config/fleet/power_done')\" = 600 ] && grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z lid\$' '$h/.config/fleet/power_done'"
+  n node_write_status >/dev/null 2>&1
+  out="$(jget "$h/.config/fleet/status.json" awake_lid)|$(jget "$h/.config/fleet/status.json" lid_set_at_join)"
+  assert "status.json after: awake_lid on, lid_set_at_join false" [ "$out" = 'on|false' ]
+  out=$(n cmd_status 2>/dev/null)
+  assert "status table: (lid: on; undo: …) without 'set at join'" bash -c "printf '%s' '$out' | grep -q '(lid: on; undo: sudo pmset -a disablesleep 0)'"
+  # again: already on, no sudo, no pmset -a
+  : >"$FAKE_POWER_LOG"
+  out=$(n cmd_power_lid on --yes </dev/null 2>&1); rc=$?
+  assert "on again: exit 0, says already disabled, pmset -a not run" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'already disabled' && ! grep -q '^pmset -a' '$FAKE_POWER_LOG' && ! grep -q '^sudo' '$FAKE_POWER_LOG'"
+  # power status
+  out=$(n cmd_power_status 2>&1); rc=$?
+  assert "power status: lid on (SleepDisabled 1), laptop yes, marker set by fleet power, undo line" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q '^lid     on  (pmset -g: SleepDisabled 1)\$' && printf '%s' '$out' | grep -q '^laptop  yes\$' && printf '%s' '$out' | grep -q '^marker  set by fleet power lid on (lid in power_done)\$' && printf '%s' '$out' | grep -q '^undo    fleet power lid off'"
+  # off, --yes: pmset -a disablesleep 0, the marker file goes (fleet power created it), read back
+  : >"$FAKE_POWER_LOG"
+  out=$(n cmd_power_lid off --yes </dev/null 2>&1); rc=$?
+  assert "lid off --yes: exit 0, exactly pmset -a disablesleep 0, marker file removed, read back SleepDisabled 0" bash -c "[ '$rc' -eq 0 ] && [ \"\$(grep '^pmset -a' '$FAKE_POWER_LOG')\" = 'pmset -a disablesleep 0' ] && [ ! -e '$h/.config/fleet/power_done' ] && printf '%s' '$out' | grep -q 'lid: sleep with the lid closed is now allowed (pmset -g: SleepDisabled 0)'"
+  refute "off: no caveats" bash -c "printf '%s' '$out' | grep -q 'heat'"
+  out=$(n cmd_power_status 2>&1)
+  assert "power status after off: lid off, marker none, no undo line" bash -c "printf '%s' '$out' | grep -q '^lid     off  (pmset -g: SleepDisabled 0)\$' && printf '%s' '$out' | grep -q '^marker  none\$' && ! printf '%s' '$out' | grep -q '^undo'"
+  # join's markers are kept: `macos:pmset` gains ` lid` and keeps it on off; `+lid` from join is dropped on off
+  printf '2026-10-04T00:00:00Z macos:pmset\n' >"$h/.config/fleet/power_done"
+  n cmd_power_lid on --yes </dev/null >/dev/null 2>&1
+  assert "join marker macos:pmset kept, lid appended" grep -qx '2026-10-04T00:00:00Z macos:pmset lid' "$h/.config/fleet/power_done"
+  n cmd_power_lid off --yes </dev/null >/dev/null 2>&1
+  assert "off: join marker stays, lid gone, file kept" grep -qx '2026-10-04T00:00:00Z macos:pmset' "$h/.config/fleet/power_done"
+  printf '2026-10-04T00:00:00Z macos:pmset+lid\n' >"$h/.config/fleet/power_done"; printf 1 >"$FAKE_SLEEP_STATE"
+  out=$(n cmd_power_status 2>&1)
+  assert "power status with +lid from join: marker set at join" bash -c "printf '%s' '$out' | grep -q '^marker  set at join (+lid in power_done)\$'"
+  n cmd_power_lid off --yes </dev/null >/dev/null 2>&1
+  assert "off after a join-set lid: +lid dropped, macos:pmset kept" grep -qx '2026-10-04T00:00:00Z macos:pmset' "$h/.config/fleet/power_done"
+  rm -f "$h/.config/fleet/power_done"
+  # confirmation: typed yes runs, anything else (or no stdin) aborts before sudo
+  : >"$FAKE_POWER_LOG"; printf 0 >"$FAKE_SLEEP_STATE"
+  out=$(printf 'yes\n' | n cmd_power_lid on 2>&1); rc=$?
+  assert "typed yes: asked, ran pmset -a disablesleep 1" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'Type yes to continue' && grep -qx 'pmset -a disablesleep 1' '$FAKE_POWER_LOG'"
+  : >"$FAKE_POWER_LOG"
+  out=$(printf 'no\n' | n cmd_power_lid off 2>&1); rc=$?
+  assert "typed no: aborted, exit 1, nothing run, state unchanged" bash -c "[ '$rc' -eq 1 ] && printf '%s' '$out' | grep -q 'aborted' && ! grep -q '^pmset -a' '$FAKE_POWER_LOG' && ! grep -q '^sudo' '$FAKE_POWER_LOG' && [ \"\$(cat '$FAKE_SLEEP_STATE')\" = 1 ]"
+  out=$(n cmd_power_lid off </dev/null 2>&1); rc=$?
+  assert "no stdin, no --yes: aborted, nothing run" bash -c "[ '$rc' -eq 1 ] && ! grep -q '^pmset -a' '$FAKE_POWER_LOG'"
+  # pmset refused (wrong password): exit 1, warning names the rerun, no marker
+  : >"$FAKE_POWER_LOG"; printf 0 >"$FAKE_SLEEP_STATE"; rm -f "$h/.config/fleet/power_done"
+  N_ENV="FAKE_POWER_FAIL=1"; out=$(n cmd_power_lid on --yes </dev/null 2>&1); rc=$?; N_ENV=""
+  assert "pmset failure: exit 1, warning with the rerun, no marker" bash -c "[ '$rc' -eq 1 ] && printf '%s' '$out' | grep -q 'pmset -a disablesleep 1 failed (wrong password?)' && printf '%s' '$out' | grep -q 'rerun: fleet power lid on' && [ ! -e '$h/.config/fleet/power_done' ]"
+  # the Mac ignores the setting: pmset -a succeeds, pmset -g still says 0: exit 1, says so, no marker
+  : >"$FAKE_POWER_LOG"
+  N_ENV="FAKE_POWER_IGNORE=1"; out=$(n cmd_power_lid on --yes </dev/null 2>&1); rc=$?; N_ENV=""
+  assert "ignored setting: exit 1, names the model ignoring it, no marker" bash -c "[ '$rc' -eq 1 ] && printf '%s' '$out' | grep -q 'still says SleepDisabled 0: this model ignores the setting' && [ ! -e '$h/.config/fleet/power_done' ]"
+  # not a laptop: no battery, desktop model: explain, exit 0, nothing run; a MacBook model without a battery reading still counts
+  : >"$FAKE_POWER_LOG"
+  N_ENV="FAKE_LAPTOP="; out=$(n cmd_power_lid on --yes </dev/null 2>&1); rc=$?; N_ENV=""
+  assert "desktop (no battery, Mac15,3): exit 0, says not a laptop, no pmset -a, no marker" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'not a laptop (no battery, model Mac15,3)' && ! grep -q '^pmset -a' '$FAKE_POWER_LOG' && [ ! -e '$h/.config/fleet/power_done' ]"
+  : >"$FAKE_POWER_LOG"
+  N_ENV="FAKE_LAPTOP= FAKE_HW_MODEL=MacBookPro18,3"; out=$(n cmd_power_lid on --yes </dev/null 2>&1); rc=$?; N_ENV=""
+  assert "no battery but a MacBook model: counts as a laptop, pmset -a disablesleep 1 ran" bash -c "[ '$rc' -eq 0 ] && grep -qx 'pmset -a disablesleep 1' '$FAKE_POWER_LOG'"
+  printf 0 >"$FAKE_SLEEP_STATE"; rm -f "$h/.config/fleet/power_done"
+  # Linux: explain, exit 0, nothing run; status n/a
+  : >"$FAKE_POWER_LOG"
+  N_ENV="FAKE_OS=Linux"; out=$(n cmd_power_lid on --yes </dev/null 2>&1); rc=$?; N_ENV=""
+  assert "Linux: exit 0, explains (systemd sleep targets, logind), nothing run" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'no lid setting on Linux' && printf '%s' '$out' | grep -q 'HandleLidSwitch' && [ ! -s '$FAKE_POWER_LOG' ]"
+  N_ENV="FAKE_OS=Linux"; out=$(n cmd_power_status 2>&1); N_ENV=""
+  assert "Linux power status: lid n/a" bash -c "printf '%s' '$out' | grep -q '^lid     n/a  (no lid setting here: linux)\$'"
+  # a container (the real detection: this test runs in one): explain, exit 0, nothing run
+  : >"$FAKE_POWER_LOG"
+  out=$(env HOME="$h" PATH="$d:$PATH" "$ROOT/fleet" power lid on --yes </dev/null 2>&1); rc=$?
+  assert "container: exit 0, says no power management, nothing run" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q 'a container has no power management' && [ ! -s '$FAKE_POWER_LOG' ]"
+  out=$(env HOME="$h" PATH="$d:$PATH" "$ROOT/fleet" power status 2>&1)
+  assert "container power status: lid n/a" bash -c "printf '%s' '$out' | grep -q '^lid     n/a  (no lid setting here: .*container)\$'"
+  # the master (vault present, no enrol.json) is a Mac too: the command runs there and status reports the real value
+  mkdir -p "$h/.config/fleet/vault/nodes"; mv "$h/.config/fleet/enrol.json" "$h/enrol.json.away"
+  : >"$FAKE_POWER_LOG"; printf 0 >"$FAKE_SLEEP_STATE"
+  out=$(n cmd_power_lid on --yes </dev/null 2>&1); rc=$?
+  assert "on the master: runs, exit 0, pmset -a disablesleep 1, marker" bash -c "[ '$rc' -eq 0 ] && grep -qx 'pmset -a disablesleep 1' '$FAKE_POWER_LOG' && grep -q ' lid\$' '$h/.config/fleet/power_done'"
+  assert "node_awake_lid_state on the master: on (no longer n/a)" [ "$(n node_awake_lid_state)" = on ]
+  rm -rf "$h/.config/fleet/vault"; mv "$h/enrol.json.away" "$h/.config/fleet/enrol.json"; rm -f "$h/.config/fleet/power_done"
+  # a node name only works on the master (master.sh not loaded here)
+  out=$(n cmd_power_lid on mac2 --yes </dev/null 2>&1); rc=$?
+  assert "NODE on a node: exit 1, says master only" bash -c "[ '$rc' -eq 1 ] && printf '%s' '$out' | grep -q 'only works on the master'"
+  # dispatcher: help and bad flags through the real fleet
+  : >"$FAKE_POWER_LOG"
+  for c in "power --help" "power lid --help" "power lid on -h" "power status --help"; do
+    # shellcheck disable=SC2086
+    out=$(PATH="$d:$PATH" fleet_as "$h" $c 2>&1); rc=$?
+    assert "fleet $c: exit 0 with the synopsis" bash -c "[ '$rc' -eq 0 ] && printf '%s' '$out' | grep -q '^fleet power'"
+  done
+  for c in "power lid" "power lid sideways" "power lid on --bogus" "power lid on a b" "power status --bogus" "power status a b" "power frob"; do
+    # shellcheck disable=SC2086
+    out=$(PATH="$d:$PATH" fleet_as "$h" $c 2>&1 </dev/null); rc=$?
+    assert "fleet $c: exit 2 with usage" bash -c "[ '$rc' -eq 2 ] && printf '%s' '$out' | grep -q 'usage:'"
+  done
+  refute "help and rejected invocations ran nothing" [ -s "$FAKE_POWER_LOG" ]
+  unset -f n
+  unset FAKE_POWER_LOG FAKE_SLEEP_STATE FAKE_LAPTOP
+  end
+}
+
 # fleeter's own `fleet` agent skill (skills/fleet): harness_apply installs it
 # into the skill dir of every harness present, records the paths, and a skill
 # of the same name in the config repo replaces it. `fleet skill install` does
@@ -1744,6 +1886,7 @@ case_leave_tree
 case_aws
 case_sshd
 case_join_power
+case_power
 case_chrome_wrapper
 case_base_status
 case_cliproxy_status

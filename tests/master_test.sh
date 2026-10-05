@@ -112,6 +112,11 @@ HOME="$nh" exec bash -c "$cmd"
 EOF
 chmod +x "$T/bin/ssh"
 
+# fake pmset for the whole suite: `fleet list` and `fleet status` read the master's own lid state on a Mac
+# (node_awake_lid_state) and must never touch the real power settings; the power section overrides it with a fuller fake
+# shellcheck disable=SC2016  # the fake expands $* itself
+printf '#!/usr/bin/env bash\ncase "$*" in "-g") echo " SleepDisabled        0" ;; esac\nexit 0\n' >"$T/bin/pmset"; chmod +x "$T/bin/pmset"
+
 # fake aws CLI. FLEET_AWS_BIN points here from the first command on, so the
 # real one (if this machine has it) is never run and the real ~/.aws never read.
 #   $T/aws-expired             export-credentials fails for every profile like an expired SSO session
@@ -326,11 +331,11 @@ vault_snap() { (cd "$FLEET_VAULT" && find . -type f | LC_ALL=C sort | while IFS=
 export -f vault_snap
 snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
 HELP_OK=1; HELP_BAD=""
-for c in setup "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" "proxy login alpha" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" "reboot alpha" "unlock alpha" \
+for c in setup "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" "proxy login alpha" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" "reboot alpha" "unlock alpha" "power lid on" "power lid off alpha" "power status" "power status alpha" \
          "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" "skill add $HOME/x" "skill list" "skill remove x" "schedule install" doctor join apply pull update "memory sync" login status leave daemon \
          "vault status" "vault encrypt" "vault rotate-key" "vault export $T/never.age" \
          "aws push" "aws login" "aws creds dev" "aws receive" \
-         init secrets files proxy t3 config policy memory skill schedule vault aws; do
+         init secrets files proxy t3 config policy memory skill schedule vault aws power; do
   for h in --help -h; do
     # shellcheck disable=SC2086  # $c is meant to split into words
     out=$(printf 'tskey-api-FAKE\n' | PATH="$T/tsbin:$PATH" bash "$FLEET" $c $h 2>&1); rc=$?
@@ -345,6 +350,7 @@ for c in "setup --bogus" "setup extra" "setup --tools" "setup --github-owner" "l
          "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "list --bogus" "list extra" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
          "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" \
          "reboot --bogus alpha" "reboot a b" "unlock --bogus alpha" "unlock --host" "unlock a b" "proxy frob" "proxy import a b" "proxy login --bogus alpha" "proxy login a b c" \
+         "power frob" "power lid" "power lid sideways" "power lid on --bogus" "power lid on a b" "power status --bogus" "power status a b" \
          "sync --bogus" "sync extra" "skill frob" "skill install --bogus" "skill add --bogus x" "skill add a b" "skill add --name" "skill list --bogus" "skill list extra" \
          "skill remove --bogus x" "skill remove a b" "schedule frob" "schedule install extra" \
          "vault frob" "vault status --bogus" "vault status extra" "vault encrypt --bogus" "vault rotate-key extra" "vault export a b" \
@@ -2026,6 +2032,140 @@ EOF
 out=$(rb unlock macnode </dev/null 2>&1); rc=$?
 assert "no lan_ips recorded: exit 1, points at --host / provision / reboot, no ssh" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'no LAN address recorded for macnode' && printf '%s' \"\$0\" | grep -q -- '--host IP' && [ ! -s '$SSH_ARGV' ]" "$out"
 refute "unlock of a revoked / unknown node dies" rb unlock nosuchnode
+
+# ======================================================================
+echo "== power lid: on|off on a node over an interactive session (typed yes here, sudo at the node), on the master itself, Linux/container explained, status, audit, list --json awake_lid"
+write_status "$MAC_PEER$PG_PEER"
+# fakes, used only here (prepended to PATH): pmset keeps SleepDisabled in a state file and logs argv, sudo logs and runs,
+# sysctl answers the model, uname says Darwin for -s (the master is a Mac in this section); ssh records its argv and
+# runs a `fleet power` command as the fake node would: the node-side functions in the node's HOME, not a container
+PW="$T/powerbin"; mkdir -p "$PW"
+export POWER_LOG="$T/power.log" FAKE_SLEEP_STATE="$T/power.state" FAKE_LAPTOP=1
+cat >"$PW/pmset" <<'EOF'
+#!/usr/bin/env bash
+echo "pmset $*" >>"$POWER_LOG"
+case "$*" in
+  "-g") printf 'System-wide power settings:\nCurrently in use:\n standby              1\n SleepDisabled        %s\n sleep                0\n' "$(cat "$FAKE_SLEEP_STATE" 2>/dev/null || echo 0)" ;;
+  "-g batt") if [ -n "${FAKE_LAPTOP:-}" ]; then echo " -InternalBattery-0 (id=1234567)	100%; charged; 0:00 remaining present: true"; else echo "Now drawing from 'AC Power'"; fi ;;
+  "-a disablesleep "*) [ -z "${FAKE_POWER_FAIL:-}" ] || exit 1; printf '%s' "$3" >"$FAKE_SLEEP_STATE" ;;
+esac
+exit 0
+EOF
+# shellcheck disable=SC2016  # the fakes expand FAKE_HW_MODEL and $* themselves
+printf '#!/usr/bin/env bash\necho "${FAKE_HW_MODEL:-Mac15,3}"\n' >"$PW/sysctl"
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\necho "sudo $*" >>"$POWER_LOG"\nexec "$@"\n' >"$PW/sudo"
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\nif [ "${1:-}" = -s ]; then echo Darwin; else /usr/bin/uname "$@"; fi\n' >"$PW/uname"
+cat >"$PW/ssh" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >>"\$SSH_ARGV"
+env >>"\$SSH_ENV"
+case "\$*" in
+  *"fleet power "*)
+    [ -f "\$T/power-old" ] && exit 2          # the node's fleet predates the power command
+    all=\$*; cmd=\${all##*fleet power }
+    while [ \$# -gt 0 ]; do case "\$1" in -i|-o|-p|-L) shift 2 ;; -*) shift ;; *) break ;; esac; done
+    nh="\$NODES/\${1#*@}"
+    [ -d "\$nh" ] || exit 255
+    set -- \$cmd
+    sub=\$1; shift
+    HOME="\$nh" FLEET_HOME="\$nh/.config/fleet" FLEET_VAULT="\$nh/.config/fleet/vault" FLEET_ROOT="$ROOT" exec bash -c '
+      . "\$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "\$FLEET_ROOT/lib/node.sh"; fleet_in_container() { return 1; }; "\$@"' bash "cmd_power_\$sub" "\$@" ;;
+esac
+exec "$T/bin/ssh" "\$@"
+EOF
+chmod +x "$PW"/*
+pw() { PATH="$PW:$PATH" bash "$FLEET" "$@"; }
+# pw_here FUNC ARGS... — the master's own machine as a Mac laptop, not a container (the Debian run is one): the sourced functions
+pw_here() {
+  # shellcheck disable=SC2016  # the inner script expands on its own
+  PATH="$PW:$PATH" FLEET_ROOT="$ROOT" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; for f in "$FLEET_ROOT"/lib/[a-z]*.sh; do [ "$f" = "$FLEET_ROOT/lib/common.sh" ] || . "$f"; done; fleet_in_container() { return 1; }; "$@"' bash "$@"
+}
+MACNH="$NODES/fleet-macnode.tail1.ts.net"
+# a container node that is not revoked (alpha was kicked earlier)
+bash "$FLEET" invite --name boxy >/dev/null 2>&1
+bx_pending=$(grep -l '"name": "boxy"' "$FLEET_VAULT"/nodes/pending/*.json)
+mk_node fleet-boxy.tail1.ts.net "$(jget "$bx_pending" nonce)" linux true
+BX_PEER=',"k15":{"ID":"nBOXYCNTRL","HostName":"fleet-boxy","DNSName":"fleet-boxy.tail1.ts.net.","TailscaleIPs":["100.64.0.52"],"Online":true,"Tags":["tag:fleet-node"]}'
+write_status "$MAC_PEER$PG_PEER$BX_PEER"
+echo '[{"nodeId":"nAAAACNTRL"},{"nodeId":"nMACCNTRL"},{"nodeId":"nPENGUCNTRL"},{"nodeId":"nBOXYCNTRL"}]' >"$DEVICES_JSON"
+bash "$FLEET" reconcile >/dev/null 2>&1
+assert "boxy enrolled as a container" [ "$(jget "$FLEET_VAULT/nodes/nBOXYCNTRL.json" container)" = true ]
+: >"$POWER_LOG"; : >"$SSH_ARGV"; : >"$SSH_ENV"; printf 0 >"$FAKE_SLEEP_STATE"; rm -f "$MACNH/.config/fleet/power_done"
+out=$(pw power lid on macnode --yes </dev/null 2>&1); rc=$?
+assert "power lid on macnode --yes: exit 0, says lid on" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'macnode: lid on'" "$out"
+assert "it ran ~/.local/bin/fleet power lid on --yes over an interactive fleet session (-t, master key, pinned known_hosts, no BatchMode)" bash -c "grep -E -- '^-t .*-i $FLEET_VAULT/ssh/fleet_master .*UserKnownHostsFile=$FLEET_VAULT/ssh/known_hosts .*fleetuser@fleet-macnode.tail1.ts.net ~/.local/bin/fleet power lid on --yes\$' '$SSH_ARGV' | grep -vq BatchMode"
+assert "on the node: exactly pmset -a disablesleep 1 (through sudo unless root), read back with pmset -g" bash -c "[ \"\$(grep -c '^pmset -a' '$POWER_LOG')\" = 1 ] && grep -qx 'pmset -a disablesleep 1' '$POWER_LOG' && grep -qx 'pmset -g' '$POWER_LOG' && { [ \"\$(id -u)\" = 0 ] || grep -qx 'sudo pmset -a disablesleep 1' '$POWER_LOG'; }"
+assert "the node printed the caveats (heat, battery) and the undo, then the read-back" bash -c "printf '%s' \"\$0\" | grep -q 'heat' && printf '%s' \"\$0\" | grep -q 'battery' && printf '%s' \"\$0\" | grep -q 'undo: fleet power lid off' && printf '%s' \"\$0\" | grep -q 'now disabled (pmset -g: SleepDisabled 1)'" "$out"
+assert "the node's power_done records lid" grep -Eq '^[0-9T:-]+Z lid$' "$MACNH/.config/fleet/power_done"
+assert "audit: power.lid macnode on" grep -q ' power.lid macnode on$' "$FLEET_VAULT/audit.log"
+refute "no password in any ssh argv or environment" bash -c "grep -Eiq 'password=|passwd|sshpass' '$SSH_ARGV' '$SSH_ENV'"
+# power status NODE: over the plain (BatchMode) node session, no sudo
+: >"$SSH_ARGV"; : >"$POWER_LOG"
+out=$(pw power status macnode 2>&1); rc=$?
+assert "power status macnode: lid on, laptop yes, marker set by fleet power, undo; ran ~/.local/bin/fleet power status with BatchMode, no -t, no sudo" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q '^lid     on  (pmset -g: SleepDisabled 1)' && printf '%s' \"\$0\" | grep -q '^marker  set by fleet power lid on' && grep -E -- 'BatchMode=yes .*fleetuser@fleet-macnode.tail1.ts.net ~/.local/bin/fleet power status\$' '$SSH_ARGV' | grep -vq -- '^-t ' && ! grep -q sudo '$POWER_LOG'" "$out"
+# off with the typed confirmation here; the node runs with --yes (asked once)
+: >"$SSH_ARGV"; : >"$POWER_LOG"
+out=$(printf 'yes\n' | pw power lid off macnode 2>&1); rc=$?
+assert "typed yes: lid off on macnode, pmset -a disablesleep 0, marker gone, audited off" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'Type yes to continue' && grep -q 'fleet power lid off --yes' '$SSH_ARGV' && grep -qx 'pmset -a disablesleep 0' '$POWER_LOG' && [ ! -e '$MACNH/.config/fleet/power_done' ] && grep -q ' power.lid macnode off$' '$FLEET_VAULT/audit.log'" "$out"
+assert "the confirmation named the node, the command and the password prompt on the node" bash -c "printf '%s' \"\$0\" | grep -q 'Let macnode (nMACCNTRL) sleep with the lid closed again: sudo pmset -a disablesleep 0 on the node'" "$out"
+: >"$SSH_ARGV"; : >"$POWER_LOG"
+out=$(printf 'nope\n' | pw power lid on macnode 2>&1); rc=$?
+assert "wrong word: aborted, no session opened, nothing run on the node; the prompt carried heat/battery/undo" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q aborted && ! grep -q 'fleet power' '$SSH_ARGV' && [ ! -s '$POWER_LOG' ] && printf '%s' \"\$0\" | grep -q 'heat' && printf '%s' \"\$0\" | grep -q 'drains flat' && printf '%s' \"\$0\" | grep -q 'Undo: fleet power lid off macnode'" "$out"
+refute "no stdin, no --yes: aborted" pw power lid on macnode </dev/null
+refute "...and nothing ran on the node" grep -q 'fleet power' "$SSH_ARGV"
+# the node refuses (wrong sudo password): exit 1, audited as fail, names the rerun
+: >"$SSH_ARGV"; : >"$POWER_LOG"
+out=$(FAKE_POWER_FAIL=1 pw power lid on macnode --yes </dev/null 2>&1); rc=$?
+assert "pmset refused on the node: exit 1, names the rerun, audited fail on rc=1" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'fleet power lid on failed on macnode (exit 1' && printf '%s' \"\$0\" | grep -q 'rerun: fleet power lid on macnode' && grep -q ' power.lid macnode fail on rc=1' '$FLEET_VAULT/audit.log'" "$out"
+# the node's fleet is too old for the command (exit 2): points at provision
+touch "$T/power-old"
+out=$(pw power lid on macnode --yes </dev/null 2>&1); rc=$?
+rm -f "$T/power-old"
+assert "a node without the power command: exit 1, points at fleet provision macnode" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'older than 0.6.2' && printf '%s' \"\$0\" | grep -q 'fleet provision macnode'" "$out"
+# Linux and container nodes: explained here, no session; offline Mac: refused
+: >"$SSH_ARGV"
+out=$(pw power lid on pengu --yes </dev/null 2>&1); rc=$?
+assert "Linux node: exit 0, explains (sleep targets masked at join), no ssh" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'pengu runs Linux: no lid setting' && [ ! -s '$SSH_ARGV' ]" "$out"
+out=$(pw power lid on boxy --yes </dev/null 2>&1); rc=$?
+assert "container node: exit 0, explains, no ssh" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'boxy is a container' && [ ! -s '$SSH_ARGV' ]" "$out"
+out=$(pw power status pengu 2>&1); rc=$?
+assert "power status on a Linux node: lid n/a, no ssh" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q '^lid     n/a  (pengu: no lid setting on linux)' && [ ! -s '$SSH_ARGV' ]" "$out"
+cp "$T/status-macoff.json" "$FLEET_TS_STATUS_JSON"
+refute "offline Mac: refused" pw power lid on macnode --yes </dev/null
+refute "...no ssh" [ -s "$SSH_ARGV" ]
+write_status "$MAC_PEER$PG_PEER$BX_PEER"
+refute "a revoked / unknown node dies" pw power lid on nosuchnode --yes </dev/null
+# the master itself (no NODE): the same local path, audited as master; list --json shows the master's awake_lid
+: >"$POWER_LOG"; printf 0 >"$FAKE_SLEEP_STATE"; rm -f "$FLEET_HOME/power_done"
+out=$(pw_here cmd_power_lid on --yes </dev/null 2>&1); rc=$?
+assert "power lid on (this machine, the master): exit 0, pmset -a disablesleep 1, marker in the master's power_done, audit power.lid master on" bash -c "[ $rc = 0 ] && grep -qx 'pmset -a disablesleep 1' '$POWER_LOG' && grep -Eq '^[0-9T:-]+Z lid\$' '$FLEET_HOME/power_done' && grep -q ' power.lid master on\$' '$FLEET_VAULT/audit.log'"
+out=$(pw_here cmd_power_status 2>&1)
+assert "power status (this machine): lid on, marker set by fleet power" bash -c "printf '%s' \"\$0\" | grep -q '^lid     on  (pmset -g: SleepDisabled 1)' && printf '%s' \"\$0\" | grep -q '^marker  set by fleet power lid on'" "$out"
+printf '{"fleet":"0.4.0","name":"macnode","os":"macos","container":false,"tools":{},"memory":{"state":"off"},"timers":{},"awake":"on","awake_lid":"off","lan_ips":["192.168.1.60"],"ethernet":"no","token_age_days":{}}\n' >"$T/status-reply.json"
+out=$(pw_here cmd_list --json 2>/dev/null); rc=$?
+assert "list --json: the master row carries awake_lid on (its own pmset), macnode's row the node's awake_lid off, pengu's (not reached: no reply) null" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | python3 -c '
+import json, sys
+d = {x[\"name\"]: x for x in json.load(sys.stdin)}
+m = [x for x in d.values() if x[\"master\"]][0]
+assert m[\"awake_lid\"] == \"on\", m
+assert d[\"macnode\"][\"awake_lid\"] == \"off\", d[\"macnode\"]
+assert \"awake_lid\" in d[\"pengu\"]'" "$out"
+out=$(bash "$FLEET" list --offline --json 2>/dev/null)
+assert "fleet list --offline --json (the real command on this host): awake_lid on the master row is on | off | n/a, null on the node rows" bash -c "printf '%s' \"\$0\" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d[0][\"master\"] and d[0][\"awake_lid\"] in (\"on\", \"off\", \"n/a\"), d[0]
+assert all(x[\"awake_lid\"] is None for x in d[1:])'" "$out"
+: >"$POWER_LOG"
+out=$(pw_here cmd_power_lid off --yes </dev/null 2>&1); rc=$?
+assert "power lid off (this machine): exit 0, pmset -a disablesleep 0, marker gone, audited off" bash -c "[ $rc = 0 ] && grep -qx 'pmset -a disablesleep 0' '$POWER_LOG' && [ ! -e '$FLEET_HOME/power_done' ] && grep -q ' power.lid master off\$' '$FLEET_VAULT/audit.log'"
+: >"$POWER_LOG"
+out=$(FAKE_LAPTOP='' pw_here cmd_power_lid on --yes </dev/null 2>&1); rc=$?
+assert "this machine is a desktop (no battery, Mac15,3): exit 0, explains, no pmset -a, no audit line" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'not a laptop' && ! grep -q '^pmset -a' '$POWER_LOG' && ! grep -q '^sudo' '$POWER_LOG' && [ \"\$(tail -1 '$FLEET_VAULT/audit.log' | grep -c ' power.lid master on\$')\" = 0 ]" "$out"
+rm -f "$T/status-reply.json" "$FLEET_HOME/power_done" "$FLEET_VAULT/nodes/nBOXYCNTRL.json"; rm -rf "$NODES/fleet-boxy.tail1.ts.net"
+unset FAKE_LAPTOP
 grep -v '^FLEET_REBOOT_WAIT_SECS=\|^FLEET_UNLOCK_WAIT_SECS=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
 write_status ""
 rm -f "$FLEET_VAULT/nodes/nMACCNTRL.json" "$FLEET_VAULT/nodes/nPENGUCNTRL.json" "$T/status-reply.json" "$T/status-macoff.json"
@@ -2295,7 +2435,7 @@ while IFS= read -r seg; do
   # shellcheck disable=SC2086  # the segment is meant to split into words
   set -- $seg; shift
   scmd=$1; shift
-  case "$scmd" in init|secrets|files|proxy|t3|config|policy|memory|skill|schedule|vault) scmd="$scmd $1"; shift ;; esac
+  case "$scmd" in init|secrets|files|proxy|t3|config|policy|memory|skill|schedule|vault|power) scmd="$scmd $1"; shift ;; esac
   # shellcheck disable=SC2086
   out=$(bash "$FLEET" $scmd --help 2>&1); rc=$?
   if [ "$rc" != 0 ] || ! printf '%s' "$out" | grep -q '^fleet '; then SETUP_OK=0; SETUP_BAD="$SETUP_BAD [$scmd -> rc $rc]"; continue; fi

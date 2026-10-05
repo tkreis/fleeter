@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 — 2026-10-05
+
+### Fixed
+
+- `fleet ssh NODE aws …` (and timers, T3's `sh -l`) could not find Homebrew tools such as the AWS CLI on macOS nodes: the node's `env.sh` now puts `/opt/homebrew/bin`, `/usr/local/bin` and Docker Desktop's CLI dir on `PATH` when they exist.
+
 ## 0.6.0 — 2026-10-05
 
 Your AWS SSO login, on every node: fleet pushes only the profiles you list in

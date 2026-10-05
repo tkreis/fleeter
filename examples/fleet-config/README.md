@@ -14,6 +14,10 @@ skills/             skills pushed to every node (captured, or added by hand)
 
 ## Create your own
 
+`fleet setup` on the master does all of this for you (copies this example,
+renders `fleet.conf` from your answers, creates the private repo, pushes). By
+hand:
+
 ```sh
 # 1. a new private repo from this example
 cp -R /path/to/fleeter/examples/fleet-config ~/fleet-config

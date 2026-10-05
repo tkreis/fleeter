@@ -33,7 +33,7 @@
     <h1>Your Macs, Linux boxes and containers, run as one fleet of coding agents.</h1>
     <p class="lede">fleeter is one bash tool. Your laptop is the <b>master</b>: it enrols machines over Tailscale with single-use invites, pushes Claude Code, Codex, Cursor, Grok, a browser with MCP servers, your instructions, skills and secrets over SSH, and can kick any node out. Nodes keep working while the master is off and share one Markdown memory.</p>
     <p class="actions">
-      <a class="btn btn-ghost" href="https://github.com/tkreis/fleeter#quickstart">Read the quickstart</a>
+      <a class="btn btn-ghost" href="https://github.com/tkreis/fleeter#get-started">Get started</a>
       <a class="btn btn-ghost" href="https://github.com/tkreis/fleeter/blob/main/docs/ARCHITECTURE.md">Read the architecture</a>
     </p>
   </div>
@@ -120,7 +120,8 @@
   <div class="install">
     <span class="install-label">Get started on your laptop</span>
     <pre class="term" aria-label="Install fleeter"><span class="p">$</span> curl -fsSL https://tkreis.github.io/fleeter/<wbr>install.sh | bash
-<span class="p">$</span> fleet init master</pre>
+<span class="p">$</span> fleet setup</pre>
+    <p class="note">or tell your agent: <em>Set up fleeter for me by following <a href="https://tkreis.github.io/fleeter/SETUP.md">https://tkreis.github.io/fleeter/SETUP.md</a></em></p>
   </div>
 </section>
 
@@ -356,7 +357,8 @@ dock-a3f  fleet-dock-a3f  yes     <span class="hi">provisioning</span>  ?       
       <thead><tr><th>Command</th><th>What it does</th></tr></thead>
       <tbody>
         <tr class="group"><td colspan="2">On the master</td></tr>
-        <tr><td>fleet init master --config-dir DIR</td><td>Preflight, vault and keys, tailnet policy merge, sync schedule. Idempotent.</td></tr>
+        <tr><td>fleet setup</td><td>Guided first-time setup: a few questions, then config repo, memory repo, init master, Claude token, publish, doctor. Rerun-safe.</td></tr>
+        <tr><td>fleet init master --config-dir DIR</td><td>Preflight, vault and keys, tailnet policy merge, sync schedule. Idempotent (setup's step 5).</td></tr>
         <tr><td>fleet invite --name N [--user U] [--ephemeral]</td><td>Single-use join one-liner and invite code, valid one hour.</td></tr>
         <tr><td>fleet list [--json]</td><td>Every node in one table: online, state, synced, last provision, tools, memory, proxy, version.</td></tr>
         <tr><td>fleet sync</td><td>Pull the master's repos, enrol new machines, push updates to every node. Runs on a schedule.</td></tr>

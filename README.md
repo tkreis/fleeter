@@ -30,7 +30,37 @@ database.
  tag:fleet-node: nodes cannot reach the master or each other
 ```
 
-## Install
+## Get started
+
+Either way this machine becomes the master, with your private config repo on
+GitHub, the fleet rules merged into your tailnet policy and your first secret
+in the vault. About twenty minutes.
+
+**A. Two commands** (macOS or Linux, your normal user, no sudo):
+
+```sh
+curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash
+fleet setup
+```
+
+`fleet setup` asks a handful of questions (GitHub owner, config repo, shared
+memory yes/no, tools preset, proxy, keep-awake; every answer is also a flag and
+`--yes` takes the defaults), then creates the repos, runs `fleet init master`,
+stores your Claude token through a pipe, publishes and runs `fleet doctor`.
+Rerun it any time: finished steps say `skip`.
+
+**B. Let your coding agent do it.** Paste this into Claude Code, Codex or Cursor:
+
+> Set up fleeter for me by following https://tkreis.github.io/fleeter/SETUP.md
+
+[SETUP.md](SETUP.md) tells the agent what to ask you, which flags to pass,
+which prompts only you can answer (it never asks for a secret in the chat) and
+how to add the first machine. The same text ships as the `fleet-setup` agent skill.
+
+Then add machines: `fleet invite --name NAME` for a Mac or Linux box (paste the
+printed line there), `docker/spawn.sh 1` for a container, `fleet list` to watch.
+
+## Install (details)
 
 One line, on macOS or Linux, as your normal user (no sudo):
 
@@ -41,7 +71,7 @@ curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash
 It clones fleeter into `~/.local/share/fleeter` and links `fleet` and
 `fleeter` (same command, two names) into `~/.local/bin`. Nothing else on the
 system changes. If `~/.local/bin` is not on your `PATH`, it prints the line to
-add. Then continue with [Quickstart](#quickstart) (`fleet init master`).
+add. Then `fleet setup` (above), or [Manual setup](#manual-setup-what-fleet-setup-does).
 
 - **Update:** run the same line again. It fast-forwards the checkout; on a
   master, `fleet sync` also does this on its schedule.
@@ -52,8 +82,9 @@ add. Then continue with [Quickstart](#quickstart) (`fleet init master`).
   `FLEETER_DIR` (install dir, default `~/.local/share/fleeter`),
   `FLEETER_BIN` (link dir, default `~/.local/bin`),
   `FLEETER_REPO` (git URL, e.g. your fork),
-  `FLEETER_REF` (branch or tag, default `main`, e.g. `v0.3.2`).
-  Example: `curl -fsSL https://tkreis.github.io/fleeter/install.sh | FLEETER_REF=v0.3.2 bash`
+  `FLEETER_REF` (branch or tag, default `main`, e.g. `vX.Y.Z` for a release),
+  `FLEETER_SETUP=1` (run `fleet setup` right after installing; needs a terminal).
+  Example: `curl -fsSL https://tkreis.github.io/fleeter/install.sh | FLEETER_REF=vX.Y.Z bash`
 - **Requires:** `git`, `python3`, `curl`, `ssh`. It refuses to run as root, does
   not touch a checkout with local changes, and never overwrites a `fleet` that
   is not its own link.
@@ -78,59 +109,9 @@ fleeter is built for exactly one situation:
   `CLAUDE_CODE_OAUTH_TOKEN`, Cursor via `CURSOR_API_KEY`, Codex/Grok via API
   keys or a device-code login per node. GUI app logins are not scripted.
 
-If that matches, the Quickstart below gets you from nothing to one master and
-one Docker node that runs Claude Code in about twenty minutes. If you only want
-to see it move, "Try it without Tailscale or GitHub" needs Docker and nothing else.
-
-## Quickstart
-
-What you need on the master before you start: the Tailscale client logged in
-to your tailnet, `git` with `user.name`/`user.email` set, the GitHub CLI
-(`gh auth login`) or a fine-grained token with *Administration: read/write* on
-your repos, Claude Code installed (for `claude setup-token`), Docker (for the
-container node). `fleet init master` checks the first three before it writes
-anything and tells you what is missing.
-
-```sh
-# 1. install (clones into ~/.local/share/fleeter, links ~/.local/bin/fleet and fleeter; no sudo; rerun to update)
-curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash
-export PATH="$HOME/.local/bin:$PATH"          # for this shell; put the same line in ~/.zshrc or ~/.bashrc
-#   (fork first if you want nodes to pull your own copy: FLEETER_REPO=<your fork> before bash)
-
-# 2. your private config repo, started from the example
-cp -R ~/.local/share/fleeter/examples/fleet-config ~/fleet-config && cd ~/fleet-config
-$EDITOR fleet.conf          # replace YOU in the repo URLs; FLEET_MEMORY_REPO="" skips shared memory for now
-git -c init.defaultBranch=main init && git add -A && git commit -m "start fleet config"
-gh repo create YOU/fleet-config --private --source . --push
-
-# 3. the master
-fleet init master --config-dir ~/fleet-config
-#   checks Tailscale login, git identity, GitHub access; then asks for one short-lived
-#   Tailscale API access token (opens the keys page; revoked at the end), the typed word
-#   `apply` to merge the fleet rules into your tailnet policy, and one `gh auth login --web`
-#   approval if gh is not logged in. Installs the reconcile (2 min) and sync (30 min) timers,
-#   the `fleeter` command alias and the `fleet` agent skill for your coding agents. The vault
-#   is encrypted with age from the start (installed if missing); its key goes into the login
-#   keychain (macOS) / secret-tool (Linux), see "Encrypt, inspect and back up the vault".
-claude setup-token                                      # prints a 1-year token
-fleet secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal
-fleet config publish --no-capture                       # push the example config as it is (see "Push new skills")
-fleet doctor
-
-# 4. one Docker node
-cd ~/.local/share/fleeter && docker build -f docker/Dockerfile -t fleet-node:local .
-docker/spawn.sh 1                                       # mints an invite, starts fleet-dock-<rand>
-fleet reconcile                                         # or wait for the timer; first provision takes a few minutes
-fleet list                                              # STATE provisioned, SYNCED yes when done
-
-# 5. the first agent command on the node
-fleet ssh fleet-dock-ab12cd claude -p 'say hello and tell me which machine you are on'
-fleet ssh fleet-dock-ab12cd                             # or a shell, with the node's fleet environment loaded
-```
-
-A Mac or Linux box joins the same way with `fleet invite --name studio` and the
-one-liner it prints (see "Use cases"). `fleet kick fleet-dock-ab12cd` revokes
-the node again.
+If that matches, `fleet setup` gets you from nothing to one master and one
+Docker node that runs Claude Code in about twenty minutes. If you only want to
+see it move, "Try it without Tailscale or GitHub" needs Docker and nothing else.
 
 ## Try it without Tailscale or GitHub
 
@@ -214,11 +195,61 @@ you want one, from `templates/memory/` (the master seeds a missing scaffold
 itself). With `FLEET_MEMORY_REPO=""` nothing memory-related exists: no deploy
 key, no clone, no timer, `fleet status` says `memory off`.
 
+## Manual setup (what fleet setup does)
+
+`fleet setup` runs exactly these steps for you; this is the same path by hand,
+for when you want to see or change each piece. What you need on the master
+before you start: the Tailscale client logged in to your tailnet, `git` with
+`user.name`/`user.email` set, the GitHub CLI (`gh auth login`) or a fine-grained
+token with *Administration: read/write* on your repos, Claude Code installed
+(for `claude setup-token`), Docker (for the container node). `fleet init master`
+checks the first three before it writes anything and tells you what is missing.
+
+```sh
+# 1. install (clones into ~/.local/share/fleeter, links ~/.local/bin/fleet and fleeter; no sudo; rerun to update)
+curl -fsSL https://tkreis.github.io/fleeter/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"          # for this shell; put the same line in ~/.zshrc or ~/.bashrc
+#   (fork first if you want nodes to pull your own copy: FLEETER_REPO=<your fork> before bash)
+
+# 2. your private config repo, started from the example
+cp -R ~/.local/share/fleeter/examples/fleet-config ~/fleet-config && cd ~/fleet-config
+$EDITOR fleet.conf          # replace YOU in the repo URLs; FLEET_MEMORY_REPO="" skips shared memory for now
+git -c init.defaultBranch=main init && git add -A && git commit -m "start fleet config"
+gh repo create YOU/fleet-config --private --source . --push
+
+# 3. the master
+fleet init master --config-dir ~/fleet-config
+#   checks Tailscale login, git identity, GitHub access; then asks for one short-lived
+#   Tailscale API access token (opens the keys page; revoked at the end), the typed word
+#   `apply` to merge the fleet rules into your tailnet policy, and one `gh auth login --web`
+#   approval if gh is not logged in. Installs the reconcile (2 min) and sync (30 min) timers,
+#   the `fleeter` command alias and the `fleet` agent skill for your coding agents. The vault
+#   is encrypted with age from the start (installed if missing); its key goes into the login
+#   keychain (macOS) / secret-tool (Linux), see "Encrypt, inspect and back up the vault".
+claude setup-token | fleet secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal   # the 1-year token goes straight into the vault
+fleet config publish                                    # capture this machine's harness config into the repo and push (--no-capture: the example as it is)
+fleet doctor
+
+# 4. one Docker node
+cd ~/.local/share/fleeter && docker build -f docker/Dockerfile -t fleet-node:local .
+docker/spawn.sh 1                                       # mints an invite, starts fleet-dock-<rand>
+fleet reconcile                                         # or wait for the timer; first provision takes a few minutes
+fleet list                                              # STATE provisioned, SYNCED yes when done
+
+# 5. the first agent command on the node
+fleet ssh fleet-dock-ab12cd claude -p 'say hello and tell me which machine you are on'
+fleet ssh fleet-dock-ab12cd                             # or a shell, with the node's fleet environment loaded
+```
+
+A Mac or Linux box joins the same way with `fleet invite --name studio` and the
+one-liner it prints (see "Use cases"). `fleet kick fleet-dock-ab12cd` revokes
+the node again.
+
 ## Use cases
 
 ### Set up the master
 
-The Quickstart covers it. Details worth knowing: `fleet init master` is
+`fleet setup` (see "Get started") or the manual steps above. Details worth knowing: `fleet init master` is
 idempotent and `--reconfigure` redoes the Tailscale and GitHub steps; the config
 dir is recorded in `~/.config/fleet/fleet.conf` and a missing one is cloned from
 `FLEET_CONFIG_REPO` after a confirmation; the policy step merges the fleet rules
@@ -410,8 +441,8 @@ fleet list --offline        # registry + tailnet only, no SSH (fast; works with 
 
 ```
 NAME    HOST          ONLINE  STATE        SYNCED  LAST PROVISION  TOOLS                   MEMORY   PROXY  FLEET
-mac     Mac           yes     master       -       -               -                       ok (3m)  -      0.3.2
-mac2    fleet-mac2    yes     provisioned  yes     3h              9 ok, 1 login: cursor   ok       ok     0.3.0
+mac     Mac           yes     master       -       -               -                       ok (3m)  -      0.5.0
+mac2    fleet-mac2    yes     provisioned  yes     3h              9 ok, 1 login: cursor   ok       ok     0.5.0
 build   fleet-build   yes     provisioned  behind  2d              unreachable             -       -      -
 dock-7  fleet-dock-7  no      provisioned  ?       -               -                       -       -      -
 fleet-x fleet-x       yes     unknown      -       -               -                       -       -      -
@@ -441,7 +472,10 @@ columns. `fleet init master` installs it into `~/.claude/skills/fleet`,
 `~/.agents/skills/fleet` (Codex) and `~/.cursor/skills/fleet` for every harness
 present on the master or listed in `FLEET_TOOLS`; `fleet skill install` repeats
 that any time; `fleet apply` does the same on every node (a `skills/fleet/`
-directory in your config repo replaces it). Then, in any agent:
+directory in your config repo replaces it; `fleet config publish` and `fleet
+sync` never capture the bundled one). A second skill, [`fleet-setup`](skills/fleet-setup/SKILL.md),
+is the first-time setup for an agent that is not on a fleet machine yet (the
+same text as [SETUP.md](SETUP.md)). Then, in any agent:
 
 ```
 > which of my machines are behind, and why?
@@ -830,6 +864,7 @@ and kick).
 
 | Command | Flags | What it does |
 |---|---|---|
+| `fleet setup` | `--yes`, `--github-owner OWNER`, `--config-repo NAME`, `--config-dir DIR`, `--memory`/`--no-memory`, `--memory-repo NAME`, `--tools minimal\|agents\|full\|"LIST"`, `--proxy`/`--no-proxy`, `--keep-awake`/`--no-keep-awake`, `--claude-token`/`--no-claude-token` | The guided first-time setup, nine `[n/9]` steps: preflight (+ `gh auth login --web`), GitHub owner (`gh api user`), config repo (clone `OWNER/NAME` if it exists, else copy `examples/fleet-config`, render `fleet.conf` from the answers, commit, `gh repo create --private --source DIR --push`), memory repo (`gh repo create --private`, empty), `fleet init master --config-dir DIR`, Claude login (`claude setup-token \| … \| fleet secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal`, then more secrets at hidden prompts), `fleet proxy import` when chosen, `fleet config publish --yes` + `fleet doctor`, the next commands. Every question shows its default in brackets; `--yes` takes them and confirms the repo creations. Idempotent: finished steps print `skip`; a rerun takes its defaults from the recorded config repo. Refuses on a node. |
 | `fleet init master` | `--config-dir DIR`, `--reconfigure` | Preflight (commands, Tailscale logged in, git identity, how GitHub is reached), then: records the config dir in `~/.config/fleet/fleet.conf` (offers to clone `FLEET_CONFIG_REPO` into it when missing), creates the vault, its age key in the key backend + `vault/recipient.txt` (installs `age` when missing), the master SSH key (and the T3 client key with `FLEET_T3_REMOTE=1`); Tailscale: bootstrap token → policy check/merge-apply → scoped OAuth client (token revoked; init stops if the policy step is skipped); GitHub: `gh auth login --web` or token; installs the reconcile and sync timers, the `~/.local/bin/fleeter` alias and the `fleet` agent skill. `--reconfigure` redoes the Tailscale/GitHub steps. Idempotent. |
 | `fleet secrets set NAME` | `--profile minimal\|full` (default full) | Stores one secret from a hidden prompt or stdin into `vault/secrets/<profile>.env.age` (the current file is decrypted into memory, updated, re-encrypted; needs the vault key). |
 | `fleet secrets list` | | Names and profiles only (decrypts into memory; needs the vault key). |
@@ -1099,7 +1134,7 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
 
 ## Troubleshooting
 
-- **`fleet init master` says Tailscale is not logged in** — `tailscale status`
+- **`fleet setup` / `fleet init master` says Tailscale is not logged in** — `tailscale status`
   must list your tailnet (macOS: the Tailscale app; Linux: `sudo tailscale up`).
   **…git has no identity** — `git config --global user.name …` / `user.email …`.
 - **`fleet list` shows a node as `behind`** — the node's applied code/config

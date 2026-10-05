@@ -32,12 +32,13 @@ Master:
   secrets set NAME [--profile P]    store a secret (hidden prompt or stdin); P = minimal|full
   secrets list                      names and profiles only
   files add PATH [--profile P]      mirror a file under $HOME (e.g. a .env) to nodes
-  proxy import [DIR]                copy CLIProxyAPI config + logins into the vault (default ~/cli-proxy-api)
+  proxy import [DIR]                copy the CLIProxyAPI config.yaml (client key, routing) into the vault (default ~/cli-proxy-api)
+  proxy login NODE [PROVIDER] [--yes]   log NODE's proxy into claude|codex|codex-device|antigravity: OAuth in your browser through an ssh tunnel
   invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]   print a one-line join command
   list [--json] [--offline]         fleet overview: online, state, synced, tools, memory, proxy per node (start here)
   nodes [--live]                    compact registry table (--live: ask each node for its tool states)
   ssh NODE [COMMAND...]             shell on NODE, or run COMMAND there (e.g. fleet ssh mac2 fleet status)
-  provision NODE [--refresh-proxy-auth]   push secrets + files (+ code/config once), run apply on NODE
+  provision NODE [--refresh-proxy-auth]   push secrets + files (+ code/config once), run apply on NODE (the flag needs FLEET_PROXY_SHARE_AUTH=1)
   reconcile                         enrol new nodes, provision every online node that is behind
   sync                              fast-forward the code + config checkouts, reconcile, push tool updates (timer)
   schedule install                  (re)install the reconcile and sync timers on this master
@@ -83,7 +84,9 @@ usage_for() {
     "secrets set")      echo "fleet secrets set NAME [--profile minimal|full]" ;;
     "secrets list")     echo "fleet secrets list" ;;
     files|"files add")  echo "fleet files add PATH [--profile minimal|full]" ;;
-    proxy|"proxy import") echo "fleet proxy import [DIR]" ;;
+    proxy)              echo "fleet proxy import [DIR] | fleet proxy login NODE [claude|codex|codex-device|antigravity] [--yes]" ;;
+    "proxy import")     echo "fleet proxy import [DIR]" ;;
+    "proxy login")      echo "fleet proxy login NODE [claude|codex|codex-device|antigravity] [--yes]" ;;
     invite)             echo "fleet invite [--ephemeral] [--profile P] [--name N] [--user U] [--code-only]" ;;
     list)               echo "fleet list [--json] [--offline]" ;;
     nodes)              echo "fleet nodes [--live]" ;;
@@ -198,7 +201,7 @@ case "$cmd" in
       init)    subcommand init "master" "$sub" ;;
       secrets) subcommand secrets "set list" "$sub" ;;
       files)   subcommand files "add" "$sub" ;;
-      proxy)   subcommand proxy "import" "$sub" ;;
+      proxy)   subcommand proxy "import login" "$sub" ;;
       t3)      subcommand t3 "setup status revoke" "$sub" ;;
       config)  subcommand config "publish" "$sub" ;;
       policy)  subcommand policy "check apply" "$sub" ;;
@@ -224,6 +227,7 @@ case "$cmd" in
   "secrets list")    arg_check "$cmd" 0 "" "$@"; cmd_secrets_list "$@" ;;
   "files add")       arg_check "$cmd" 1 "--profile:" "$@"; cmd_files_add "$@" ;;
   "proxy import")    arg_check "$cmd" 1 "" "$@"; cmd_proxy_import "$@" ;;
+  "proxy login")     arg_check "$cmd" 2 "--yes -y" "$@"; cmd_proxy_login "$@" ;;
   invite)            arg_check "$cmd" 0 "--ephemeral --profile: --name: --user: --code-only" "$@"; cmd_invite "$@" ;;
   ssh)               cmd_ssh "$@" ;;
   list)              arg_check "$cmd" 0 "--json --offline" "$@"; cmd_list "$@" ;;

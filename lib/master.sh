@@ -354,6 +354,148 @@ cmd_proxy_import() {
   audit "proxy.import" "-" "ok $n"
 }
 
+# proxy_login_spec PROVIDER — "<CLIProxyAPI flag> <callback port>" for a login
+# run; no port = device flow (nothing to tunnel).
+proxy_login_spec() {
+  case "$1" in
+    claude)       echo "-claude-login 54545" ;;
+    codex)        echo "-codex-login 1455" ;;
+    codex-device) echo "-codex-device-login" ;;
+    antigravity)  echo "-antigravity-login 51121" ;;
+    *) return 1 ;;
+  esac
+}
+
+# proxy_node_dir — FLEET_CLIPROXY_DIR as the node's shell should see it: the
+# master's $HOME prefix becomes a literal $HOME (the remote script expands it).
+proxy_node_dir() {
+  local d=${FLEET_CLIPROXY_DIR:-$HOME/cli-proxy-api}
+  # shellcheck disable=SC2016  # a literal $HOME for the node's shell
+  case "$d" in "$HOME"/*) printf '$HOME/%s\n' "${d#"$HOME"/}" ;; *) printf '%s\n' "$d" ;; esac
+}
+
+# fleet proxy login NODE [claude|codex|codex-device|antigravity] [--yes] — log
+# the node's CLIProxyAPI into one upstream account with its own OAuth refresh
+# token (copies of the master's die as soon as either side refreshes). Runs
+# the vendor's login container on the node with -no-browser; the URL it prints
+# is opened in the browser on the master, and the callback to
+# localhost:<port> reaches the container on the node through an ssh tunnel
+# (-L). The node's current auth files are backed up first; afterwards the
+# proxy container is recreated and /v1/models is checked with the node's
+# client key (read on the node, never printed). Nothing here sees a token.
+cmd_proxy_login() {
+  local yes=0 q="" prov="" id name user host spec flag port dir img container pub remote rc=0 code ans backup
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y) yes=1 ;;
+      -*) die "unknown flag: $1" ;;
+      *) if [ -z "$q" ]; then q=$1; else prov=$1; fi ;;
+    esac
+    shift
+  done
+  [ -n "$q" ] || die "usage: fleet proxy login NODE [claude|codex|codex-device|antigravity] [--yes]"
+  prov=${prov:-claude}
+  spec=$(proxy_login_spec "$prov") || die "unknown provider: $prov" "one of: claude codex codex-device antigravity"
+  flag=${spec%% *}; port=${spec#* }; [ "$port" != "$spec" ] || port=""
+  vault_require
+  id=$(registry_find "$q"); name=$(registry_get "$id" name)
+  node_revoked "$id" && die "node $name is revoked"
+  [ "$(registry_get "$id" container)" != true ] || die "$name is a container: containers never run CLIProxyAPI (FLEET_PROXY_MODE=remote)"
+  user=$(registry_get "$id" user); host=$(registry_get "$id" dnsname)
+  [ -n "$user" ] && [ -n "$host" ] || die "registry entry for $name has no user/host" "fleet reconcile"
+  if [ -n "$port" ] && have nc && nc -z localhost "$port" >/dev/null 2>&1; then
+    die "port $port is already in use on this machine; the $prov OAuth callback needs it free" \
+      "stop whatever listens on $port (another fleet proxy login? a login on this machine's own proxy?) and rerun"
+  fi
+  dir=$(proxy_node_dir); img=${FLEET_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}; container=${FLEET_PROXY_CONTAINER:-cli-proxy-api}
+  log "$prov login for the CLIProxyAPI on $name ($dir, image $img)"
+  if [ -n "$port" ]; then
+    printf 'A login container starts on %s and prints an OAuth URL. Open that URL in the browser on THIS machine\n(copy it from the terminal; it cannot be opened for you): sign in to the account %s should use. The callback to\nhttp://localhost:%s reaches the container on the node through the ssh tunnel this command opens.\n' "$name" "$name" "$port" >&2
+  else
+    printf 'A login container starts on %s and prints a URL and a device code. Open the URL in the browser on this machine\nand enter the code; no tunnel is needed.\n' "$name" >&2
+  fi
+  printf 'The auth files already on %s are backed up into %s/.auth-backup/<UTC>/ first; afterwards the proxy container is\nrecreated and /v1/models is checked with the node'"'"'s client key.\n' "$name" "$dir" >&2
+  if [ "$yes" != 1 ]; then
+    printf 'Proceed? [y/N] ' >&2
+    IFS= read -r ans || ans=""
+    case "$ans" in y|Y|yes) ;; *) die "aborted" "rerun with --yes to skip the question" ;; esac
+  fi
+  # 1. back up the auth files the node has (live tokens: 0700/0600)
+  backup=$({ printf 'd="%s"\n' "$dir"; printf '%s\n' "$PROXY_BACKUP_SCRIPT"; } | node_ssh "$id" 'bash -s') \
+    || die "cannot reach $name or prepare $dir there" "fleet ssh $name true"
+  [ -z "$backup" ] || log "$name: existing auth files backed up into $dir/.auth-backup/$backup/"
+  # 2. the login itself, on the node's TTY, with the callback port tunnelled
+  pub=""; [ -z "$port" ] || pub="-p 127.0.0.1:$port:$port "
+  #    (a non-login ssh session has a bare PATH: docker lives in ~/.local/bin, /usr/local/bin, ~/.docker/bin or Docker.app)
+  # shellcheck disable=SC2016  # $HOME, $PATH and $PWD are expanded by the node's shell
+  remote=$(printf 'PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$HOME/.docker/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH"; export PATH; cd "%s" && docker run --rm -it %s-v "$PWD/conf:/config" -v "$PWD/auth:/root/.cli-proxy-api" -v "$PWD/plugins:/CLIProxyAPI/plugins" %s ./CLIProxyAPI -config /config/config.yaml %s -no-browser' "$dir" "$pub" "$img" "$flag")
+  ssh_tty_fwd_to "$user" "$host" "$port" "$remote" || rc=$?
+  if [ "$rc" != 0 ]; then
+    audit proxy.login "$name" "fail $prov rc=$rc"
+    die "the $prov login on $name did not complete (exit $rc)" "the auth files from before are untouched${backup:+ (backup $dir/.auth-backup/$backup/)}; rerun: fleet proxy login $name $prov"
+  fi
+  # 3. recreate the proxy so it loads the new login, then check /v1/models with
+  #    the node's own client key (read there from conf/config.yaml; stays there)
+  code=$({ printf 'd="%s"\nc="%s"\nn="%s"\n' "$dir" "$container" "${FLEET_PROXY_LOGIN_WAIT_SECS:-30}"; printf '%s\n' "$PROXY_VERIFY_SCRIPT"; } \
+    | node_ssh "$id" 'bash -s' 2>/dev/null) || code=""
+  case "$code" in
+    200)
+      audit proxy.login "$name" "ok $prov"
+      ok "$name: $prov login stored, proxy recreated, /v1/models answers 200 with the node's client key" ;;
+    restart-failed)
+      audit proxy.login "$name" "ok $prov restart-failed"
+      die "$name: $prov login stored, but the proxy container could not be recreated" "on the node: docker compose -f $dir/compose.yaml up -d --force-recreate" ;;
+    no-fleet)
+      audit proxy.login "$name" "ok $prov unverified"
+      die "$name: $prov login stored, but the node has no fleet code (~/.local/share/fleet) to recreate and check the proxy with" "fleet provision $name, then fleet ssh $name fleet status" ;;
+    no-key)
+      audit proxy.login "$name" "ok $prov unverified"
+      die "$name: $prov login stored and the proxy recreated, but conf/config.yaml on the node has no client key to check it with" "fleet proxy import on the master, then fleet provision $name" ;;
+    *)
+      audit proxy.login "$name" "ok $prov verify=${code:-none}"
+      die "$name: $prov login stored and the proxy recreated, but /v1/models answers ${code:-nothing} instead of 200" "fleet ssh $name fleet status; docker logs $container on the node" ;;
+  esac
+}
+
+# The node side of fleet proxy login, run with `bash -s` (the script on stdin,
+# so no quoting crosses the ssh boundary); the caller prepends d= (the proxy
+# dir), c= (the container name) and n= (seconds to wait for the proxy).
+# Step 1: copy the live auth files aside before the login overwrites them.
+# shellcheck disable=SC2016  # expanded by the node's shell, not ours
+PROXY_BACKUP_SCRIPT=$(cat <<'EOF'
+umask 077
+mkdir -p "$d/conf" "$d/auth" "$d/plugins" || exit 1
+if ls "$d"/auth/*.json >/dev/null 2>&1; then
+  s=$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$d/.auth-backup/$s" && cp -p "$d"/auth/*.json "$d/.auth-backup/$s/" && echo "$s"
+fi
+EOF
+)
+# Step 3: with the node's fleet code loaded (its config, and fleet_path_setup
+# so docker is found from a bare ssh PATH), recreate the proxy container, then
+# ask /v1/models with the client key from conf/config.yaml
+# (cliproxy_client_key); the key goes to curl on stdin (-K -), never into
+# argv. Prints the HTTP status or no-fleet | restart-failed | no-key.
+# shellcheck disable=SC2016
+PROXY_VERIFY_SCRIPT=$(cat <<'EOF'
+r="$HOME/.local/share/fleet"
+[ -f "$r/lib/tools/cliproxy.sh" ] || { echo no-fleet; exit 0; }
+export FLEET_ROOT="$r"
+. "$r/lib/common.sh"; fleet_load_config; . "$r/lib/tools/cliproxy.sh"
+chmod 0600 "$d"/auth/*.json 2>/dev/null
+if ! (cd "$d" && docker compose up -d --force-recreate >/dev/null 2>&1) && ! docker restart "$c" >/dev/null 2>&1; then echo restart-failed; exit 0; fi
+k=$(cliproxy_client_key) || { echo no-key; exit 0; }
+u=${FLEET_PROXY_URL:-http://127.0.0.1:8317}
+i=0; code=000
+while [ "$i" -lt "$n" ]; do
+  code=$(printf 'header = "Authorization: Bearer %s"\n' "$k" | curl -s -m 5 -K - -o /dev/null -w '%{http_code}' "$u/v1/models" 2>/dev/null) || code=000
+  [ "$code" = 200 ] && break
+  sleep 1; i=$((i + 1))
+done
+echo "$code"
+EOF
+)
+
 # ---------- registry ----------
 
 registry_path() { echo "$FLEET_VAULT/nodes/$1.json"; }
@@ -2272,6 +2414,18 @@ cmd_kick() {
 ssh_tty_to() {
   local user=$1 host=$2; shift 2
   ssh -t -i "$(master_key)" -o "StrictHostKeyChecking=$(ssh_strict_mode "$host")" \
+      -o "UserKnownHostsFile=$(known_hosts_file)" -o HashKnownHosts=no -o HostKeyAlgorithms=ssh-ed25519 \
+      -o ConnectTimeout=10 -o "ServerAliveInterval=${FLEET_SSH_ALIVE_SECS:-15}" -o ServerAliveCountMax=4 -o LogLevel=ERROR "$user@$host" "$@"
+}
+
+# ssh_tty_fwd_to USER HOST PORT CMD — ssh_tty_to with a local port forward
+# (-L PORT:127.0.0.1:PORT), so a browser on the master reaches what the remote
+# command listens for on the node (an OAuth callback). The session refuses to
+# start when the port cannot be bound here. PORT empty: plain ssh_tty_to.
+ssh_tty_fwd_to() {
+  local user=$1 host=$2 port=$3; shift 3
+  [ -n "$port" ] || { ssh_tty_to "$user" "$host" "$@"; return; }
+  ssh -t -L "$port:127.0.0.1:$port" -o ExitOnForwardFailure=yes -i "$(master_key)" -o "StrictHostKeyChecking=$(ssh_strict_mode "$host")" \
       -o "UserKnownHostsFile=$(known_hosts_file)" -o HashKnownHosts=no -o HostKeyAlgorithms=ssh-ed25519 \
       -o ConnectTimeout=10 -o "ServerAliveInterval=${FLEET_SSH_ALIVE_SECS:-15}" -o ServerAliveCountMax=4 -o LogLevel=ERROR "$user@$host" "$@"
 }

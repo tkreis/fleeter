@@ -81,7 +81,7 @@ FLEET="$ROOT/fleet"            # invoked via bash: the checkout may not be chmod
 cat >"$T/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 while [ $# -gt 0 ]; do
-  case "$1" in -i|-o|-p) shift 2 ;; -*) shift ;; *) break ;; esac
+  case "$1" in -i|-o|-p|-L) shift 2 ;; -*) shift ;; *) break ;; esac
 done
 target=$1; shift
 host=${target#*@}
@@ -284,7 +284,7 @@ vault_snap() { (cd "$FLEET_VAULT" && find . -type f | LC_ALL=C sort | while IFS=
 export -f vault_snap
 snap0=$(vault_snap); api0=$(grep -c '' "$API_LOG")
 HELP_OK=1; HELP_BAD=""
-for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" "reboot alpha" "unlock alpha" \
+for c in "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" "proxy login alpha" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" "reboot alpha" "unlock alpha" \
          "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" "skill add $HOME/x" "skill list" "skill remove x" "schedule install" doctor join apply pull update "memory sync" login status leave daemon \
          "vault status" "vault encrypt" "vault rotate-key" "vault export $T/never.age" \
          init secrets files proxy t3 config policy memory skill schedule vault; do
@@ -301,7 +301,7 @@ BAD_OK=1; BAD_BAD=""
 for c in "leave --bogus" "leave extra" "update --bogus" "daemon --bogus" "reconcile --bogus" "reconcile extra" "doctor --bogus" "status --bogus" \
          "memory sync --bogus" "memory sync extra" "secrets list --bogus" "nodes --bogus" "list --bogus" "list extra" "pull --bogus" "join --bogus" "policy check --bogus" "policy apply extra" \
          "t3 status --bogus" "t3 frobnicate" "config publish --bogus" "config frob" "init" "init bogus" "apply --from-master" "invite --nope" "kick --bogus alpha" \
-         "reboot --bogus alpha" "reboot a b" "unlock --bogus alpha" "unlock --host" "unlock a b" \
+         "reboot --bogus alpha" "reboot a b" "unlock --bogus alpha" "unlock --host" "unlock a b" "proxy frob" "proxy import a b" "proxy login --bogus alpha" "proxy login a b c" \
          "sync --bogus" "sync extra" "skill frob" "skill install --bogus" "skill add --bogus x" "skill add a b" "skill add --name" "skill list --bogus" "skill list extra" \
          "skill remove --bogus x" "skill remove a b" "schedule frob" "schedule install extra" \
          "vault frob" "vault status --bogus" "vault status extra" "vault encrypt --bogus" "vault rotate-key extra" "vault export a b" nosuch; do
@@ -1830,6 +1830,100 @@ bash "$FLEET" provision proxynode >/dev/null 2>&1
 assert "knob 0 again: a later provision ships config.yaml only, even though the auth file is still in the vault" bash -c "[ -f '$PXNH/.cli-proxy-api/config.yaml' ] && [ ! -e '$PXNH/.cli-proxy-api/auth' ] && [ -f '$PXV/auth/claude-user.json.age' ]"
 assert "vault export still carries the stored auth file (only provision leaves it out)" bash -c "printf '%s\n' \"\$0\" | grep -qx 'files/full/.cli-proxy-api/auth/claude-user.json'" "$(export_list)"
 
+# ======================================================================
+echo "== proxy login: ssh -t with the callback port tunnelled, the login container on the node, backup, restart + check; no token anywhere"
+# fakes, used only here. Master side (prepended to PATH): ssh records its full argv, then defers to the
+# usual fake; nc -z succeeds with $T/port-busy. Node side, in the fake node's ~/.local/bin (what fleet puts
+# first on a node's PATH, so a real docker on this machine never wins): docker logs argv (run fails with
+# $T/login-fail); curl logs argv and stdin and answers 200 (401 with $T/proxy-verify-fail).
+PL="$T/proxyloginbin"; PXNB="$PXNH/.local/bin"; mkdir -p "$PL" "$PXNB"
+export PL_DOCKER_LOG="$T/pl-docker.log" PL_CURL_LOG="$T/pl-curl.log" PL_CURL_STDIN="$T/pl-curl-stdin.log"
+SSH_ARGV=${SSH_ARGV:-$T/ssh-argv.log}; export SSH_ARGV
+cat >"$PL/ssh" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >>"\$SSH_ARGV"
+exec "$T/bin/ssh" "\$@"
+EOF
+cat >"$PXNB/docker" <<'EOF'
+#!/usr/bin/env bash
+echo "docker $*" >>"$PL_DOCKER_LOG"
+case "$1" in run) [ -f "$T/login-fail" ] && exit 1 ;; esac
+exit 0
+EOF
+cat >"$PXNB/curl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *"/v1/models"*) ;; *) exit 7 ;; esac
+echo "curl $*" >>"$PL_CURL_LOG"
+cat >>"$PL_CURL_STDIN"
+if [ -f "$T/proxy-verify-fail" ]; then printf 401; else printf 200; fi
+EOF
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\n[ -f "$T/port-busy" ] && exit 0\nexit 1\n' >"$PL/nc"
+chmod +x "$PL"/* "$PXNB"/*
+pl() { PATH="$PL:$PATH" FLEET_PROXY_LOGIN_WAIT_SECS=2 bash "$FLEET" "$@"; }
+pl_reset() { : >"$SSH_ARGV"; : >"$PL_DOCKER_LOG"; : >"$PL_CURL_LOG"; : >"$PL_CURL_STDIN"; : >"$SSH_LOG"; }
+# the node's compose tree as apply would have adopted it: a client key and one old login
+PXD="$PXNH/cli-proxy-api"; mkdir -p "$PXD/conf" "$PXD/auth"
+printf 'api-keys:\n  - "sk-client-FAKE"\n' >"$PXD/conf/config.yaml"
+printf '{"refresh_token":"rt-OLD-FAKE"}\n' >"$PXD/auth/claude-old.json"
+pl_reset
+out=$(pl proxy login proxynode --yes </dev/null 2>&1); rc=$?
+assert "proxy login NODE --yes (claude): exit 0, reports the 200 check" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'claude login stored, proxy recreated, /v1/models answers 200'" "$out"
+assert "it told the user to open the printed URL in the browser on this machine and that the callback is tunnelled" bash -c "printf '%s' \"\$0\" | grep -q 'Open that URL in the browser on THIS machine' && printf '%s' \"\$0\" | grep -q 'http://localhost:54545' && printf '%s' \"\$0\" | grep -q 'through the ssh tunnel'" "$out"
+assert "the login ran over ssh -t with -L 54545:127.0.0.1:54545, ExitOnForwardFailure, master key, pinned known_hosts, no BatchMode" bash -c "grep -E -- '^-t -L 54545:127.0.0.1:54545 -o ExitOnForwardFailure=yes -i $FLEET_VAULT/ssh/fleet_master .*StrictHostKeyChecking=yes .*UserKnownHostsFile=$FLEET_VAULT/ssh/known_hosts .*HostKeyAlgorithms=ssh-ed25519 .*fleetuser@fleet-proxynode.tail1.ts.net PATH=' '$SSH_ARGV' | grep -vq BatchMode"
+assert "the remote command: a PATH that finds docker from a bare ssh session, cd into the node's \$HOME proxy dir, docker run --rm -it with the callback port published, the three volumes, the image, -claude-login -no-browser" bash -c "grep -qF 'PATH=\"\$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:\$HOME/.docker/bin:/Applications/Docker.app/Contents/Resources/bin:\$PATH\"; export PATH; cd \"\$HOME/cli-proxy-api\" && docker run --rm -it -p 127.0.0.1:54545:54545 -v \"\$PWD/conf:/config\" -v \"\$PWD/auth:/root/.cli-proxy-api\" -v \"\$PWD/plugins:/CLIProxyAPI/plugins\" eceasy/cli-proxy-api:latest ./CLIProxyAPI -config /config/config.yaml -claude-login -no-browser' '$SSH_ARGV'"
+assert "on the node the volumes resolved to the node's own compose tree" grep -qx "docker run --rm -it -p 127.0.0.1:54545:54545 -v $PXD/conf:/config -v $PXD/auth:/root/.cli-proxy-api -v $PXD/plugins:/CLIProxyAPI/plugins eceasy/cli-proxy-api:latest ./CLIProxyAPI -config /config/config.yaml -claude-login -no-browser" "$PL_DOCKER_LOG"
+assert "backup step first: the old login copied into .auth-backup/<UTC>/ (0700) on the node, before the login container ran" bash -c "b=\$(ls -d '$PXD'/.auth-backup/*Z 2>/dev/null | head -1) && [ -f \"\$b/claude-old.json\" ] && [ \"\$(mode_of \"\$b\")\" = 700 ] && printf '%s' \"\$0\" | grep -q 'backed up into \$HOME/cli-proxy-api/.auth-backup/' && [ \"\$(grep -n 'bash -s' '$SSH_LOG' | head -1 | cut -d: -f1)\" -lt \"\$(grep -n 'docker run' '$SSH_LOG' | head -1 | cut -d: -f1)\" ]" "$out"
+assert "restart + check step: compose up -d --force-recreate on the node after the login, then /v1/models asked with the client key on curl's stdin (-K -), 0600 on the auth files" bash -c "grep -qx 'docker compose up -d --force-recreate' '$PL_DOCKER_LOG' && [ \"\$(grep -n 'docker run' '$PL_DOCKER_LOG' | cut -d: -f1)\" -lt \"\$(grep -n 'compose up' '$PL_DOCKER_LOG' | cut -d: -f1)\" ] && grep -q -- '-K - .*http://127.0.0.1:8317/v1/models' '$PL_CURL_LOG' && grep -qx 'header = \"Authorization: Bearer sk-client-FAKE\"' '$PL_CURL_STDIN' && [ \"\$(mode_of '$PXD/auth/claude-old.json')\" = 600 ]"
+refute "the client key never appears in ssh argv, docker argv, curl argv, the output or the audit log" bash -c "grep -q 'sk-client-FAKE' '$SSH_ARGV' '$PL_DOCKER_LOG' '$PL_CURL_LOG' '$FLEET_VAULT/audit.log' || printf '%s' \"\$0\" | grep -q 'sk-client-FAKE'" "$out"
+assert "audited: proxy.login proxynode ok claude" grep -q ' proxy.login proxynode ok claude' "$FLEET_VAULT/audit.log"
+# the other providers: codex tunnels 1455, antigravity 51121, codex-device needs no tunnel and publishes no port
+pl_reset; pl proxy login proxynode codex --yes </dev/null >/dev/null 2>&1
+assert "codex: -L 1455:127.0.0.1:1455 and -codex-login with -p 127.0.0.1:1455:1455" bash -c "grep -q -- '-L 1455:127.0.0.1:1455 ' '$SSH_ARGV' && grep -q -- '-p 127.0.0.1:1455:1455 .* -codex-login -no-browser' '$PL_DOCKER_LOG'"
+pl_reset; pl proxy login proxynode antigravity --yes </dev/null >/dev/null 2>&1
+assert "antigravity: -L 51121:127.0.0.1:51121 and -antigravity-login" bash -c "grep -q -- '-L 51121:127.0.0.1:51121 ' '$SSH_ARGV' && grep -q -- '-antigravity-login -no-browser' '$PL_DOCKER_LOG'"
+pl_reset
+out=$(pl proxy login proxynode codex-device --yes </dev/null 2>&1); rc=$?
+assert "codex-device: exit 0, no -L on any ssh, no -p on docker run, -codex-device-login, the device-code instructions" bash -c "[ $rc = 0 ] && ! grep -q -- ' -L ' '$SSH_ARGV' && grep -q -- '^-t -i ' '$SSH_ARGV' && grep -qx 'docker run --rm -it -v $PXD/conf:/config -v $PXD/auth:/root/.cli-proxy-api -v $PXD/plugins:/CLIProxyAPI/plugins eceasy/cli-proxy-api:latest ./CLIProxyAPI -config /config/config.yaml -codex-device-login -no-browser' '$PL_DOCKER_LOG' && printf '%s' \"\$0\" | grep -q 'device code' && printf '%s' \"\$0\" | grep -q 'no tunnel is needed'" "$out"
+# knobs: image and container name from fleet.conf
+printf 'FLEET_PROXY_IMAGE=example/proxy:9\nFLEET_PROXY_CONTAINER=myproxy\n' >>"$FLEET_HOME/fleet.conf"
+pl_reset
+# shellcheck disable=SC2016  # the fake expands $* and $PL_DOCKER_LOG itself
+printf '#!/usr/bin/env bash\necho "docker $*" >>"$PL_DOCKER_LOG"\ncase "$1 $2" in "compose up") exit 1 ;; esac\nexit 0\n' >"$PXNB/docker.compose-fails"; chmod +x "$PXNB/docker.compose-fails"
+mv "$PXNB/docker" "$PXNB/docker.ok"; mv "$PXNB/docker.compose-fails" "$PXNB/docker"
+out=$(pl proxy login proxynode --yes </dev/null 2>&1); rc=$?
+assert "FLEET_PROXY_IMAGE / FLEET_PROXY_CONTAINER honoured; compose up failing falls back to docker restart <container>" bash -c "[ $rc = 0 ] && grep -q ' example/proxy:9 ./CLIProxyAPI ' '$PL_DOCKER_LOG' && grep -qx 'docker restart myproxy' '$PL_DOCKER_LOG'" "$out"
+mv "$PXNB/docker" "$PXNB/docker.compose-fails"; mv "$PXNB/docker.ok" "$PXNB/docker"
+grep -v '^FLEET_PROXY_IMAGE=\|^FLEET_PROXY_CONTAINER=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+# refusals: the callback port busy on the master (before anything runs), unknown provider, a container node, no confirmation
+touch "$T/port-busy"; pl_reset
+out=$(pl proxy login proxynode --yes </dev/null 2>&1); rc=$?
+assert "callback port already in use on the master: exit 1, says so, no ssh at all, no backup" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'port 54545 is already in use on this machine' && [ ! -s '$SSH_ARGV' ] && [ ! -s '$SSH_LOG' ]" "$out"
+out=$(pl proxy login proxynode codex-device --yes </dev/null 2>&1); rc=$?
+assert "...codex-device needs no port, so it still runs" bash -c "[ $rc = 0 ] && grep -q -- '-codex-device-login' '$PL_DOCKER_LOG'" "$out"
+rm -f "$T/port-busy"; pl_reset
+out=$(pl proxy login proxynode gemini --yes </dev/null 2>&1); rc=$?
+assert "unknown provider: exit 1, lists the providers, nothing ran" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'unknown provider: gemini' && printf '%s' \"\$0\" | grep -q 'codex-device antigravity' && [ ! -s '$SSH_ARGV' ]" "$out"
+cat >"$FLEET_VAULT/nodes/nPXCCNTRL.json" <<'EOF'
+{"id":"nPXCCNTRL","name":"pxc","hostname":"fleet-pxc","dnsname":"fleet-pxc.tail1.ts.net","user":"fleetuser","os":"linux","arch":"amd64","container":true,"profile":"full","ephemeral":false,"state":"provisioned","enrolled":"2026-10-03T09:00:00Z","provisioned":"2026-10-03T09:01:00Z","provisioned_digest":"x","missing_since":"","pending_cleanup":[],"github_keys":{},"secrets_sent":[],"files_sent":[]}
+EOF
+chmod 0600 "$FLEET_VAULT/nodes/nPXCCNTRL.json"
+out=$(pl proxy login pxc --yes </dev/null 2>&1); rc=$?
+assert "a container node is refused (containers use a remote proxy)" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'pxc is a container' && [ ! -s '$SSH_ARGV' ]" "$out"
+rm -f "$FLEET_VAULT/nodes/nPXCCNTRL.json"
+out=$(pl proxy login proxynode </dev/null 2>&1); rc=$?
+assert "no --yes and no answer: aborted before anything ran" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'Proceed?' && printf '%s' \"\$0\" | grep -q 'aborted' && [ ! -s '$SSH_ARGV' ]" "$out"
+out=$(printf 'y\n' | pl proxy login proxynode 2>&1); rc=$?
+assert "answering y proceeds" bash -c "[ $rc = 0 ] && grep -q -- '-claude-login' '$PL_DOCKER_LOG'" "$out"
+# failures: the login container exits non-zero (no restart, audited); the proxy does not answer 200 afterwards
+touch "$T/login-fail"; pl_reset
+out=$(pl proxy login proxynode --yes </dev/null 2>&1); rc=$?
+assert "login container fails: exit 1, says it did not complete, names the backup, no restart, audited fail" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q 'claude login on proxynode did not complete (exit 1)' && printf '%s' \"\$0\" | grep -q '.auth-backup/' && ! grep -q 'compose up' '$PL_DOCKER_LOG' && grep -q ' proxy.login proxynode fail claude rc=1' '$FLEET_VAULT/audit.log'" "$out"
+rm -f "$T/login-fail"; touch "$T/proxy-verify-fail"; pl_reset
+out=$(pl proxy login proxynode --yes </dev/null 2>&1); rc=$?
+assert "proxy answers 401 after the restart: exit 1 with the status and the next step, audited verify=401" bash -c "[ $rc != 0 ] && printf '%s' \"\$0\" | grep -q '/v1/models answers 401 instead of 200' && printf '%s' \"\$0\" | grep -q 'fleet ssh proxynode fleet status' && grep -q ' proxy.login proxynode ok claude verify=401' '$FLEET_VAULT/audit.log'" "$out"
+rm -f "$T/proxy-verify-fail"
+refute "no refresh token from the node ever reached the master's logs or output" grep -rq 'rt-OLD-FAKE' "$SSH_ARGV" "$PL_DOCKER_LOG" "$PL_CURL_LOG" "$FLEET_VAULT/audit.log"
 rm -f "$FLEET_VAULT/nodes/nPROXYCNTRL.json"; rm -rf "$PXNH" "$PXV"; write_status ""
 echo '[{"nodeId":"nAAAACNTRL"}]' >"$DEVICES_JSON"
 

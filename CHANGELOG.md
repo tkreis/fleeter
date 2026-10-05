@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.0 — 2026-10-05
+
+First-time setup is one command, or one sentence to your coding agent.
+
+### Added
+
+- `fleet setup` (master; `lib/setup.sh`): the guided setup. Asks for the
+  GitHub owner, the config repo name and checkout, shared memory (with the
+  privacy note), the tools preset (`minimal|agents|full` or a list), the
+  proxy and keep-awake, each with a default in brackets and each also a flag
+  (`--github-owner`, `--config-repo`, `--config-dir`, `--memory`/`--no-memory`,
+  `--memory-repo`, `--tools`, `--proxy`/`--no-proxy`,
+  `--keep-awake`/`--no-keep-awake`, `--claude-token`/`--no-claude-token`;
+  `--yes` takes the defaults). Then, as `[n/9]` steps: preflight (the init
+  master checks, plus `gh auth login --web` when needed), the owner from
+  `gh api user`, the config repo (an existing `OWNER/NAME` is cloned,
+  otherwise `examples/fleet-config` is copied, `fleet.conf` rendered from the
+  answers, committed and created private with `gh repo create --source
+  --push`), the memory repo (created private, empty), `fleet init master`
+  (its own prompts: the Tailscale token, the typed `apply`), the Claude login
+  (`claude setup-token | … | fleet secrets set CLAUDE_CODE_OAUTH_TOKEN
+  --profile minimal`: the token stays in the pipe; then an optional loop of
+  more secrets at hidden prompts), `fleet proxy import` when chosen, `fleet
+  config publish --yes` and `fleet doctor`, and the next commands. Idempotent
+  and resumable: finished steps print `skip`; on a rerun the recorded config
+  repo supplies the defaults. Nothing is created on GitHub without a
+  confirmation or `--yes`; refuses on a node.
+- `SETUP.md` (also at https://tkreis.github.io/fleeter/SETUP.md): the same
+  setup written for a coding agent — the rules (no secrets in the chat,
+  confirm repo creation and the policy, hand interactive prompts to the
+  user), the questions in order with defaults, the flags, what each step
+  asks, verification, the first node, a troubleshooting table. Shipped as
+  the `fleet-setup` agent skill too (`skills/fleet-setup`, same body).
+- `install.sh`: ends with the `fleet setup` / SETUP.md hint;
+  `FLEETER_SETUP=1 curl … | bash` runs `fleet setup` from the terminal
+  (`/dev/tty`) right after installing, or prints the command when there is
+  no terminal.
+
+### Changed
+
+- README: a short "Get started" with the two options at the top; the old
+  Quickstart is now "Manual setup (what fleet setup does)". Site hero shows
+  the install line, `fleet setup` and the agent sentence.
+- `fleet config publish` no longer captures fleeter's bundled `fleet` skill
+  into the config repo (a copy there replaced the shipped one on every node
+  and went stale); `fleet sync` and `fleet skill list` already excluded it.
+
 ## 0.4.3 — 2026-10-05
 
 Each node logs into its own CLIProxyAPI accounts; the master no longer copies

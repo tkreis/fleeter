@@ -53,6 +53,7 @@ Start read-only. `--json` output is stable (schema in `docs/CONTRACT.md`).
 | Install this skill on the master | `fleet skill install`; `fleet schedule install` (re)installs the reconcile, sync and memory timers and clones the memory vault |
 | Node side: converge / update now | `fleet pull` (code + config, apply if changed), `fleet apply`, `fleet update` (vendor updaters) |
 | Restart a node so it comes back by itself | `fleet reboot NODE` (needs the user's explicit confirmation; the user types the sudo and FileVault passwords at the node's prompts — hand it to them, never run it with `--yes` on their behalf) |
+| Keep a MacBook (master or node) awake with the lid closed | `fleet power lid on` (this machine) / `fleet power lid on NODE`; `fleet power status [NODE]` first; `fleet power lid off [NODE]` undoes it. Suggest it when a MacBook keeps dropping offline, but hand the command to the user: it asks for a typed `yes` and the sudo password at the Mac's own prompt (never `--yes` on their behalf; see the safety rules) |
 | Bring back a FileVault Mac stuck after a power cut | `fleet unlock NODE` (`--host IP` if the LAN address is not recorded; master on the same LAN, Mac on Ethernet, macOS 26+). The user types the account password at the Mac's prompt: hand the command to them |
 | Revoke a node | `fleet kick NODE` (needs the user's explicit confirmation) |
 
@@ -80,14 +81,17 @@ exit 2 before anything runs.
   conversation. `fleet aws push` is safe to run (it reports profile names and
   expiry only); it pushes only the profiles the user listed in
   `FLEET_AWS_PROFILES`, so never add a production profile there yourself.
-- `fleet reboot` and `fleet unlock` need the user at the keyboard: both end
-  in a password prompt on the remote machine (sudo + FileVault, or the
-  pre-boot unlock). Never ask the user for that password, never accept it in
-  the conversation, never try to type or pipe it, never pass `--yes` to
-  `reboot` unless the user said so. Say what will happen, hand them the
-  command, and read `fleet list` afterwards.
+- `fleet reboot`, `fleet unlock` and `fleet power lid` need the user at the
+  keyboard: all end in a password prompt (sudo + FileVault, the pre-boot
+  unlock, or sudo for `pmset`; on the remote machine, or on this one for
+  `fleet power lid` without NODE). Never ask the user for that password,
+  never accept it in the conversation, never try to type or pipe it, never
+  pass `--yes` to `reboot` or `power lid` unless the user said so — `power
+  lid on` also carries caveats (heat in a bag, no sleep on battery) the user
+  must see. Say what will happen, hand them the command, and read `fleet
+  list` (`awake_lid`) afterwards.
 - Ask the user before anything that changes other machines or revokes access:
-  `reboot`, `unlock`, `kick`, `leave`, `policy apply`, `config publish`, `skill remove`,
+  `reboot`, `unlock`, `power lid`, `kick`, `leave`, `policy apply`, `config publish`, `skill remove`,
   `skill add --yes` over an existing skill, `secrets set` on an existing name
   (it overwrites); `provision`/`reconcile`/`sync` and `skill add` of a new
   skill are usually fine but say what will be pushed.
@@ -126,7 +130,7 @@ master's own agent memories reach the vault (`ok (3m)` = last sync 3 min ago).
 | Symptom in `fleet list` | Meaning | Next step |
 |---|---|---|
 | ONLINE `no` | the node is off or left the tailnet | wake it; after the grace period (1 h ephemeral, `FLEET_MISSING_GRACE_HOURS`) the master revokes its keys |
-| a node goes offline or `unreachable` on its own, repeatedly | it sleeps; an asleep Mac cannot be woken over Tailscale | once it is back: `fleet ssh NODE fleet status` must say `awake on` (`fleet list --json` has `awake` per node). `off` = `FLEET_KEEP_AWAKE=0`, or the join step failed (`~/.config/fleet/power_done` missing: rerun the join one-liner), or nobody is logged in on the Mac / its lid is closed (README "Keep nodes awake"; a MacBook: `FLEET_KEEP_AWAKE_LID=1`, status `awake_lid`) |
+| a node goes offline or `unreachable` on its own, repeatedly | it sleeps; an asleep Mac cannot be woken over Tailscale | once it is back: `fleet ssh NODE fleet status` must say `awake on` (`fleet list --json` has `awake` and `awake_lid` per node). `off` = `FLEET_KEEP_AWAKE=0`, or the join step failed (`~/.config/fleet/power_done` missing: rerun the join one-liner), or nobody is logged in on the Mac / its lid is closed (README "Keep nodes awake"; a MacBook with `awake_lid off`: suggest `fleet power lid on NODE`, the user runs it) |
 | a FileVault Mac is ONLINE `no` after a power cut or an unplanned restart | it waits at the pre-boot password prompt (no Tailscale yet) | the user runs `fleet unlock NODE` from a master on the Mac's LAN and types the password there; for planned restarts `fleet reboot NODE` avoids the prompt |
 | TOOLS `unreachable` | online on the tailnet but SSH failed or took > 10 s | `fleet ssh NODE true`; check sshd and the master key on the node; `FLEET_LIST_SECS=30 fleet list` for a slow node |
 | STATE `provisioning` | a provision is running right now | wait; `tail -f ~/.config/fleet/reconcile.log` or `sync.log` on the master |

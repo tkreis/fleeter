@@ -40,7 +40,7 @@ Ask only what the defaults do not settle. Each answer maps to a flag below.
 | 3 | Shared memory on? **Privacy note:** every machine (this one included) uploads its agents' memories — Claude Code, Codex, Grok, work projects included — into a private GitHub repo of the user's, and every machine reads all of it. Secret-scanned, but not private per machine. | yes, repo `fleet-memory` | `--memory` / `--no-memory`, `--memory-repo NAME` |
 | 4 | GitHub user or organisation for the repos, and the config repo name? | the `gh` login, `fleet-config`, checkout `~/fleet-config` | `--github-owner`, `--config-repo`, `--config-dir` |
 | 5 | Do they use CLIProxyAPI here (`~/cli-proxy-api/conf/config.yaml` exists) and want it on every node? | no (yes only if that file exists) | `--proxy` / `--no-proxy` |
-| 6 | Should nodes never sleep (always-on machines)? For a MacBook node with the lid closed they can later set `FLEET_KEEP_AWAKE_LID=1` in `fleet.conf` (heat and battery caveats). | yes | `--keep-awake` / `--no-keep-awake` |
+| 6 | Should nodes never sleep (always-on machines)? A MacBook node with the lid closed needs `fleet power lid on NODE` afterwards (or `FLEET_KEEP_AWAKE_LID=1` in `fleet.conf` before it joins; heat and battery caveats). | yes | `--keep-awake` / `--no-keep-awake` |
 | 7 | Do they use AWS SSO (`aws sso login`) here and want the nodes to use it? Which profiles, e.g. `dev`? fleet pushes only the profiles listed in `FLEET_AWS_PROFILES`; keep production out of that list. The SSO login stays on the master; nodes get short-lived role credentials. | none | `--aws-profiles "dev"` |
 
 ## Commands
@@ -117,7 +117,7 @@ Ask only what the defaults do not settle. Each answer maps to a flag below.
 | `vault key: UNREACHABLE` / keychain locked (`fleet doctor`, `fleet vault status`) | the user unlocks the login keychain (`security unlock-keychain`) or logs in on the Mac; Linux: `secret-tool` needs an unlocked keyring. |
 | `policy: live tailnet policy does not isolate tag:fleet-node` | the user runs `fleet policy apply` (new 1-day API token, types `apply`); `fleet policy check` afterwards. |
 | `fleet list`: node `behind` | `fleet provision NODE`, or wait for `fleet sync`; is the config pushed? `fleet config publish`. |
-| node ONLINE `no` / `unreachable` / keeps dropping | it is off or asleep: wake it; `fleet ssh NODE fleet status` must say `awake on`; a MacBook: `FLEET_KEEP_AWAKE_LID=1`. |
+| node ONLINE `no` / `unreachable` / keeps dropping | it is off or asleep: wake it; `fleet ssh NODE fleet status` must say `awake on`; a MacBook with the lid closed: `fleet power lid on NODE` (the user types the sudo password). |
 | PROXY `login` / TOOLS `1 login: cliproxy` | user runs `fleet proxy login NODE` on the master (browser needed). |
 | TOOLS `1 login: codex` (or cursor, grok) | user runs `fleet ssh NODE fleet login codex`, or sets the API key secret and runs `fleet reconcile`. |
 | `claude setup-token` not run (no terminal) | user runs `claude setup-token \| fleet secrets set CLAUDE_CODE_OAUTH_TOKEN --profile minimal` themselves, then `fleet reconcile`. |

@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.6.2 — 2026-10-05
+
+Switch the lid-closed setting on after the fact — on the master or a node
+that is already in the fleet — without rerunning the join.
+
+### Added
+
+- `fleet power lid on|off [NODE] [--yes]`: `sudo pmset -a disablesleep 1`
+  (the only setting a closed lid without an external display honours) or its
+  undo, on this machine (master or node) or on NODE over an interactive
+  fleet session (`ssh -t`, like `fleet reboot`; the sudo password is typed
+  at the node's own prompt, nothing passes through fleet). Prints the two
+  caveats (heat in a bag; no sleep on battery either, it drains flat) and
+  the undo, asks for a typed `yes` unless `--yes`, reads `pmset -g` back and
+  reports `SleepDisabled 1|0` (a model that ignores the setting fails with
+  exit 1). Records the word `lid` in `~/.config/fleet/power_done` next to
+  join's markers (`off` removes it); audit `power.lid <name> on|off` on the
+  master. Mac laptops only (battery or MacBook model): desktops, Linux
+  (systemd sleep targets already masked at join) and containers are
+  explained and exit 0. A node whose fleet predates the command is pointed
+  at `fleet provision`.
+- `fleet power status [NODE]`: the lid setting as `pmset -g` reports it,
+  laptop yes/no, who recorded it (`set at join` / `set by fleet power lid
+  on` / none) and the undo.
+- `fleet list --json`: `awake_lid` on every node row (from the node's
+  status) and on the master row (the master's own Mac). `fleet status` on
+  the master reports its real `awake_lid` instead of `n/a`.
+
+### Changed
+
+- `typed_confirm` moved to `lib/common.sh` (nodes use it now).
+- README "Keep a MacBook awake with the lid closed" rewritten around the
+  command; CONTRACT (`fleet power`, `power_done` content, the list field);
+  the `fleet` agent skill (agents may suggest it, the user types the password
+  and the confirmation).
+
 ## 0.6.1 — 2026-10-05
 
 ### Fixed

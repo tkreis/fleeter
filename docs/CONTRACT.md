@@ -318,7 +318,9 @@ same, then `fleet leave`.
 ~/.config/fleet/applied_commit   "<code HEAD>+<config HEAD>" last applied successfully (pull compares against it)
 ~/.config/fleet/privileged_done  join finished the privileged OS steps; plug-ins skip them
 ~/.config/fleet/power_done       join switched system sleep off: `<UTC> macos:pmset` | `macos:pmset+lid` | `linux:mask` (FLEET_KEEP_AWAKE;
-                                 join skips when present, except that a MacBook without `+lid` gets the lid step when FLEET_KEEP_AWAKE_LID=1)
+                                 join skips when present, except that a MacBook without `+lid` gets the lid step when FLEET_KEEP_AWAKE_LID=1);
+                                 `fleet power lid on` appends the word ` lid` (creates `<UTC> lid` when join wrote nothing), `off` drops `+lid`/` lid`
+                                 and removes the file when only the timestamp is left
 ~/Library/LaunchAgents/dev.fleet.awake.plist   macOS nodes, FLEET_KEEP_AWAKE=1: `/usr/bin/caffeinate -i -m -s`, KeepAlive + RunAtLoad,
                                  written by apply (node_awake_apply; in the manifest), removed by leave and by apply with FLEET_KEEP_AWAKE=0;
                                  never on the master or in a container
@@ -511,6 +513,8 @@ registry. Keys are stable; new ones may be added.
   "proxy": "off",                 // ok | off (cliproxy not in the node's tools) | login (0.4.3: its upstream login expired) | down | null
   "fleet": "0.3.0",               // the node's fleet version, null when not reached
   "awake": "on",                  // 0.3.3: the node's `awake` (on | off | n/a); null when not reached, on the master row and unknown peers
+  "awake_lid": "off",             // 0.6.2: the node's `awake_lid` (on | off | n/a); null when not reached and on unknown peers;
+                                  // on the master row the master's own Mac (`pmset -g` SleepDisabled; n/a off macOS / in a container)
   "aws": {"profiles": 2, "expires": "…", "state": "ok"},   // 0.6.0: the node's `aws` object; null when not reached, on the master row and unknown peers
   "missing_since": "", "cleanup_pending": [],
   "master": false                 // 0.3.2: true on the one row that describes the master itself
@@ -521,8 +525,9 @@ Since 0.3.2 the array starts with one row for the master (`"master": true`,
 `"id": "master"`, `"state": "master"`, `"online": true`, `"host"` = its
 hostname, `"memory"` = the master's own vault state `ok | conflict | missing |
 off`, plus `"memory_last_sync"`; `synced`, `applied`, `tools`, `proxy` are
-null/empty; `"fleet"` = the master's version). Every other field keeps its
-meaning; consumers that only want nodes filter on `"master": false`.
+null/empty; `"fleet"` = the master's version; since 0.6.2 `"awake_lid"` =
+the master's own lid setting). Every other field keeps its meaning; consumers
+that only want nodes filter on `"master": false`.
 
 `synced` is `behind` when the applied code or config revision differs from the
 master's, or the applied digest differs from the desired one; `yes` otherwise.
@@ -544,8 +549,9 @@ expires, `expired`, `-` for none), FLEET; `-` where the JSON has `null`.
   "timers": {"pull": true, "memory": true, "update": true},   // no "memory" key while the memory job is off
   "awake": "on",                  // on | off | n/a — macOS: dev.fleet.awake loaded or `pmset -g custom` AC `sleep 0`;
                                   // Linux: sleep.target masked; n/a on the master and in containers
-  "awake_lid": "off",             // 0.4.0: on | off | n/a — macOS nodes: `pmset -g` lists `SleepDisabled 1` (FLEET_KEEP_AWAKE_LID)
-  "lid_set_at_join": false,       // 0.4.0: power_done records `+lid` (the table then shows "set at join" and the undo)
+  "awake_lid": "off",             // 0.4.0: on | off | n/a — any Mac (0.6.2: the master too): `pmset -g` lists `SleepDisabled 1`
+  "lid_set_at_join": false,       // 0.4.0: power_done records `+lid` (the table then shows "set at join" and the undo); ` lid` from
+                                  // `fleet power lid on` does not count
   "lan_ips": ["192.168.1.50"],    // 0.4.0: LAN IPv4 addresses of the physical ports (macOS: networksetup -listallhardwareports +
                                   // ipconfig getifaddr; Linux: /sys/class/net + ip/ifconfig); no loopback, link-local or 100.64/10;
   "ethernet": "yes",              // [] in containers. ethernet yes|no: one of them is on a port that is not Wi-Fi
@@ -611,7 +617,8 @@ it when the knob is 0; `fleet leave` removes it. On Linux apply changes nothing
 they are not masked. The master never gets any of it. The lid-closed setting
 (`FLEET_KEEP_AWAKE_LID`, `pmset -a disablesleep 1`) is root-only as well: join
 sets it on laptops, apply only compares the knob with `node_awake_lid_state`
-and logs the undo (`sudo pmset -a disablesleep 0`) or the manual command.
+and logs the undo (`sudo pmset -a disablesleep 0`) or the manual command;
+`fleet power lid on|off` (below) sets it after join, on nodes and the master.
 
 ## `fleet proxy login` (master)
 
@@ -735,6 +742,37 @@ back on the tailnet and answering within `FLEET_UNLOCK_WAIT_SECS`. Audit:
 `unlock <name> start host=<ip>`, then `ok host=<ip> <N>s` | `timeout host=<ip>
 ssh_rc=<n>`. No password is ever an argument, an environment variable or a
 file on either side.
+
+## `fleet power` (master and nodes) — `lib/node.sh`, `power_lid_remote` in `lib/master.sh`
+
+`power lid on|off [NODE] [--yes]`, `power status [NODE]`. Without NODE the
+machine it runs on (`power_lid_here`): a container, a non-macOS OS, a Mac
+without `pmset` or without a battery / MacBook model (`power_is_laptop`, the
+join rule) → one explaining line, exit 0, nothing run. Otherwise
+`power_sleep_disabled` (`pmset -g` → `SleepDisabled`) is read first; already
+in the asked state → marker only, no sudo. Else: `on` prints the two caveats
+(heat; battery) and the undo, both modes ask for a typed `yes` unless `--yes`
+(anything else: "aborted", exit 1, nothing run), then `as_root pmset -a
+disablesleep 1|0` (sudo's own prompt; no password in argv, environment or
+files), then `pmset -g` is read back: a mismatch ("this model ignores the
+setting") or a refused pmset is exit 1 and leaves the marker alone. Marker
+(`power_marker_set` / `power_marker_clear`): see `power_done` above. On the
+master (`fleet_is_master`): audit `power.lid master on|off` or `fail on|off`.
+
+With NODE (master only; a node without `lib/master.sh` loaded dies with
+"only works on the master"): revoked → error; container → "no power
+management", exit 0; Linux → "no lid setting", exit 0; offline → error; the
+typed `yes` happens on the master (the prompt names the node, the command and
+that the sudo password is typed at the node), then
+`~/.local/bin/fleet power lid MODE --yes` over `ssh_tty_to` (`-t`, master
+key, pinned host key, no BatchMode: the node prints its caveats and read-back
+on the same TTY). Exit 0 → audit `power.lid <name> on|off`; 2 → the node's
+fleet predates the command (`fleet provision NODE`); 255 → unreachable; any
+other → the node refused (wrong password, not a laptop after all, ignored
+setting). All failures audit `power.lid <name> fail on|off rc=<n>`.
+`power status NODE` runs `~/.local/bin/fleet power status` over the plain
+`node_ssh` (BatchMode, no sudo); Linux/container nodes answer `lid n/a` from
+the registry without a session.
 
 ## Shared memory vault (`fleet memory sync`, nodes and master)
 

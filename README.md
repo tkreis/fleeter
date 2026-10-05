@@ -305,7 +305,8 @@ Both record `~/.config/fleet/power_done`; `fleet status` shows `awake on`
 
 Worth knowing on a Mac: a laptop with the lid closed and no external display
 still sleeps (macOS clamshell rule — keep the lid open, plug a display in, or
-opt in below under "Keep a MacBook awake with the lid closed"). The agent
+run `fleet power lid on [NODE]`, see "Keep a MacBook awake with the lid
+closed"). The agent
 needs a logged-in user; after a reboot of a FileVault Mac someone has to type
 the account password once before anything runs (`autorestart` brings the Mac
 back up to that prompt; `fleet reboot` avoids the prompt for planned restarts
@@ -326,25 +327,47 @@ machine.
 
 ### Keep a MacBook awake with the lid closed
 
-Off by default. With `FLEET_KEEP_AWAKE_LID=1` in `fleet.conf` (it travels in
-the invite code; `FLEET_KEEP_AWAKE_LID=1` in the one-liner's environment opts
-in one machine) `fleet join` on a **laptop** (a battery in `pmset -g batt`, or
-a MacBook model) runs `sudo pmset -a disablesleep 1` once, after the `pmset -c`
-line above, and records `+lid` in `~/.config/fleet/power_done`. Desktops are
-skipped; Linux never gets it.
+```sh
+fleet power lid on                     # this machine (the master, or a node you are logged in on)
+fleet power lid on mac2                # a node, from the master: you type the node's sudo password at its prompt
+fleet power status [NODE]              # what pmset says, who set it, the undo
+fleet power lid off [NODE]             # undo
+```
+
+`sudo pmset -a disablesleep 1` is the only setting that survives a closed lid
+with no external display (the `pmset -c` line and the `caffeinate` agent
+above do not; macOS clamshell rule). It is root-only, so it never runs from
+`fleet apply`: either `fleet power lid on` after the fact, or
+`FLEET_KEEP_AWAKE_LID=1` in `fleet.conf` (it travels in the invite code;
+`FLEET_KEEP_AWAKE_LID=1` in the one-liner's environment opts in one machine)
+so `fleet join` sets it on a **laptop** (a battery in `pmset -g batt`, or a
+MacBook model) right after the `pmset -c` line and records `+lid` in
+`~/.config/fleet/power_done`. Desktops and Linux boxes are explained and left
+alone (exit 0); containers too.
+
+`fleet power lid on` prints the two caveats and the undo, asks you to type
+`yes` (`--yes` skips the question, not the password), runs `sudo pmset -a
+disablesleep 1` — the password goes to sudo's own prompt, on the node's TTY
+when a NODE is given (an interactive fleet session, like `fleet reboot`);
+nothing passes through fleet — then reads `pmset -g` back and reports
+`SleepDisabled 1`. It records the word `lid` in `power_done` (join's own
+markers stay) and, on the master, an audit line `power.lid <name> on`. `off`
+runs `disablesleep 0`, removes the marker and reads back `0`. Already in the
+asked state: nothing runs, no password.
 
 Before you switch it on: a closed MacBook keeps running at full tilt, so do not
-put it in a bag or a drawer (heat), keep it on the charger (`disablesleep`
-applies to battery power too), and know that some Apple silicon models ignore
-the setting — test once by closing the lid and running `fleet ssh NODE true`
-from the master a minute later.
+put it in a bag or a drawer (heat), and keep it on the charger —
+`disablesleep` applies on battery too, so unplugged it never sleeps and drains
+flat. Some Apple silicon models ignore the setting (the command then fails
+with "this model ignores the setting"); test once by closing the lid and
+running `fleet ssh NODE true` from the master a minute later.
 
-`fleet status` on the node shows `awake on  (lid: on, set at join; undo: sudo
-pmset -a disablesleep 0)`; `awake_lid` is in `status --json`. The setting is
-root-only, so `fleet apply` never changes it: with `FLEET_KEEP_AWAKE_LID=0`
-again, apply only reminds you of the undo command, and with `1` on a Mac that
-joined before the opt-in, rerun the join one-liner (it adds just the lid step)
-or run the `pmset -a disablesleep 1` line yourself.
+`fleet status` shows `awake on  (lid: on, set at join; undo: sudo pmset -a
+disablesleep 0)` (without "set at join" when `fleet power` set it);
+`awake_lid` is in `status --json`, on every node row of `fleet list --json`,
+and on the master row for the master's own Mac. With `FLEET_KEEP_AWAKE_LID=0`
+again, apply only reminds you of the undo for a join-set lid, and with `1` on
+a Mac that joined before the opt-in it points at `fleet power lid on`.
 
 ### Restart a node
 
@@ -940,6 +963,8 @@ and kick).
 | `fleet kick NODE` | `--yes` | Revoke: see "Kick a node". |
 | `fleet reboot NODE` | `--yes` | Planned restart (typed node name confirms): refreshes the node's `lan_ips` in the registry, then on macOS with FileVault on and `fdesetup supportsauthrestart` true runs `sudo fdesetup authrestart -delayminutes 0` on the node's TTY (you type the sudo and FileVault passwords there; nothing through fleet), else `sudo shutdown -r now`; Linux `sudo systemctl reboot`; containers refused. Waits `FLEET_REBOOT_WAIT_SECS` for tailnet online + `ssh NODE true`, prints `back online after Ns` or the next step (`fleet unlock NODE` for a FileVault Mac). Audited. See "Restart a node". |
 | `fleet unlock NODE` | `--host IP` | A FileVault Mac at its pre-boot prompt (macOS 26+, Remote Login on, same LAN, Ethernet): probes the recorded `lan_ips` (or `--host`) with `nc -z -w 3 IP 22`, opens a password-only ssh session (`PubkeyAuthentication=no`, `PreferredAuthentications=keyboard-interactive,password`, `vault/ssh/known_hosts_preboot`, `accept-new`) for you to type the account password at the Mac's prompt, then waits `FLEET_UNLOCK_WAIT_SECS` for the node on the tailnet. Refuses with an explanation when no address answers; Linux nodes: nothing to unlock, exit 0. See "Unlock a node after a power cut". |
+| `fleet power lid on\|off [NODE]` | `--yes` | Keep a MacBook awake with the lid closed (`sudo pmset -a disablesleep 1`, the only setting the clamshell rule honours) or undo it (`0`). No NODE = this machine (master or node); NODE = over an interactive fleet session, the sudo password typed at the node's prompt. Caveats (heat, battery) and the undo printed, typed `yes` unless `--yes`, `pmset -g` read back (`SleepDisabled 1|0`), `lid` recorded in `power_done`, audited on the master. Mac laptops only: desktops, Linux and containers are explained, exit 0. See "Keep a MacBook awake with the lid closed". |
+| `fleet power status [NODE]` | | The lid setting as `pmset -g` reports it, laptop yes/no, who recorded it (`set at join` / `set by fleet power lid on` / none) and the undo. |
 | `fleet t3 setup [NODE]` | | Creates `vault/ssh/t3_client` if missing, pins the node's host key, puts the restricted key line into the node's `authorized_keys`, regenerates `~/.ssh/config.d/fleet` and the `Include` at the top of `~/.ssh/config`, prints what to click in T3 Code. Without NODE: every registered node. Re-enables a node after `t3 revoke`. |
 | `fleet t3 status [NODE]` | | Per node: pinned host key, the alias as `ssh -G` resolves it, a BatchMode connection with the client key running T3's discovery, and the node's T3 sessions and pairing tokens (metadata only). |
 | `fleet t3 revoke NODE` | | On the node: revokes every pairing-token session and live pairing token, stops the servers T3 started, removes the `fleet-t3-client` line; records `t3_access: false`; drops the `Host fleet-<name>` block. Unreachable node → `t3:<id>` in `pending_cleanup`. |
@@ -1004,7 +1029,7 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_CAPTURE_AGENT_MARKERS` | `""` | `;`-separated text markers; an agent file containing one is not captured. |
 | `FLEET_CAPTURE_RULE_DROP` | `""` | Extra words that drop a Codex `prefix_rule` on capture. |
 | `FLEET_KEEP_AWAKE` | `1` | Nodes never system-sleep: macOS gets the `dev.fleet.awake` LaunchAgent (`caffeinate -i -m -s`) from apply and `pmset -c sleep 0 disksleep 0 womp 1 autorestart 1` from join; Linux join masks the systemd sleep targets. Never the master, never containers. `0` removes the agent on the next apply (root settings stay; see "Keep nodes awake"). Travels in the invite code. |
-| `FLEET_KEEP_AWAKE_LID` | `0` | `1`: `fleet join` on a MacBook (battery or MacBook model) also runs `sudo pmset -a disablesleep 1`, so a closed lid no longer sleeps it (`+lid` in `power_done`; `fleet status` shows `awake_lid` and the undo). Heat, battery and some Apple silicon models ignoring it: see "Keep a MacBook awake with the lid closed". Root-only, so apply only reports. Travels in the invite code. |
+| `FLEET_KEEP_AWAKE_LID` | `0` | `1`: `fleet join` on a MacBook (battery or MacBook model) also runs `sudo pmset -a disablesleep 1`, so a closed lid no longer sleeps it (`+lid` in `power_done`; `fleet status` shows `awake_lid` and the undo). After join, or for the master itself: `fleet power lid on [NODE]`. Heat, battery and some Apple silicon models ignoring it: see "Keep a MacBook awake with the lid closed". Root-only, so apply only reports. Travels in the invite code. |
 | `FLEET_REBOOT_WAIT_SECS` | `600` | Seconds `fleet reboot` waits for the node to be back on the tailnet and answering ssh before it gives up and names the next step. |
 | `FLEET_SSH_ALIVE_SECS` | `15` | Keepalive interval for the master's ssh to nodes; a node that sleeps or drops mid-provision is cut off after about four intervals instead of hanging every later sync. |
 | `FLEET_UNLOCK_WAIT_SECS` | `300` | Seconds `fleet unlock` waits for the node on the tailnet after you typed the pre-boot password. |
@@ -1086,7 +1111,7 @@ Node:
 ~/.config/fleet/applied, applied_at, applied_commit (<code>+<config>), status.json, memory.state (ok|conflict|missing|off)
 ~/.config/fleet/manifest, harness.manifest, harness.claude-mcp   what fleet owns, for cleanup
 ~/.config/fleet/privileged_done  join finished the root steps; locks/apply; logs/<job>.log; daemon.pid
-~/.config/fleet/power_done       join switched system sleep off (`<UTC> macos:pmset`, `macos:pmset+lid` with FLEET_KEEP_AWAKE_LID, or `linux:mask`)
+~/.config/fleet/power_done       join switched system sleep off (`<UTC> macos:pmset`, `macos:pmset+lid` with FLEET_KEEP_AWAKE_LID, or `linux:mask`); `fleet power lid on` appends ` lid` (or creates `<UTC> lid`), `off` removes it
 ~/.config/fleet/aws/<profile>.json   AWS role credentials from the master (0600, dir 0700; credential_process JSON), gone at leave/kick
 ~/.aws/config                    one `# >>> fleet aws >>> … # <<< fleet aws <<<` block: `[profile P]` with `credential_process = ~/.local/bin/fleet aws creds P` (absolute path) + region/output; original kept as config.pre-fleet
 ~/.ssh/fleet_code, fleet_config, fleet_memory (+ .pub); ~/.ssh/config block `# >>> fleet >>>` (github-fleet-* aliases)
@@ -1265,8 +1290,8 @@ revoked at the end; afterwards the master only holds the tag-scoped client.
   skipped or failed (`~/.config/fleet/power_done` missing: rerun the
   one-liner, or run the `pmset -c` / `systemctl mask` line from "Keep nodes
   awake" by hand), or on a Mac nobody is logged in (the agent runs per user)
-  or the lid is closed without an external display ("Keep a MacBook awake with
-  the lid closed").
+  or the lid is closed without an external display (`fleet power lid on NODE`,
+  see "Keep a MacBook awake with the lid closed").
 - **A FileVault Mac is offline after a power cut or a restart** — it waits at
   the pre-boot password prompt. From a master on the same LAN: `fleet unlock
   NODE` ("Unlock a node after a power cut"); next time restart it with `fleet

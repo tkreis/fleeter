@@ -117,6 +117,14 @@ die() {
 have() { command -v "$1" >/dev/null 2>&1; }
 need() { have "$1" || die "missing command: $1" "${2:-run 'fleet join' or install $1}"; }
 
+# typed_confirm PROMPT WORD — read a line; true when it equals WORD.
+typed_confirm() {
+  local typed
+  printf '%s' "$1" >&2
+  IFS= read -r typed || true
+  [ "$typed" = "$2" ]
+}
+
 # ---------- platform ----------
 
 fleet_os() {

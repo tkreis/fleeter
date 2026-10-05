@@ -88,14 +88,6 @@ PY
 # words_json WORD... — JSON array of the arguments.
 words_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 
-# typed_confirm PROMPT WORD — read a line; true when it equals WORD.
-typed_confirm() {
-  local typed
-  printf '%s' "$1" >&2
-  IFS= read -r typed || true
-  [ "$typed" = "$2" ]
-}
-
 # open_url URL — open in the browser on macOS; print it elsewhere.
 open_url() {
   log "open: $1"

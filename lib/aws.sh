@@ -6,13 +6,11 @@
 #
 # Master: `fleet aws push` runs `aws configure export-credentials --profile P
 # --format process` for every profile in FLEET_AWS_PROFILES (the allowlist;
-# empty = nothing is ever pushed), drops what FLEET_AWS_DENY (default
-# *prod* *production* *prd*, matched against the profile name and its
-# sso_account_id / sso_role_name / role_arn) or FLEET_AWS_ACCOUNTS refuses,
-# skips profiles whose IAM Identity Center session is not logged in right now,
-# and pipes one JSON bundle (kept in memory, never on the master's disk) into
-# `fleet aws receive` on every online provisioned node. `fleet sync` does the
-# same on its cadence (FLEET_AWS_SYNC, FLEET_AWS_REFRESH_MINUTES).
+# empty = nothing is ever pushed; keep production out of it), skips profiles
+# whose IAM Identity Center session is not logged in right now, and pipes one
+# JSON bundle (kept in memory, never on the master's disk) into `fleet aws
+# receive` on every online provisioned node. `fleet sync` does the same on
+# its cadence (FLEET_AWS_SYNC, FLEET_AWS_REFRESH_MINUTES) and never logs in.
 # Node: `fleet aws receive` stores ~/.config/fleet/aws/<profile>.json (0600)
 # and keeps a `# >>> fleet aws >>>` block in ~/.aws/config whose profiles use
 # `credential_process = <abs path>/fleet aws creds P`; `fleet aws creds P`
@@ -40,13 +38,13 @@ aws_state_file() { echo "$FLEET_VAULT/aws.json"; }
 # aws_select NAME... — one line per NAME: NAME<TAB>ok|refused<TAB>reason;
 # without names, every profile of the allowlist.
 aws_select() {
-  aws_py select "$(aws_config_path)" "${FLEET_AWS_PROFILES:-}" "${FLEET_AWS_DENY:-}" "${FLEET_AWS_ACCOUNTS:-}" "$@"
+  aws_py select "$(aws_config_path)" "${FLEET_AWS_PROFILES:-}" "$@"
 }
 
 # aws_refuse MESSAGE — a refused request: nothing ran, exit 2 like a usage error.
 aws_refuse() { printf 'error %s\n' "$1" >&2; exit 2; }
 
-aws_allowlist_hint() { echo 'no AWS profiles allowed; set FLEET_AWS_PROFILES="dev" in fleet.conf (never a production profile)'; }
+aws_allowlist_hint() { echo 'no AWS profiles allowed; set FLEET_AWS_PROFILES="dev" in fleet.conf (keep production out of that list)'; }
 
 # aws_online_nodes PEERS — ids of the provisioned, non-revoked nodes that are online.
 aws_online_nodes() {
@@ -64,13 +62,14 @@ aws_state_set() {
   json_set "$(aws_state_file)" "$@"
 }
 
-# aws_sync_warn MESSAGE — at most one warning per hour from the scheduled run.
+# aws_sync_warn KEY MESSAGE — from the scheduled run: at most one warning per
+# hour per KEY (refused, expired, failed), remembered in vault/aws.json.
 aws_sync_warn() {
-  local last=0
-  [ -f "$(aws_state_file)" ] && last=$(iso_epoch "$(json_get "$(aws_state_file)" warned)")
+  local key=$1 last=0
+  [ -f "$(aws_state_file)" ] && last=$(iso_epoch "$(json_get "$(aws_state_file)" "warned_$key")")
   [ $(( $(now_epoch) - last )) -ge 3600 ] || return 0
-  warn "$1"
-  aws_state_set warned "$(now_iso)"
+  warn "$2"
+  aws_state_set "warned_$key" "$(now_iso)"
 }
 
 # aws_push_run MODE PROFILES NODES — the push. MODE manual (fleet aws push:
@@ -89,10 +88,10 @@ aws_push_run() {
     [ "$mode" = manual ] && die "$(aws_allowlist_hint)"
     return 0
   fi
-  # 1. the allowlist, the denylist, the account list (lib/aws_creds.py select).
-  #    `allowed` is what the nodes may hold at all (the whole allowlist after
-  #    the denylist and account check): a node drops everything else. A
-  #    --profile request only narrows what this run sends.
+  # 1. the allowlist (lib/aws_creds.py select). `allowed` is what the nodes
+  #    may hold at all (the allowlist minus names the config does not have):
+  #    a node drops everything else. A --profile request only narrows what
+  #    this run sends.
   rep=$(aws_select) || die "cannot read $(aws_config_path)"
   while IFS="$(printf '\t')" read -r name st why; do
     [ -n "$name" ] || continue
@@ -114,10 +113,10 @@ EOF
     ok_profiles=$allowed
   fi
   if [ -n "$refused" ]; then
-    if [ "$mode" = manual ]; then warn "AWS profiles refused:$refused"; else aws_sync_warn "aws: profiles refused:$refused"; fi
+    if [ "$mode" = manual ]; then warn "AWS profiles refused:$refused"; else aws_sync_warn refused "aws: profiles refused:$refused"; fi
   fi
   if [ -z "$ok_profiles" ]; then
-    [ "$mode" = manual ] && die "no AWS profile left to push" "FLEET_AWS_PROFILES, FLEET_AWS_DENY and FLEET_AWS_ACCOUNTS in fleet.conf decide; fleet aws push --help"
+    [ "$mode" = manual ] && die "no AWS profile left to push" "FLEET_AWS_PROFILES in fleet.conf must name profiles of $(aws_config_path); fleet aws push --help"
     return 0
   fi
   # 2. export: the bundle stays in this variable; the report (names, expiry,
@@ -140,8 +139,8 @@ EOF
     if [ -z "$names" ]; then rm -rf "$tmpd"; bundle=""; die "nothing to push: no allowed AWS profile is logged in" "aws sso login (or fleet aws login), then fleet aws push"; fi
   elif [ -z "$names" ]; then
     rm -rf "$tmpd"; bundle=""
-    [ -z "$failed" ] || aws_sync_warn "aws: profiles not exported:$failed"
-    [ -z "$expired" ] || aws_sync_warn "AWS SSO session expired for$expired: run aws sso login (or fleet aws login); nodes keep what they have until it expires"
+    [ -z "$failed" ] || aws_sync_warn failed "aws: profiles not exported:$failed"
+    [ -z "$expired" ] || aws_sync_warn expired "AWS SSO session expired for$expired: run aws sso login (or fleet aws login); nodes keep what they have until it expires"
     return 0
   fi
   # 3. the nodes
@@ -182,8 +181,9 @@ EOF
     fi
   done
   rm -rf "$tmpd"
+  # shellcheck disable=SC2086  # the id list is space-separated by construction
   aws_state_set pushed "$(now_iso)" expires "$(epoch_iso "${earliest:-0}")" allowed "${FLEET_AWS_PROFILES:-}" \
-    nodes "json:$(words_json $ids)" warned ""
+    nodes "json:$(words_json $ids)" warned_expired "" warned_failed ""
   [ "$mode" = manual ] && [ "$okn" -lt "$n" ] && return 1
   return 0
 }
@@ -238,7 +238,7 @@ EOF
     log "aws sso login --profile $p"
     "$(aws_bin)" sso login --profile "$p" "$@" || die "aws sso login --profile $p failed"
   done
-  audit aws.login - "ok${profiles}"
+  audit aws.login - "ok ${profiles# }"
   # explicit --profile flags narrow the push too; a login for the first allowed
   # profile is followed by a push of the whole allowlist
   if [ -n "$given" ]; then aws_push_run manual "$profiles" ""; else aws_push_run manual "" ""; fi

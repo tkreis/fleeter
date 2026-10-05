@@ -37,7 +37,7 @@ Facts this rests on (AWS CLI User Guide, 2026-10-05):
   never leaves the master: nodes only get the role credentials.
 
 Subcommands:
-  select CONFIG ALLOW DENY ACCOUNTS [NAME...]   NAME<TAB>ok|refused<TAB>reason per line
+  select CONFIG ALLOW [NAME...]                 NAME<TAB>ok|refused<TAB>reason per line
   export AWS CONFIG ALLOWED NAME...             bundle JSON on stdout; NAME<TAB>ok|skip<TAB>kind<TAB>detail on stderr
   receive AWS_DIR CONFIG FLEET_BIN              bundle on stdin -> AWS_DIR/<name>.json + the fleet block in CONFIG
   creds AWS_DIR NAME                            credential_process: the stored JSON while valid, else exit 1
@@ -46,7 +46,6 @@ Subcommands:
 """
 import calendar
 import configparser
-import fnmatch
 import json
 import os
 import re
@@ -100,8 +99,8 @@ def err(msg):
 # ---------- ~/.aws/config ----------
 
 def read_config(path):
-    """{name: {region, output, sso_account_id, sso_role_name, role_arn, sso}} for every
-    [profile X] / [default] section. RawConfigParser: no % interpolation, keys lower-cased."""
+    """{name: {region, output}} for every [profile X] / [default] section (only what
+    the nodes' block copies). RawConfigParser: no % interpolation, keys lower-cased."""
     cp = configparser.RawConfigParser(strict=False, allow_no_value=True)
     try:
         with open(path) as fh:
@@ -117,34 +116,15 @@ def read_config(path):
         else:
             continue
         d = {k: (v or "").strip() for k, v in cp.items(sec)}
-        out[name] = {
-            "region": d.get("region") or None,
-            "output": d.get("output") or None,
-            "sso_account_id": d.get("sso_account_id") or None,
-            "sso_role_name": d.get("sso_role_name") or None,
-            "role_arn": d.get("role_arn") or None,
-            "sso": bool(d.get("sso_session") or d.get("sso_start_url")),
-        }
+        out[name] = {"region": d.get("region") or None, "output": d.get("output") or None}
     return out
 
 
-def deny_hit(name, prof, deny):
-    """The first (pattern, what) of FLEET_AWS_DENY that matches the profile name or
-    its sso_account_id / sso_role_name / role_arn, case-insensitively; None otherwise."""
-    for pat in deny:
-        pl = pat.lower()
-        for label, val in (("profile name", name), ("sso_account_id", prof.get("sso_account_id")),
-                           ("sso_role_name", prof.get("sso_role_name")), ("role_arn", prof.get("role_arn"))):
-            if val and fnmatch.fnmatchcase(val.lower(), pl):
-                return pat, "%s %s" % (label, val)
-    return None
-
-
-def select(cfg_path, allow, deny, accounts, want):
+def select(cfg_path, allow, want):
     """[(name, 'ok'|'refused', reason)] for the requested names (default: the whole
-    allowlist). The allowlist is the only way in, the denylist always wins."""
+    allowlist). The allowlist FLEET_AWS_PROFILES is the only way in."""
     cfg = read_config(cfg_path)
-    allow_l, deny_l, acc_l = allow.split(), deny.split(), accounts.split()
+    allow_l = allow.split()
     res = []
     for n in (want or allow_l):
         if not NAME_RE.match(n):
@@ -154,14 +134,7 @@ def select(cfg_path, allow, deny, accounts, want):
         elif n not in cfg:
             res.append((n, "refused", "no [profile %s] in %s" % (n, cfg_path)))
         else:
-            hit = deny_hit(n, cfg[n], deny_l)
-            acct = cfg[n].get("sso_account_id")
-            if hit:
-                res.append((n, "refused", "FLEET_AWS_DENY pattern %s matches %s" % hit))
-            elif acc_l and (acct or "") not in acc_l:
-                res.append((n, "refused", "account %s is not in FLEET_AWS_ACCOUNTS" % (acct or "(none)")))
-            else:
-                res.append((n, "ok", ""))
+            res.append((n, "ok", ""))
     return res
 
 
@@ -459,8 +432,8 @@ def main(argv):
         err(__doc__)
         return 2
     cmd, args = argv[1], argv[2:]
-    if cmd == "select" and len(args) >= 4:
-        for n, st, why in select(args[0], args[1], args[2], args[3], args[4:]):
+    if cmd == "select" and len(args) >= 2:
+        for n, st, why in select(args[0], args[1], args[2:]):
             print("%s\t%s\t%s" % (n, st, why))
         return 0
     if cmd == "export" and len(args) >= 4:

@@ -94,7 +94,7 @@ usage_for() {
     "proxy import")     echo "fleet proxy import [DIR]" ;;
     "proxy login")      echo "fleet proxy login NODE [claude|codex|codex-device|antigravity] [--yes]" ;;
     aws)                echo "fleet aws push [--profile P]... [--node NODE]... | fleet aws login [--profile P]... [-- AWS_ARGS...] | fleet aws creds PROFILE | fleet aws receive" ;;
-    "aws push")         echo "fleet aws push [--profile P]... [--node NODE]...    (profiles: FLEET_AWS_PROFILES minus FLEET_AWS_DENY; --profile only narrows)" ;;
+    "aws push")         echo "fleet aws push [--profile P]... [--node NODE]...    (profiles: FLEET_AWS_PROFILES in fleet.conf; --profile only narrows)" ;;
     "aws login")        echo "fleet aws login [--profile P]... [-- AWS_ARGS...]    (aws sso login on this machine, then fleet aws push)" ;;
     "aws creds")        echo "fleet aws creds PROFILE    (node: the credential_process of the fleet block in ~/.aws/config)" ;;
     "aws receive")      echo "fleet aws receive    (node: a credential bundle from the master on stdin)" ;;

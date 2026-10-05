@@ -2391,8 +2391,8 @@ cmd_kick() {
   # AWS role credentials (fleet aws push) are removed by the remote `fleet
   # leave` above; a node that was not reachable keeps them until they expire
   # (hours at most) and gets no new ones: it is revoked, so no push reaches it.
-  if [ "$stop_failed" = 1 ] && [ -n "$(json_list "$(registry_path "$id")" aws_profiles 2>/dev/null)" ]; then
-    printf 'AWS credentials on %s could not be removed; they expire on their own and no further push reaches a revoked node.\n' "$name"
+  if [ "$stop_failed" = 1 ] && grep -q " aws.push $name ok " "$FLEET_VAULT/audit.log" 2>/dev/null; then
+    printf 'Forwarded AWS credentials on %s could not be removed; they expire on their own and no push reaches a revoked node.\n' "$name"
   fi
   audit kick "$name" "done$results"
 }

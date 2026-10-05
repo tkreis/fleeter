@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.6.0 — 2026-10-05
+
+Your AWS SSO login, on every node: fleet pushes only the profiles you list in
+`FLEET_AWS_PROFILES`; keep production out of that list.
+
+### Added
+
+- `fleet aws push [--profile P]... [--node NODE]...` (master; `lib/aws.sh`,
+  `lib/aws_creds.py`): for every profile in `FLEET_AWS_PROFILES` (default
+  empty = nothing is pushed; `--profile` narrows the list and a name outside
+  it exits 2) whose IAM Identity Center session is logged in right now, runs
+  `aws configure export-credentials --profile P --format process` on the
+  master, keeps the result in memory and pipes one JSON bundle over ssh into
+  `fleet aws receive` on every online provisioned node in parallel. Reports
+  `mac2: 3 profiles (expire 18:42)`; an expired session is one line (`AWS
+  SSO session expired for dev: run aws sso login (or fleet aws login)`);
+  long-term keys are never forwarded. Audit and `vault/aws.json` hold profile
+  names and expiry only; the SSO session token never leaves the master.
+- `fleet aws login [--profile P]... [-- AWS_ARGS...]`: `aws sso login
+  --profile P` on the master (first allowed profile by default; extra flags
+  such as `--use-device-code` pass through), then the push.
+- Node: `fleet aws receive` stores `~/.config/fleet/aws/<profile>.json`
+  (0600, dir 0700, atomic) and keeps a `# >>> fleet aws >>>` block in
+  `~/.aws/config` whose `[profile P]` sections use `credential_process =
+  <absolute ~/.local/bin/fleet> aws creds P` plus the master profile's
+  `region`/`output` (never `sso_*` keys). A profile the node defines itself is
+  left alone; a profile that left the master's allowlist is dropped (file and
+  block entry) at the next push. `fleet aws creds P` serves the stored JSON
+  while its `Expiration` is more than two minutes away, else exits 1 with
+  "on the master run: aws sso login". Only python3 is needed on the node.
+- `fleet sync` step: with `FLEET_AWS_PROFILES` set and `aws` installed on the
+  master, pushes again every `FLEET_AWS_REFRESH_MINUTES` (60), earlier when
+  what it pushed expires within that window, when the allowlist changed or
+  when a node was provisioned since; quiet on success, never logs in, one
+  warning per hour per kind while the session is expired. `FLEET_AWS_SYNC=0`
+  switches it off.
+- `fleet status --json` field `aws` (`{"profiles": n, "expires": <earliest
+  ISO>, "state": "ok|expired|none"}`, plus an `aws` line in the table);
+  `fleet list` column AWS (`ok 3h`, `expired`, `-`) and json field `aws`.
+- `fleet leave` (and so `fleet kick`'s remote stop) removes the credential
+  files and the `~/.aws/config` block; a kicked node that was unreachable
+  keeps credentials that expire on their own and gets no new ones.
+- `devtools` installs the AWS CLI on the nodes with `FLEET_AWS_CLI=1`
+  (default): `brew install awscli` on macOS, the official installer into
+  `~/.local/aws-cli` + `~/.local/bin/aws` on Linux (no root); `aws update` on
+  `fleet update`; `aws` in the devtools status.
+- `fleet setup --aws-profiles "LIST"` and a question (only when
+  `~/.aws/config` exists) that renders `FLEET_AWS_PROFILES`; SETUP.md and the
+  `fleet` agent skill cover the flow (agents never print credentials).
+- Config keys `FLEET_AWS_PROFILES`, `FLEET_AWS_SYNC`,
+  `FLEET_AWS_REFRESH_MINUTES`, `FLEET_AWS_CLI`; environment `FLEET_AWS_BIN`
+  (tests). Documented in README ("Use your AWS SSO login on every node"),
+  docs/SECURITY.md and docs/CONTRACT.md ("fleet aws").
+- Dispatcher: a `--` in a command's flag list ends argument checking (`fleet
+  aws login -- --use-device-code`).
+
+### Changed
+
+- `fleet list` has a new AWS column between PROXY and FLEET; scripts that
+  parse the table by position need to know.
+
 ## 0.5.1 — 2026-10-05
 
 ### Fixed

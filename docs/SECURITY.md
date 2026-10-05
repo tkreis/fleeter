@@ -41,6 +41,7 @@ on it (keychain / secret service), see "Vault encryption at rest".
 | Node host keys are pinned | `vault/ssh/known_hosts` (0600) holds each node's ed25519 host key, read with `cat /etc/ssh/ssh_host_ed25519_key.pub` over the authenticated fleet session at enrolment (never `ssh-keyscan`); every later ssh — fleet's own and T3 Code's — runs with `StrictHostKeyChecking yes`, `HostKeyAlgorithms ssh-ed25519` and that file. A key that differs from the pin is refused and reported (`HOST KEY MISMATCH`), never replaced automatically. The pre-boot sshd of a FileVault Mac (`fleet unlock`) may present another key, so it is pinned on first use in a separate `vault/ssh/known_hosts_preboot` and never touches the normal pins. |
 | Restart and pre-boot unlock pass no password through fleet | `fleet reboot` runs `sudo fdesetup authrestart -delayminutes 0` (or `shutdown`/`systemctl`) over an interactive ssh session: sudo and `fdesetup` prompt on the node's TTY, fleet never uses `-inputplist`, `-password` or stdin, and logs only `authrestart|shutdown|systemctl`. `fleet unlock` opens a plain password ssh session (`PubkeyAuthentication=no`, `PreferredAuthentications=keyboard-interactive,password`, no key, no agent) to the Mac's LAN address and the user types at the Mac's own prompt; the audit log records the address and the outcome. Nothing is stored, nothing is in argv or the environment (`tests/master_test.sh` asserts both). |
 | T3 Code reaches a node with a key that can do nothing else | See "T3 Code remote access" below. |
+| Only short-lived AWS role credentials reach a node, never the SSO login | `fleet aws push` / `fleet sync` run `aws configure export-credentials --format process` on the master for the profiles listed in `FLEET_AWS_PROFILES` (empty by default: nothing is pushed; `--profile` can only narrow the list; keep production out of it) whose IAM Identity Center session is logged in, keep the result in memory and pipe it over ssh into `fleet aws receive`. The session token (`~/.aws/sso/cache`), which could mint new role credentials, never leaves the master; a node gets `AccessKeyId`/`SecretAccessKey`/`SessionToken`/`Expiration` for the role only, 0600 under `~/.config/fleet/aws/`, served to the AWS CLI through `credential_process` until the `Expiration`. The audit log and the state file record profile names and expiry only; `fleet sync` never logs in. A profile removed from the list is removed from the nodes at the next push; `fleet leave`/`kick` remove everything. |
 | OAuth tokens stay on the machine that created them | By default no CLIProxyAPI OAuth file leaves the machine it was created on: `fleet proxy import` stores only `config.yaml` (client key, routing); `fleet proxy login NODE` runs the vendor's login container on the node itself — the browser on the master only follows the printed URL, the callback travels through an ssh tunnel (`-L`, pinned host key) and the token is written on the node; the check afterwards reads the node's client key on the node and hands it to `curl` on stdin. The master logs `proxy.login <node> ok|fail <provider>` and nothing else. `FLEET_PROXY_SHARE_AUTH=1` opts back into copying the master's files. |
 
 ## Vault encryption at rest
@@ -221,6 +222,12 @@ forward to the server on the node's loopback (`ssh -n -N -L
   instead: a vendor refresh-token rotation on one machine logs the others out
   (verified: `invalid_grant`, "Refresh token not found or invalid"), and all of
   them share the account's rate limits.
+- **Forwarded AWS credentials cannot be revoked early by fleet.** A node
+  holds the role credentials in plaintext (0600) until their `Expiration`
+  (the permission set's session duration, typically 1–12 h); a kicked node
+  that was unreachable keeps them that long and gets no new ones. Only the
+  listed profiles ever reach a node, so keep production out of
+  `FLEET_AWS_PROFILES`.
 - **`launchctl setenv` (macOS)** puts `ANTHROPIC_AUTH_TOKEN` in one process's
   argv for milliseconds (local user only). It only happens with a local
   CLIProxyAPI (`cliproxy` in `FLEET_TOOLS` and `FLEET_PROXY_MODE=local`);
@@ -290,6 +297,9 @@ M1–M6, `tests/node_test.sh` N1–N8, `tests/e2e.sh`).
    files (`files_sent`).
 3. `fleet secrets set NAME` for each, `fleet proxy import`, then `fleet
    reconcile` so the remaining nodes receive the new values.
+   AWS: the audit log (`aws.push <node>`) tells whether the node had
+   forwarded credentials and when they expire; nothing to rotate, they end
+   on their own, and no further push reaches a revoked node.
 4. If the node had the memory key: it was deleted by kick; confirm in the
    repo's deploy-key list. Review the node's folder in the vault for planted
    content.

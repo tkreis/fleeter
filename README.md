@@ -165,7 +165,7 @@ every node converges, in install order. Three presets, documented in
 | Plug-in | What it installs | Secret / login it needs | Where |
 |---|---|---|---|
 | `base` | git, git-lfs, curl, jq, ripgrep, tmux, python3, unzip, nc (`fleet doctor` probes with it), ca-certificates | none | macOS (Homebrew), Linux (apt/dnf/apk/pacman, installed by `fleet join` with sudo), containers (in the image) |
-| `devtools` | mise runtimes (`FLEET_MISE_TOOLS`), pnpm via corepack (`FLEET_PNPM`), npm globals (`FLEET_NPM_GLOBALS`), uv, gh, glab, Docker (docker-ce via `fleet join` on Linux; Docker Desktop or colima on macOS), registry logins (`FLEET_DOCKER_LOGINS`) | none; registry logins read the named secrets | macOS, Linux, containers (Docker skipped) |
+| `devtools` | mise runtimes (`FLEET_MISE_TOOLS`), pnpm via corepack (`FLEET_PNPM`), npm globals (`FLEET_NPM_GLOBALS`), uv, gh, glab, the AWS CLI (`FLEET_AWS_CLI`; brew / the official installer into `~/.local`), Docker (docker-ce via `fleet join` on Linux; Docker Desktop or colima on macOS), registry logins (`FLEET_DOCKER_LOGINS`) | none; registry logins read the named secrets; AWS credentials come from `fleet aws push` | macOS, Linux, containers (Docker skipped) |
 | `claude` | Claude Code (claude.ai installer), `claude update` | `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token` on the master) or `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`; else `fleet login claude` | all |
 | `codex` | Codex CLI, `codex update` | `OPENAI_API_KEY` (logs in non-interactively) or a device code: `fleet login codex` | all |
 | `cursor` | Cursor CLI (`cursor-agent`) | `CURSOR_API_KEY` or a browser login: `fleet login cursor`; the macOS keychain is locked over ssh, so use the secret there | all |
@@ -502,7 +502,11 @@ master runs `fleet sync`:
    desired state (code, config, secrets, files) changed, which is what carries a
    `git push` to your config repo, a `fleet secrets set` or a new fleeter
    release to the nodes;
-4. every `FLEET_PUSH_TOOLS_EVERY` (1440) minutes runs `fleet update` on the
+4. with `FLEET_AWS_PROFILES` set, forwards the listed AWS profiles' role
+   credentials to the online nodes on the `FLEET_AWS_REFRESH_MINUTES` cadence
+   (only profiles whose SSO session is logged in; never logs in itself; see
+   "Use your AWS SSO login on every node");
+5. every `FLEET_PUSH_TOOLS_EVERY` (1440) minutes runs `fleet update` on the
    online provisioned nodes in parallel (`0` = never; the nodes keep their own
    daily update timer either way).
 
@@ -659,6 +663,47 @@ recreated at the same path under the node's `$HOME`, 0600, atomically
 (unpacked into a private staging dir on the node and renamed into place). Its
 ciphertext is part of the digest.
 
+### Use your AWS SSO login on every node
+
+```sh
+# fleet.conf (config repo): fleet pushes only the profiles you list here; keep production out of that list
+FLEET_AWS_PROFILES="dev"
+fleet config publish --no-capture
+
+aws sso login --profile dev        # on the master, as usual (browser)
+fleet aws push                     # -> mac2: 1 profile (expire 18:42)   (fleet sync does this on its own from now on)
+fleet ssh mac2 aws sts get-caller-identity --profile dev
+```
+
+The master runs `aws configure export-credentials --profile dev --format
+process` for every listed profile whose IAM Identity Center session is logged
+in right now, and pipes the result — the role's `AccessKeyId`,
+`SecretAccessKey`, `SessionToken` and `Expiration`, nothing else — over ssh
+into `fleet aws receive` on every online node. Nothing is written on the
+master; the SSO session token in `~/.aws/sso/cache` never leaves it. Each node
+stores `~/.config/fleet/aws/<profile>.json` (0600) and keeps a
+`# >>> fleet aws >>>` block in its `~/.aws/config` with
+`[profile dev]` → `credential_process = /home/me/.local/bin/fleet aws creds dev`
+plus the profile's `region`/`output`, so the AWS CLI and every SDK on the node
+use the profile by name. `fleet aws creds` prints the stored JSON while it is
+valid (two minutes of skew) and otherwise fails with "on the master run: aws
+sso login". A node that already has its own `[profile dev]` is left alone.
+
+`fleet sync` pushes again every `FLEET_AWS_REFRESH_MINUTES` (60), earlier
+when what it pushed expires within that window, when the allowlist changed or
+when a node was provisioned since; it never logs in for you — an expired
+session is one warning per hour in `sync.log` and `fleet list` shows AWS
+`expired`. Then `fleet aws login` (= `aws sso login --profile <first listed>`
+followed by the push; `-- --use-device-code` and other `aws sso login` flags
+pass through). `--profile P` narrows a push to listed profiles, never widens;
+a profile you drop from `FLEET_AWS_PROFILES` disappears from the nodes at the
+next push. `fleet leave` and `fleet kick` remove the files and the block; a
+node that was unreachable keeps credentials that expire on their own (the
+role session's lifetime, hours). The `devtools` plug-in installs the AWS CLI
+on the nodes (`FLEET_AWS_CLI`); `fleet aws creds` itself needs only python3.
+Knobs: `FLEET_AWS_PROFILES`, `FLEET_AWS_SYNC`, `FLEET_AWS_REFRESH_MINUTES`,
+`FLEET_AWS_CLI`.
+
 ### Run CLIProxyAPI on every node, each with its own logins
 
 ```sh
@@ -762,7 +807,8 @@ fleet kick studio                      # type the node name to confirm (or --yes
 
 Kick kills a running provision, marks the node revoked (nothing can
 re-provision it), revokes its T3 access if any, runs `fleet leave` on it (stops
-timers, harness processes, the proxy; `tailscale logout`), deletes the device
+timers, harness processes, the proxy; removes the forwarded AWS credentials
+and their `~/.aws/config` block; `tailscale logout`), deletes the device
 via the Tailscale API, deletes its deploy keys (each on the repository it was
 registered on, even if `fleet.conf` points elsewhere by now), and prints the
 secrets it held. Steps that fail stay in `pending_cleanup` and every reconcile
@@ -871,6 +917,10 @@ and kick).
 | `fleet files add PATH` | `--profile minimal\|full` | Mirrors a file under `$HOME` into the vault, encrypted straight from the source (`files/<profile>/<path>.age`); recreated at the same relative path on nodes. |
 | `fleet proxy import [DIR]` | | Copies CLIProxyAPI `conf/config.yaml` (client key, routing) from DIR (default `FLEET_CLIPROXY_DIR`) into the full profile, encrypted. The OAuth files under `auth/` only with `FLEET_PROXY_SHARE_AUTH=1`; files stored earlier stay in the vault but are not shipped while it is 0. |
 | `fleet proxy login NODE [PROVIDER]` | `--yes` | Logs NODE's own CLIProxyAPI into one upstream account: PROVIDER = `claude` (default, callback port 54545), `codex` (1455), `codex-device` (device code, no tunnel), `antigravity` (51121). Backs up the node's `auth/*.json` into `.auth-backup/<UTC>/`, runs the vendor's login container on the node (`FLEET_PROXY_IMAGE`, `-no-browser`) over `ssh -t -L <port>:127.0.0.1:<port>` with the pinned host key, so the URL it prints is opened in the browser on the master and the callback reaches the node; then recreates the proxy container and checks `/v1/models` with the node's client key (read on the node). Refuses when the port is busy on the master, for containers, and without confirmation. Audited; never sees a token. |
+| `fleet aws push` | `--profile P` (repeatable), `--node NODE` (repeatable) | Forwards the role credentials of the profiles in `FLEET_AWS_PROFILES` (`--profile` narrows the list, never widens it; a name outside it exits 2) whose SSO session is logged in now: `aws configure export-credentials --format process` per profile on the master, one JSON bundle in memory, piped into `fleet aws receive` on every online provisioned node (or `--node`) in parallel. Reports `NODE: N profiles (expire HH:MM)`, names skipped profiles (`AWS SSO session expired for …`), exits 1 when nothing could be pushed or a node failed. Audits names and expiry only. See "Use your AWS SSO login on every node". |
+| `fleet aws login` | `--profile P` (repeatable), `-- AWS_ARGS…` | `aws sso login --profile P` on the master (interactive: browser or device code; everything after `--` goes to it), for the given profiles or the first one in `FLEET_AWS_PROFILES`, then `fleet aws push` (narrowed to the given profiles). |
+| `fleet aws creds PROFILE` (node) | | The `credential_process` of the fleet block in `~/.aws/config`: prints `~/.config/fleet/aws/PROFILE.json` while its `Expiration` is more than two minutes away, else exit 1 with "expired at …; on the master run: aws sso login". python3 only. |
+| `fleet aws receive` (node) | | Run by the master over ssh with the bundle on stdin: writes the credential files (0600, dir 0700, atomic), rewrites the fleet block (profiles in the bundle's allowlist that have a file), drops files and entries of profiles no longer allowed, never touches a profile the node defines itself. |
 | `fleet vault status` | | Key backend (and the one the key was created with), recipient, whether the key is reachable now, how many files are encrypted, which are still plaintext. Read-only. |
 | `fleet vault encrypt` | | Migration for a vault from before 0.3.0: creates the key if there is none, encrypts every plaintext secret, env, JSON and mirrored file (each one decrypted again and compared before the plaintext is removed), drops the legacy `digest.key`. Idempotent; refuses when the key backend is unreachable. |
 | `fleet vault rotate-key` | | Generates a new key, stores it as the incoming key, re-encrypts every file (verified), swaps files + recipient, then replaces the old key in the backend. Takes the master lock. A crash leaves a vault that still decrypts; rerun to finish. |
@@ -943,6 +993,10 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_PROXY_PORT` | `8317` | Host port on 127.0.0.1 the proxy is published on. |
 | `FLEET_CLIPROXY_DIR` | `$HOME/cli-proxy-api` | Compose directory on nodes; default source for `fleet proxy import`. |
 | `FLEET_PROXY_SHARE_AUTH` | `0` | `1`: `fleet proxy import` also stores the master's OAuth files and provision ships them to full nodes (the pre-0.4.3 behaviour; `--refresh-proxy-auth` overwrites a node's copies). Breaks when the vendor rotates refresh tokens: only for a single node that never runs at the same time as the master. `0`: each node logs in on its own with `fleet proxy login NODE`. |
+| `FLEET_AWS_PROFILES` | `""` | fleet pushes only the profiles you list here; keep production out of that list. Space-separated names from the master's `~/.aws/config` whose role credentials `fleet aws push` and `fleet sync` forward (SSO session token never leaves the master). Empty = nothing is pushed; `--profile` only narrows; a profile that leaves the list is removed from the nodes at the next push. Example `"dev"`. |
+| `FLEET_AWS_SYNC` | `1` | `fleet sync` pushes the listed profiles that are logged in (quiet, never logs in itself; one warning per hour while the session is expired). `0` = only `fleet aws push` by hand. |
+| `FLEET_AWS_REFRESH_MINUTES` | `60` | `fleet sync` pushes again when the last push is this old, when what it pushed expires within this window, when the allowlist changed, or when an online provisioned node never got a push. |
+| `FLEET_AWS_CLI` | `1` | `devtools` installs the AWS CLI on the nodes (macOS `brew install awscli`; Linux the official installer into `~/.local/aws-cli` + `~/.local/bin/aws`, no root). `0` = skip; `fleet aws creds` works without it. |
 | `FLEET_T3_REMOTE` | `0` | `1`: `fleet init master` creates the T3 client key, so every node gets the restricted `authorized_keys` line and `~/.ssh/config.d/fleet` is maintained. `0`: only after `fleet t3 setup`. |
 | `FLEET_SKILL_EXCLUDE` | `""` | Skills on the master never captured. |
 | `FLEET_CAPTURE_MACHINE_ONLY` | `""` | Extra words marking MCP servers/hooks as machine-only (dropped on capture). |
@@ -981,6 +1035,7 @@ Environment knobs (not config keys; all optional):
 | `FLEET_CODE_REMOTE`, `FLEET_CONFIG_REMOTE`, `FLEET_MEMORY_REMOTE` | Replace the derived `github-fleet-*` URLs on a node (local bare repos, tests). |
 | `FLEET_TS_API`, `FLEET_GH_API`, `FLEET_TS_STATUS_JSON`, `FLEET_MASTER_TS_IP` | Test/offline mode: base URLs for `lib/api.py` (see `tests/e2e/fake_api.py`); a file in place of `tailscale status --json`; the master's tailnet IP. `FLEET_GH_API` also forces the token path instead of `gh`. |
 | `FLEET_SKILL_ADD_NO_SYNC=1` | `fleet skill add` / `remove`: commit and push, but do not run `reconcile` afterwards (nodes get the change on their next pull). |
+| `FLEET_AWS_BIN` | The AWS CLI `fleet aws` runs on the master (default `aws` on PATH; tests point it at a fake, or at a missing path for "not installed"). |
 | `FLEET_MEMORY_SEED=0`, `FLEET_NOW_EPOCH` | Never clone or seed the memory repo from the master (neither the scaffold seed nor the master's own `~/fleet-memory`); fake clock for the grace-period logic (tests). |
 | `FLEET_SSHD_CONFIG`, `FLEET_SSHD_CONFIG_DIR` | Paths `fleet join` hardens (tests redirect them). |
 
@@ -1002,6 +1057,7 @@ digest.key                              legacy (vault before `fleet vault encryp
 nodes/<ts-id>.json                      registry (incl. lan_ips + ethernet for fleet unlock); nodes/pending/, nodes/claimed/, rollback-* tombstones
 policy-backups/<timestamp>.hujson       the live policy as it was before each `policy apply`
 sync.json                               last `fleet update` push to the nodes (fleet sync)
+aws.json                                last AWS credential push (time, earliest expiry, nodes, allowlist, warning timestamps); never a credential
 locks/<ts-id>/{pid,token}, locks/.registry, locks/.sync (sync and reconcile never overlap)
 audit.log                               one line per action
 ~/.config/fleet/fleet.conf              FLEET_CONFIG_DIR + local overrides; reconcile.log, sync.log; logs/update-<node>.log (failed pushes)
@@ -1031,6 +1087,8 @@ Node:
 ~/.config/fleet/manifest, harness.manifest, harness.claude-mcp   what fleet owns, for cleanup
 ~/.config/fleet/privileged_done  join finished the root steps; locks/apply; logs/<job>.log; daemon.pid
 ~/.config/fleet/power_done       join switched system sleep off (`<UTC> macos:pmset`, `macos:pmset+lid` with FLEET_KEEP_AWAKE_LID, or `linux:mask`)
+~/.config/fleet/aws/<profile>.json   AWS role credentials from the master (0600, dir 0700; credential_process JSON), gone at leave/kick
+~/.aws/config                    one `# >>> fleet aws >>> … # <<< fleet aws <<<` block: `[profile P]` with `credential_process = ~/.local/bin/fleet aws creds P` (absolute path) + region/output; original kept as config.pre-fleet
 ~/.ssh/fleet_code, fleet_config, fleet_memory (+ .pub); ~/.ssh/config block `# >>> fleet >>>` (github-fleet-* aliases)
 ~/.ssh/authorized_keys           the master key (join) and, with T3 access, the restricted `fleet-t3-client` line
 ~/.t3/runtime/versions/<v>/t3    T3's own CLI archive, installed by T3's SSH flow on first connect; ~/.t3/ssh-launch/<key>/
@@ -1056,6 +1114,7 @@ rm -rf ~/.local/share/fleet ~/.local/share/fleet-config ~/.config/fleet
 rm -f ~/.local/bin/fleet ~/.local/bin/fleeter ~/.local/bin/fleet-chrome-mcp ~/.local/bin/fleet-playwright-mcp
 rm -f ~/.ssh/fleet_code ~/.ssh/fleet_code.pub ~/.ssh/fleet_config ~/.ssh/fleet_config.pub ~/.ssh/fleet_memory ~/.ssh/fleet_memory.pub
 # ~/.ssh/config, ~/.zshrc, ~/.bashrc, ~/.profile, …: delete the `# >>> fleet >>> … # <<< fleet <<<` block, or restore <file>.pre-fleet
+# ~/.aws/config: delete the `# >>> fleet aws >>> … # <<< fleet aws <<<` block (fleet leave does); ~/.config/fleet/aws/ holds the forwarded credentials
 # ~/.ssh/authorized_keys: delete the master's `fleet-master@…` line and any `fleet-t3-client` line
 # harness files: the paths in ~/.config/fleet/manifest (restore the <file>.pre-fleet copies if you want the old ones back)
 rm -rf ~/fleet-memory ~/cli-proxy-api            # if you used them

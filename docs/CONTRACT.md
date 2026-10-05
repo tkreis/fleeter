@@ -322,6 +322,9 @@ same, then `fleet leave`.
 ~/Library/LaunchAgents/dev.fleet.awake.plist   macOS nodes, FLEET_KEEP_AWAKE=1: `/usr/bin/caffeinate -i -m -s`, KeepAlive + RunAtLoad,
                                  written by apply (node_awake_apply; in the manifest), removed by leave and by apply with FLEET_KEEP_AWAKE=0;
                                  never on the master or in a container
+~/.config/fleet/aws/<profile>.json   AWS role credentials from the master (`fleet aws receive`; 0600 in a 0700 dir): exactly the
+                                 credential_process JSON (Version 1, AccessKeyId, SecretAccessKey, SessionToken, Expiration)
+~/.aws/config                    one `# >>> fleet aws >>>` … `# <<< fleet aws <<<` block (see "fleet aws" below); original as config.pre-fleet
 ~/.config/fleet/manifest         files fleet owns (one path per line), for cleanup; harness.manifest, harness.claude-mcp
 ~/.config/fleet/status.json      written by apply/status
 ~/.config/fleet/memory.state     state=ok|conflict|missing|off (off: no memory remote configured), last_sync, detail,
@@ -425,6 +428,15 @@ One run, under `vault/locks/.sync`:
    `sync.skills`.
 3. `reconcile_run` (the body of `fleet reconcile`): enrol, provision every node
    whose desired digest changed, cleanups, absence tracking.
+3b. `sync_aws_push` (`lib/aws.sh`, `FLEET_AWS_SYNC=1`, `FLEET_AWS_PROFILES`
+   non-empty, `aws` present): `aws_push_due` — push when `vault/aws.json` has
+   no `pushed`, when it is `FLEET_AWS_REFRESH_MINUTES` old, when its
+   `expires` lies within that window, when its `allowed` differs from
+   `FLEET_AWS_PROFILES`, or when an online provisioned node is missing from
+   its `nodes` — then `aws_push_run sync`: like `fleet aws push` but quiet on
+   success and with every warning (refused names, expired session, export
+   errors) rate-limited to once per hour per kind (`warned_<kind>` in the
+   state file). Never runs `aws sso login`.
 4. Every `FLEET_PUSH_TOOLS_EVERY` minutes (0 = never), when at least one
    provisioned node is online: `~/.local/bin/fleet update` on each of them in
    parallel, each under `with_timeout FLEET_SYNC_UPDATE_SECS` (900), one summary
@@ -499,6 +511,7 @@ registry. Keys are stable; new ones may be added.
   "proxy": "off",                 // ok | off (cliproxy not in the node's tools) | login (0.4.3: its upstream login expired) | down | null
   "fleet": "0.3.0",               // the node's fleet version, null when not reached
   "awake": "on",                  // 0.3.3: the node's `awake` (on | off | n/a); null when not reached, on the master row and unknown peers
+  "aws": {"profiles": 2, "expires": "…", "state": "ok"},   // 0.6.0: the node's `aws` object; null when not reached, on the master row and unknown peers
   "missing_since": "", "cleanup_pending": [],
   "master": false                 // 0.3.2: true on the one row that describes the master itself
 }
@@ -516,7 +529,8 @@ master's, or the applied digest differs from the desired one; `yes` otherwise.
 The table (`fleet list`) prints NAME, HOST, ONLINE, STATE, SYNCED, LAST
 PROVISION, TOOLS (`9 ok, 1 login: cursor`; `unreachable`; `cleanup-pending` on
 a revoked tombstone), MEMORY (on the master row with the age of its last sync,
-`ok (3m)`), PROXY, FLEET; `-` where the JSON has `null`.
+`ok (3m)`), PROXY, AWS (`ok 3h` = time until the earliest forwarded credential
+expires, `expired`, `-` for none), FLEET; `-` where the JSON has `null`.
 
 ## `fleet status --json` (node) — consumed by `fleet nodes --live` and `fleet list`
 
@@ -535,6 +549,8 @@ a revoked tombstone), MEMORY (on the master row with the age of its last sync,
   "lan_ips": ["192.168.1.50"],    // 0.4.0: LAN IPv4 addresses of the physical ports (macOS: networksetup -listallhardwareports +
                                   // ipconfig getifaddr; Linux: /sys/class/net + ip/ifconfig); no loopback, link-local or 100.64/10;
   "ethernet": "yes",              // [] in containers. ethernet yes|no: one of them is on a port that is not Wi-Fi
+  "aws": {"profiles": 2, "expires": "2026-10-05T18:42:10Z", "state": "ok"},   // 0.6.0: forwarded AWS credentials: count, earliest
+                                  // Expiration (null for none), ok | expired (earliest within 2 min of now or past) | none
   "token_age_days": {"CLAUDE_CODE_OAUTH_TOKEN": 12},
   "updated": "…"
 }
@@ -624,6 +640,72 @@ session (master key, pinned host key):
 
 `<dir>` is `FLEET_CLIPROXY_DIR` with the master's `$HOME` prefix replaced by a
 literal `$HOME` for the node's shell. No token is read, printed or logged.
+
+## `fleet aws` (master → node) — `lib/aws.sh`, `lib/aws_creds.py`
+
+The AWS facts (export-credentials output, the credential_process contract,
+the `~/.aws/config` SSO layout, the expired-session error) and their sources
+are quoted at the top of `lib/aws_creds.py`.
+
+Master, `fleet aws push [--profile P]... [--node NODE]...` (`aws_push_run`):
+
+1. Selection (`aws_creds.py select`): the allowlist `FLEET_AWS_PROFILES`
+   (empty and no `--profile` → exit 1 with the hint) minus names the master's
+   `~/.aws/config` (`AWS_CONFIG_FILE` honoured) has no `[profile X]` for.
+   `--profile P` must be in the allowlist, else `error … refused`, exit 2
+   before anything runs; it narrows what this run sends, while the bundle's
+   `allowed` header always carries the whole selection.
+2. Export (`aws_creds.py export`): `aws configure export-credentials
+   --profile P --format process` per profile (`FLEET_AWS_BIN`, default
+   `aws`), stdout parsed in memory; a non-zero exit (the SSO session is not
+   logged in) or an `Expiration` within 2 min skips the profile (manual push:
+   `AWS SSO session expired for …: run aws sso login (or fleet aws login)`;
+   sync: silent, one warning per hour); no `Expiration` (long-term keys) is
+   never forwarded. Nothing to push → exit 1 (manual) / return (sync).
+3. The bundle, one line of JSON that only ever lives in a shell variable:
+   ```json
+   {"v": 1, "allowed": ["dev", "tools"],
+    "profiles": {"dev": {"region": "eu-central-1", "output": "json",
+                         "creds": {"Version": 1, "AccessKeyId": "…", "SecretAccessKey": "…", "SessionToken": "…", "Expiration": "…"}}}}
+   ```
+   piped into `ssh … '~/.local/bin/fleet aws receive'` on every online
+   provisioned node (or the `--node` ones) in parallel; each node's first
+   stdout line is reported as `NAME: N profiles (expire HH:MM)`, its `warn `
+   stderr lines as warnings. Audit `aws.push <node> ok profiles:a,b
+   expires:<ISO>` / `fail`; `vault/aws.json` (0600) gets `pushed`, `expires`
+   (earliest), `nodes`, `allowed`, `warned_*`. Exit 1 when a node failed.
+
+`fleet aws login [--profile P]... [-- AWS_ARGS...]`: `aws sso login --profile
+P [AWS_ARGS]` for each given profile (each must be allowlisted; exit 2
+otherwise), or for the first allowlisted one, then the push (narrowed to the
+given profiles). Audit `aws.login - ok <profiles>`.
+
+Node, `fleet aws receive` (`aws_creds.py receive`, stdin ≤ 1 MiB): for every
+profile in the bundle that is in `allowed`, has a valid name
+(`[A-Za-z0-9][A-Za-z0-9._@+=,-]{0,127}`) and a parseable `Expiration`, and
+that the node does not define itself outside the block (`[profile X]` /
+`[default]` elsewhere in `~/.aws/config` → `warn X: this machine has its own
+[profile X] …; left alone`): write `~/.config/fleet/aws/X.json` (0600,
+tmp + rename; dir 0700). Then delete every credential file whose profile is
+not in `allowed` (or is now the node's own), and rewrite the block —
+`# >>> fleet aws >>>`, two comment lines, then per remaining credential file
+`[profile X]`, `credential_process = <abs path of $FLEET_BIN/fleet, else
+$FLEET_ROOT/fleet> aws creds X` (double-quoted when the path has a space),
+`region = …` / `output = …` from the bundle (or the previous block entry),
+`# <<< fleet aws <<<` — leaving every other line as it was (`backup_once` →
+`config.pre-fleet`; a new file is 0600 in a 0700 `~/.aws`; the file is
+removed when the block was its only content). Prints `N profiles (expire
+HH:MM)` (local time of the earliest expiry) or `0 profiles`; exit 1 only for
+an unreadable bundle.
+
+`fleet aws creds X`: prints `~/.config/fleet/aws/X.json` as one line of JSON
+when its `Expiration` is more than 120 s away; else stderr `fleet: AWS
+credentials for X expired at <ISO>; on the master run: aws sso login (fleet
+sync pushes fresh ones)` (or `no AWS credentials for X on this node; …
+fleet aws push`), exit 1. `fleet status` reads the same files
+(`node_aws_status_json`); `fleet leave` (and so `kick`) runs
+`node_aws_remove`: files, directory and block gone, the rest of
+`~/.aws/config` kept.
 
 ## `fleet reboot` / `fleet unlock` (master)
 

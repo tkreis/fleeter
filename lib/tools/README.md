@@ -16,14 +16,14 @@ interface"); the short version:
 `_<name>_`. Only helpers from `lib/common.sh` (`log ok warn die have as_root
 atomic_write fleet_os fleet_arch fleet_in_container fleet_pkg_mgr`) and settings
 from `fleet.conf` (`FLEET_MISE_TOOLS`, `FLEET_PNPM`, `FLEET_NPM_GLOBALS`,
-`FLEET_DOCKER_LOGINS`, `FLEET_PROXY_*`, `FLEET_CLIPROXY_DIR`,
+`FLEET_DOCKER_LOGINS`, `FLEET_AWS_CLI`, `FLEET_PROXY_*`, `FLEET_CLIPROXY_DIR`,
 `FLEET_CHROME_DEVTOOLS_MCP`, `FLEET_PLAYWRIGHT_MCP`) may be used. A new setting
 goes into `config/defaults.conf` and `examples/fleet-config/fleet.conf` with the
 same default.
 
 Shipped plug-ins: `base` (git, git-lfs, curl, jq, ripgrep, tmux, python3, unzip,
 nc), `devtools`
-(mise runtimes, pnpm, uv, gh, glab, docker, registry logins), `chrome` (browser
+(mise runtimes, pnpm, uv, gh, glab, the AWS CLI, docker, registry logins), `chrome` (browser
 plus the two browser MCP servers behind `~/.local/bin/fleet-*-mcp` wrappers),
 `claude`, `codex`, `cursor`, `grok` (the harness CLIs), `cliproxy` (CLIProxyAPI
 in Docker), `t3code` (desktop app, GUI only).

@@ -47,6 +47,7 @@ Start read-only. `--json` output is stable (schema in `docs/CONTRACT.md`).
 | Shared memory (node or master) | `fleet memory sync` uploads this machine's agent memories and pulls the others' (`--reset` after a human fixed a conflict) |
 | Log a node into a tool (device code / browser) | `fleet ssh NODE fleet login TOOL` (interactive: hand it to the user) |
 | Log a node's CLIProxyAPI into an upstream account | `fleet proxy login NODE [claude\|codex\|codex-device\|antigravity]` (interactive: it prints an OAuth URL the user must open in their own browser on the master; hand the command to them) |
+| Give the nodes the user's AWS SSO login | after the user ran `aws sso login` on the master: `fleet aws push` (only the profiles in `FLEET_AWS_PROFILES` of `fleet.conf`; `--profile P` narrows, `--node NODE` targets one). `fleet aws login` runs the login first (browser or device code: hand it to the user). `fleet sync` refreshes on its own and never logs in |
 | Use a node from T3 Code on the master | `fleet t3 setup NODE`, then `fleet t3 status NODE` |
 | Health of the master and the isolation policy | `fleet doctor`, `fleet policy check` |
 | Install this skill on the master | `fleet skill install`; `fleet schedule install` (re)installs the reconcile, sync and memory timers and clones the memory vault |
@@ -73,6 +74,12 @@ exit 2 before anything runs.
   never pass `--yes` unless the user said so. Each node logs into its own
   accounts; do not copy `auth/*.json` between machines (refresh-token rotation
   kills every other copy).
+- AWS: never print credentials. `fleet aws creds P` on a node and
+  `~/.config/fleet/aws/*.json` hold role credentials, `aws configure
+  export-credentials` on the master prints them: never run those into the
+  conversation. `fleet aws push` is safe to run (it reports profile names and
+  expiry only); it pushes only the profiles the user listed in
+  `FLEET_AWS_PROFILES`, so never add a production profile there yourself.
 - `fleet reboot` and `fleet unlock` need the user at the keyboard: both end
   in a password prompt on the remote machine (sudo + FileVault, or the
   pre-boot unlock). Never ask the user for that password, never accept it in
@@ -107,7 +114,9 @@ Columns: NAME, HOST (tailnet name), ONLINE (yes/no), STATE
 (enrolled | provisioning | provisioned | revoked | unknown), SYNCED
 (yes | behind | ? — the node's applied code+config revisions and digest against
 the master's), LAST PROVISION (age), TOOLS (`9 ok, 1 login: cursor`), MEMORY
-(ok | conflict | missing | off), PROXY (ok | off | down | login), FLEET (node version).
+(ok | conflict | missing | off), PROXY (ok | off | down | login), AWS (`ok 3h` =
+forwarded AWS credentials valid for 3 more hours | expired | `-` none), FLEET
+(node version).
 `-` means not available (offline node, `--offline`, unknown peer). The first
 row is the master itself (STATE `master`): its MEMORY column shows whether the
 master's own agent memories reach the vault (`ok (3m)` = last sync 3 min ago).
@@ -129,6 +138,8 @@ master's own agent memories reach the vault (`ok (3m)` = last sync 3 min ago).
 | PROXY `down` | CLIProxyAPI enabled but not answering | `fleet ssh NODE fleet status`; on the node `docker compose -f ~/cli-proxy-api/compose.yaml up -d` |
 | PROXY `login` / TOOLS `1 login: cliproxy` | the node's proxy answers, but its upstream login is dead (the vendor rotated the refresh token: `invalid_grant` in the container's log, newer than its auth files; Claude Code there "could not authenticate") | the user runs `fleet proxy login NODE` on the master (browser needed); never copy auth files from another machine |
 | MEMORY `conflict` | the node stopped syncing after a rebase conflict | a human resolves it on that node, then `fleet memory sync --reset` (README "Recover a memory conflict") |
+| AWS `expired`, or `fleet sync` logs `AWS SSO session expired` | the master's IAM Identity Center session ended; nodes keep nothing usable | the user runs `aws sso login` (or `fleet aws login`) on the master, then `fleet aws push` |
+| AWS `-` although the user wants it | `FLEET_AWS_PROFILES` is empty (nothing is pushed by default), the node is unreachable, or the master has no `aws` CLI | set `FLEET_AWS_PROFILES="dev"` in `fleet.conf` (never production), `fleet config publish --no-capture`, `fleet aws push` |
 | MEMORY `missing` | memory clone failed (deploy key pending) | `fleet ssh NODE fleet apply`; on the master row: `fleet schedule install` |
 | a memory file never shows up in the vault | the secret scan hit it (`fleet status` on that machine: `capture_skipped` in `~/.config/fleet/memory.state`), it is larger than `FLEET_MEMORY_MAX_KB`, or a `FLEET_MEMORY_CAPTURE_EXCLUDE` glob matches | remove the secret from the memory file; the next sync uploads it |
 | revoked + `cleanup-pending` | a device or key delete is still being retried | `fleet reconcile`; `fleet doctor` lists what is pending |

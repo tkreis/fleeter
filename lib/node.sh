@@ -1402,13 +1402,15 @@ node_awake_state() {
 # cannot sudo: it only reports, and status shows the undo command.
 
 # node_awake_lid_state — on | off | n/a: `pmset -g` lists `SleepDisabled 1`
-# while system sleep is disabled outright. macOS nodes only.
+# while system sleep is disabled outright. Any Mac, the master included (it
+# is a per-machine fact and `fleet power lid` sets it there too); n/a in
+# containers and elsewhere.
 node_awake_lid_state() {
-  if fleet_is_master || fleet_in_container; then echo n/a; return 0; fi
+  if fleet_in_container; then echo n/a; return 0; fi
   case "$(fleet_os)" in
     macos)
       have pmset || { echo n/a; return 0; }
-      if pmset -g 2>/dev/null | awk '$1 == "SleepDisabled" { f = ($2 == "1") } END { exit !f }'; then echo on; else echo off; fi ;;
+      power_sleep_disabled ;;
     *) echo n/a ;;
   esac
 }
@@ -1488,4 +1490,180 @@ node_lan_info() {
 $(node_lan_ifaces)
 EOF
   printf '%s\t%s\n' "$ips" "$eth"
+}
+
+# ---------- fleet power (the lid setting, after join) ----------
+
+# `fleet power lid on|off` switches `pmset -a disablesleep` on the machine it
+# runs on: a MacBook that already joined (or the master itself) without
+# FLEET_KEEP_AWAKE_LID. Root-only, so it asks for the sudo password at
+# pmset's own prompt; from the master `fleet power lid on NODE` opens an
+# interactive fleet session and the node runs this with --yes
+# (power_lid_remote in lib/master.sh). The marker word `lid` in
+# ~/.config/fleet/power_done says fleet switched it on (`+lid`: join did).
+
+# power_is_laptop — a Mac with a battery (`pmset -g batt` lists an
+# InternalBattery) or a MacBook model name; the same rule as join_is_laptop.
+power_is_laptop() {
+  if have pmset && pmset -g batt 2>/dev/null | grep -q InternalBattery; then return 0; fi
+  case "$(sysctl -n hw.model 2>/dev/null)" in *MacBook*) return 0 ;; esac
+  return 1
+}
+
+# power_sleep_disabled — on | off: `pmset -g` lists `SleepDisabled 1`.
+power_sleep_disabled() {
+  if pmset -g 2>/dev/null | awk '$1 == "SleepDisabled" { f = ($2 == "1") } END { exit !f }'; then echo on; else echo off; fi
+}
+
+# power_marker_lid — join | power | "": who recorded the lid setting in power_done.
+power_marker_lid() {
+  local m="$FLEET_HOME/power_done" c
+  [ -f "$m" ] || return 0
+  c=$(cat "$m" 2>/dev/null || true)
+  case "$c" in *+lid*) echo join ;; *" lid") echo power ;; esac
+  return 0
+}
+
+# power_marker_set — append the word `lid` to power_done (created with just a
+# timestamp when join never wrote it); the join markers stay.
+power_marker_set() {
+  local m="$FLEET_HOME/power_done" c
+  [ -z "$(power_marker_lid)" ] || return 0
+  mkdir -p "$FLEET_HOME"
+  if [ -f "$m" ]; then c=$(cat "$m" 2>/dev/null || true); else c=$(date -u +%Y-%m-%dT%H:%M:%SZ); fi
+  printf '%s lid\n' "$c" | atomic_write "$m" 0600
+}
+
+# power_marker_clear — drop `+lid` and `lid` from power_done; the file goes
+# when nothing but the timestamp is left (fleet power created it).
+power_marker_clear() {
+  local m="$FLEET_HOME/power_done" c
+  [ -f "$m" ] || return 0
+  c=$(sed 's/+lid//g; s/ lid$//' "$m" 2>/dev/null || true)
+  case "$c" in *" "*) printf '%s\n' "$c" | atomic_write "$m" 0600 ;; *) rm -f "$m" ;; esac
+}
+
+# power_lid_applies — true on a Mac laptop with pmset; otherwise says why the
+# lid setting has nothing to do here and returns 1 (the command then exits 0).
+power_lid_applies() {
+  if fleet_in_container; then log "lid: a container has no power management; nothing to change"; return 1; fi
+  case "$(fleet_os)" in
+    macos) ;;
+    linux) log "lid: no lid setting on Linux; fleet join masked the systemd sleep targets (fleet status: awake); the lid of a Linux laptop is logind HandleLidSwitch — nothing to change"; return 1 ;;
+    *) log "lid: unsupported OS; nothing to change"; return 1 ;;
+  esac
+  have pmset || { log "lid: pmset not found; nothing to change"; return 1; }
+  if ! power_is_laptop; then
+    log "lid: not a laptop (no battery, model $(sysctl -n hw.model 2>/dev/null || echo unknown)); the lid setting is for MacBooks only, nothing to change"
+    return 1
+  fi
+  return 0
+}
+
+# power_lid_caveats — the two things to know before disabling sleep outright, and the undo.
+power_lid_caveats() {
+  warn "a closed MacBook keeps running at full tilt: never in a bag, a drawer or on a bed (heat)"
+  warn "it applies on battery too: unplugged it never sleeps and drains flat, so keep it on the charger"
+  log "undo: fleet power lid off  (or: sudo pmset -a disablesleep 0)"
+}
+
+# power_lid_here on|off YES — this machine: caveats, typed `yes` unless YES=1,
+# `sudo pmset -a disablesleep 1|0` (the password goes to sudo's own prompt),
+# the marker, then `pmset -g` is read back. 0 = done; 3 = nothing to do on
+# this machine (explained); 1 = aborted, pmset refused (wrong password) or
+# the Mac ignored the setting.
+power_lid_here() {
+  local mode=$1 yes=$2 want=0 before after
+  power_lid_applies || return 3
+  [ "$mode" = on ] && want=1
+  before=$(power_sleep_disabled)
+  if [ "$before" = "$mode" ]; then
+    ok "lid: sleep with the lid closed is already $(power_lid_word "$mode") (pmset -g: SleepDisabled $want)"
+    if [ "$mode" = on ]; then power_marker_set; else power_marker_clear; fi
+    return 0
+  fi
+  if [ "$mode" = on ]; then
+    log "keep this Mac awake with the lid closed: sudo pmset -a disablesleep 1 (you type your sudo password; fleet never sees it)"
+    power_lid_caveats
+  else
+    log "let this Mac sleep with the lid closed again: sudo pmset -a disablesleep 0 (you type your sudo password; fleet never sees it)"
+  fi
+  if [ "$yes" != 1 ]; then
+    typed_confirm 'Type yes to continue (anything else aborts): ' yes || { warn "aborted; nothing changed"; return 1; }
+  fi
+  if ! as_root pmset -a disablesleep "$want"; then
+    warn "pmset -a disablesleep $want failed (wrong password?); nothing changed — rerun: fleet power lid $mode"
+    return 1
+  fi
+  after=$(power_sleep_disabled)
+  if [ "$after" != "$mode" ]; then
+    warn "pmset accepted disablesleep $want but pmset -g still says SleepDisabled $([ "$after" = on ] && echo 1 || echo 0): this model ignores the setting"
+    return 1
+  fi
+  if [ "$mode" = on ]; then power_marker_set; else power_marker_clear; fi
+  ok "lid: sleep with the lid closed is now $(power_lid_word "$mode") (pmset -g: SleepDisabled $want)"
+  return 0
+}
+
+# power_lid_word on|off — how the state reads in a sentence.
+power_lid_word() { if [ "$1" = on ]; then echo disabled; else echo allowed; fi; }
+
+# power_audit WHAT NAME RESULT — the audit line on a master; nothing on a node.
+power_audit() {
+  fleet_is_master && have audit || return 0
+  audit "power.$1" "$2" "$3"
+}
+
+# fleet power lid on|off [NODE] [--yes]
+cmd_power_lid() {
+  local mode="" node="" yes=0 rc=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y) yes=1 ;;
+      -*) die "unknown flag: $1" ;;
+      *) if [ -z "$mode" ]; then mode=$1; else node=$1; fi ;;
+    esac; shift
+  done
+  case "$mode" in on|off) ;; *) die "usage: fleet power lid on|off [NODE] [--yes]" ;; esac
+  if [ -n "$node" ]; then
+    have power_lid_remote || die "fleet power lid $mode $node: a node name only works on the master" "on this machine: fleet power lid $mode"
+    power_lid_remote "$mode" "$node" "$yes"; return
+  fi
+  power_lid_here "$mode" "$yes" || rc=$?
+  case "$rc" in
+    0) power_audit lid master "$mode" ;;
+    3) rc=0 ;;                        # not a Mac laptop: nothing happened, nothing to audit
+    *) power_audit lid master "fail $mode" ;;
+  esac
+  return "$rc"
+}
+
+# power_status_here — the lid setting on this machine, three or four lines.
+power_status_here() {
+  local state marker="none" want=0
+  if fleet_in_container || [ "$(fleet_os)" != macos ] || ! have pmset; then
+    printf 'lid     n/a  (no lid setting here: %s%s)\n' "$(fleet_os)" "$(fleet_in_container && echo ', container' || true)"
+    return 0
+  fi
+  state=$(power_sleep_disabled)
+  [ "$state" = on ] && want=1
+  case "$(power_marker_lid)" in
+    join)  marker="set at join (+lid in power_done)" ;;
+    power) marker="set by fleet power lid on (lid in power_done)" ;;
+  esac
+  printf 'lid     %s  (pmset -g: SleepDisabled %s)\n' "$state" "$want"
+  printf 'laptop  %s\n' "$(power_is_laptop && echo yes || echo no)"
+  printf 'marker  %s\n' "$marker"
+  [ "$state" != on ] || printf 'undo    fleet power lid off  (or: sudo pmset -a disablesleep 0)\n'
+  return 0
+}
+
+# fleet power status [NODE]
+cmd_power_status() {
+  local node=${1:-}
+  if [ -n "$node" ]; then
+    have power_status_remote || die "fleet power status $node: a node name only works on the master" "on this machine: fleet power status"
+    power_status_remote "$node"; return
+  fi
+  power_status_here
 }

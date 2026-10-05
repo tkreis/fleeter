@@ -2554,6 +2554,65 @@ cmd_reboot() {
   die "$name did not come back within ${secs}s" "watch: fleet list; once it is back: fleet ssh $name true"
 }
 
+# ---------- fleet power (lid) on a node ----------
+
+# power_lid_remote on|off NODE YES — `fleet power lid` on a node: the typed
+# confirmation happens here, then `~/.local/bin/fleet power lid MODE --yes`
+# runs over an interactive fleet session (ssh_tty_to, as reboot) so the sudo
+# password goes to the node's own prompt; the node prints the caveats and the
+# read-back. Linux and container nodes have nothing to switch and are
+# explained here without a session. Audit: `power.lid <name> on|off` or
+# `fail on|off rc=<n>`.
+power_lid_remote() {
+  local mode=$1 q=$2 yes=$3 id name os want=0 rc=0
+  vault_require
+  id=$(registry_find "$q"); name=$(registry_get "$id" name); os=$(registry_get "$id" os)
+  node_revoked "$id" && die "node $name is revoked"
+  if [ "$(registry_get "$id" container)" = true ]; then log "$name is a container: no power management, nothing to change"; return 0; fi
+  case "$os" in
+    macos) ;;
+    linux) log "$name runs Linux: no lid setting; fleet join masked its systemd sleep targets (fleet list --json: awake) — nothing to change"; return 0 ;;
+    *) die "cannot change the lid setting on $name: unsupported os '$os'" ;;
+  esac
+  peer_online "$(ts_peers)" "$id" || die "$name is not online on the tailnet" "fleet list"
+  [ "$mode" = on ] && want=1
+  if [ "$yes" != 1 ]; then
+    if [ "$mode" = on ]; then
+      printf 'Keep %s (%s) awake with the lid closed: sudo pmset -a disablesleep 1 on the node (you type your sudo password there; nothing through fleet).\nA closed MacBook keeps running at full tilt (never in a bag or a drawer: heat) and this applies on battery too (unplugged it drains flat). Undo: fleet power lid off %s\n' "$name" "$id" "$name" >&2
+    else
+      printf 'Let %s (%s) sleep with the lid closed again: sudo pmset -a disablesleep 0 on the node (you type your sudo password there).\n' "$name" "$id" >&2
+    fi
+    typed_confirm 'Type yes to continue (anything else aborts): ' yes || die "aborted"
+  fi
+  log "$name: fleet power lid $mode (sudo pmset -a disablesleep $want there; type your sudo password at the node's prompt)"
+  # shellcheck disable=SC2088  # the ~ is expanded by the node's shell
+  ssh_tty_to "$(registry_get "$id" user)" "$(registry_get "$id" dnsname)" "~/.local/bin/fleet power lid $mode --yes" || rc=$?
+  if [ "$rc" = 0 ]; then
+    audit power.lid "$name" "$mode"
+    ok "$name: lid $mode (fleet list --json: awake_lid)"
+    return 0
+  fi
+  audit power.lid "$name" "fail $mode rc=$rc"
+  [ "$rc" != 2 ] || die "$name runs a fleet without 'power' (older than 0.6.2)" "fleet provision $name, then rerun: fleet power lid $mode $name"
+  [ "$rc" != 255 ] || die "could not reach $name over ssh" "fleet list; then rerun: fleet power lid $mode $name"
+  die "fleet power lid $mode failed on $name (exit $rc: wrong password, not a laptop, or the Mac ignored the setting; see above)" "rerun: fleet power lid $mode $name"
+}
+
+# power_status_remote NODE — `fleet power status` on a node (BatchMode, no sudo).
+power_status_remote() {
+  local q=$1 id name os
+  vault_require
+  id=$(registry_find "$q"); name=$(registry_get "$id" name); os=$(registry_get "$id" os)
+  node_revoked "$id" && die "node $name is revoked"
+  if [ "$(registry_get "$id" container)" = true ] || [ "$os" != macos ]; then
+    printf 'lid     n/a  (%s: no lid setting on %s%s)\n' "$name" "${os:-unknown}" "$([ "$(registry_get "$id" container)" = true ] && echo ', container' || true)"
+    return 0
+  fi
+  peer_online "$(ts_peers)" "$id" || die "$name is not online on the tailnet" "fleet list"
+  # shellcheck disable=SC2088  # the ~ is expanded by the node's shell
+  node_ssh "$id" '~/.local/bin/fleet power status' </dev/null
+}
+
 # fleet unlock NODE [--host IP] — a FileVault Mac that restarted (power cut,
 # an update, a plain restart) waits at its pre-boot prompt: no Tailscale, no
 # key auth, only a password over the LAN (apple_ssh_and_filevault(7), macOS

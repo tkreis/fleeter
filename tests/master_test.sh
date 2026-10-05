@@ -104,10 +104,43 @@ case "$cmd" in
   *"fleet leave"*)                [ -f "$T/leave-fail" ] && exit 1; touch "$nh/.fleet-left"; exit 0 ;;
   *"fleet update"*)               touch "$nh/.fleet-updated"; exit 0 ;;
   *"fleet status --json"*)        if [ -f "$T/status-reply.json" ]; then cat "$T/status-reply.json"; else echo '{"fleet":"0.1.0","tools":{"claude":{"state":"ok","detail":"x"},"codex":{"state":"login","detail":"y"}}}'; fi; exit 0 ;;
+  # the real node side of `fleet aws push`, with the fake node's HOME and fleet state ($T/aws-receive-fail: the node fails)
+  *"fleet aws receive"*)          [ -f "$T/aws-receive-fail" ] && exit 1; mkdir -p "$nh/.local/bin"; ln -sfn "$VCAT_ROOT/fleet" "$nh/.local/bin/fleet"
+                                  HOME="$nh" FLEET_HOME="$nh/.config/fleet" FLEET_VAULT="$nh/.config/fleet/vault" FLEET_BIN="$nh/.local/bin" exec bash "$VCAT_ROOT/fleet" aws receive ;;
 esac
 HOME="$nh" exec bash -c "$cmd"
 EOF
 chmod +x "$T/bin/ssh"
+
+# fake aws CLI. FLEET_AWS_BIN points here from the first command on, so the
+# real one (if this machine has it) is never run and the real ~/.aws never read.
+#   $T/aws-expired             export-credentials fails for every profile like an expired SSO session
+#   $T/aws-expired-<profile>   the same for one profile
+#   $T/aws-expiry              the Expiration to report (ISO); default now + 2 h
+# The key ids are split literals so no ASIA/AKIA-shaped token is in the tree.
+export AWS_LOG="$T/aws.log"
+export AWS_FAKE_ASIA="ASIA""FAKEKEYID000"
+export AWS_FAKE_AKIA="AKIA""FAKELONGTERM0001"
+cat >"$T/bin/aws" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$AWS_LOG"
+case "$1 $2" in
+  "configure export-credentials")
+    p=""; while [ $# -gt 0 ]; do case "$1" in --profile) p=$2; shift ;; esac; shift; done
+    if [ -f "$T/aws-expired" ] || [ -f "$T/aws-expired-$p" ]; then
+      # botocore UnauthorizedSSOTokenError, verbatim
+      echo "The SSO session associated with this profile has expired or is otherwise invalid. To refresh this SSO session run aws sso login with the corresponding profile." >&2
+      exit 255
+    fi
+    case "$p" in static) printf '{"Version": 1, "AccessKeyId": "%s", "SecretAccessKey": "FAKE-SECRET-longterm"}\n' "$AWS_FAKE_AKIA"; exit 0 ;; esac
+    exp=$(cat "$T/aws-expiry" 2>/dev/null || python3 -c 'import time;print(time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(time.time()+7200)))')
+    printf '{"Version": 1, "AccessKeyId": "%s", "SecretAccessKey": "FAKE-SECRET-%s", "SessionToken": "FAKE-SESSION-TOKEN-%s", "Expiration": "%s"}\n' "$AWS_FAKE_ASIA$(printf '%s' "$p" | tr '[:lower:]' '[:upper:]')" "$p" "$p" "$exp" ;;
+  "sso login") rm -f "$T/aws-expired"; touch "$T/aws-logged-in" ;;
+  *) echo "fake aws: unsupported: $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$T/bin/aws"
+export FLEET_AWS_BIN="$T/bin/aws"
 export PATH="$T/bin:$PATH"
 
 # fake gh (GitHub CLI): logs argv, keyring state in $GH_STATE
@@ -296,7 +329,8 @@ HELP_OK=1; HELP_BAD=""
 for c in setup "init master" "secrets set X" "secrets list" "files add $HOME/x" "proxy import" "proxy login alpha" invite list nodes "ssh alpha" "provision alpha" reconcile sync "kick alpha" "reboot alpha" "unlock alpha" \
          "t3 setup" "t3 status" "t3 revoke alpha" "config publish" "policy check" "policy apply" "skill install" "skill add $HOME/x" "skill list" "skill remove x" "schedule install" doctor join apply pull update "memory sync" login status leave daemon \
          "vault status" "vault encrypt" "vault rotate-key" "vault export $T/never.age" \
-         init secrets files proxy t3 config policy memory skill schedule vault; do
+         "aws push" "aws login" "aws creds dev" "aws receive" \
+         init secrets files proxy t3 config policy memory skill schedule vault aws; do
   for h in --help -h; do
     # shellcheck disable=SC2086  # $c is meant to split into words
     out=$(printf 'tskey-api-FAKE\n' | PATH="$T/tsbin:$PATH" bash "$FLEET" $c $h 2>&1); rc=$?
@@ -313,7 +347,8 @@ for c in "setup --bogus" "setup extra" "setup --tools" "setup --github-owner" "l
          "reboot --bogus alpha" "reboot a b" "unlock --bogus alpha" "unlock --host" "unlock a b" "proxy frob" "proxy import a b" "proxy login --bogus alpha" "proxy login a b c" \
          "sync --bogus" "sync extra" "skill frob" "skill install --bogus" "skill add --bogus x" "skill add a b" "skill add --name" "skill list --bogus" "skill list extra" \
          "skill remove --bogus x" "skill remove a b" "schedule frob" "schedule install extra" \
-         "vault frob" "vault status --bogus" "vault status extra" "vault encrypt --bogus" "vault rotate-key extra" "vault export a b" nosuch; do
+         "vault frob" "vault status --bogus" "vault status extra" "vault encrypt --bogus" "vault rotate-key extra" "vault export a b" \
+         "aws frob" "aws push --bogus" "aws push extra" "aws push --profile" "aws push --node" "aws login --bogus" "aws login extra" "aws creds" "aws creds a b" "aws receive extra" nosuch; do
   # shellcheck disable=SC2086
   out=$(PATH="$T/tsbin:$PATH" bash "$FLEET" $c </dev/null 2>&1); rc=$?
   if [ "$rc" != 2 ] || ! printf '%s' "$out" | grep -qi 'usage'; then BAD_OK=0; BAD_BAD="$BAD_BAD [$c -> rc $rc]"; fi
@@ -788,6 +823,216 @@ import json,sys
 d={x[\"name\"]: x for x in json.load(sys.stdin)}; a=d[\"alpha\"]
 assert a[\"reachable\"] is None and a[\"synced\"]==\"behind\" and a[\"applied\"][\"source\"]==\"registry\" and a[\"tools\"]=={}'"
 rm -f "$T/status-reply.json" "$FLEET_VAULT/nodes/nUNRCNTRL.json" "$FLEET_VAULT/nodes/nOFFCNTRL.json"
+write_status ""
+
+# ======================================================================
+echo "== aws: the allowlist, only logged-in profiles, nothing on the master's disk, the node side, sync cadence, login, list column"
+# the master's AWS config: SSO profiles (session and legacy form), a production
+# one, a dev-named one with a production role, a long-term-keys one
+mkdir -p "$HOME/.aws"
+cat >"$HOME/.aws/config" <<'EOF'
+[default]
+region = us-east-1
+
+[profile dev]
+sso_session = corp
+sso_account_id = 111122223333
+sso_role_name = DeveloperAccess
+region = eu-central-1
+output = json
+
+[profile tools]
+sso_session = corp
+sso_account_id = 444455556666
+sso_role_name = ToolsAccess
+region = eu-west-1
+
+[profile prod]
+sso_session = corp
+sso_account_id = 777788889999
+sso_role_name = AdminAccess
+region = eu-central-1
+
+[profile support]
+sso_session = corp
+sso_account_id = 444455556666
+sso_role_name = ProdSupport
+
+[profile legacy]
+sso_start_url = https://example.awsapps.com/start
+sso_region = eu-central-1
+sso_account_id = 111122223333
+sso_role_name = ReadOnly
+region = eu-central-1
+
+[profile static]
+region = us-east-1
+
+[sso-session corp]
+sso_start_url = https://example.awsapps.com/start
+sso_region = eu-central-1
+sso_registration_scopes = sso:account:access
+EOF
+# a second provisioned online node next to alpha
+bash "$FLEET" invite --name awsnode >/dev/null 2>&1
+aw_pending=$(grep -l '"name": "awsnode"' "$FLEET_VAULT"/nodes/pending/*.json)
+mk_node fleet-awsnode.tail1.ts.net "$(jget "$aw_pending" nonce)"
+write_status ',"k21":{"ID":"nAWSCNTRL","HostName":"fleet-awsnode","DNSName":"fleet-awsnode.tail1.ts.net.","TailscaleIPs":["100.64.0.50"],"Online":true,"Tags":["tag:fleet-node"]}'
+echo '[{"nodeId":"nAAAACNTRL"},{"nodeId":"nAWSCNTRL"}]' >"$DEVICES_JSON"
+bash "$FLEET" reconcile >/dev/null 2>&1
+assert "aws: a second node (awsnode) is enrolled and provisioned" [ "$(jget "$FLEET_VAULT/nodes/nAWSCNTRL.json" state)" = provisioned ]
+NA_H="$NODES/fleet-alpha.tail1.ts.net"; NW_H="$NODES/fleet-awsnode.tail1.ts.net"
+export TMPDIR="$T/tmp"; mkdir -p "$TMPDIR"
+# no_secret_on_master — nothing under the master's state, temp dir or logs holds key material
+no_secret_on_master() { ! grep -rq -e FAKE-SECRET- -e FAKE-SESSION-TOKEN -e "$AWS_FAKE_ASIA" "$FLEET_HOME" "$TMPDIR" "$AWS_LOG" "$SSH_LOG" 2>/dev/null; }
+export -f no_secret_on_master
+: >"$SSH_LOG"; : >"$AWS_LOG"
+out=$(bash "$FLEET" aws push 2>&1); rc=$?
+assert "empty allowlist: push exits 1 with the hint, runs no aws command, touches no node" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'no AWS profiles allowed; set FLEET_AWS_PROFILES=\"dev\" in fleet.conf' && [ ! -s '$AWS_LOG' ] && [ ! -s '$SSH_LOG' ]" "$out"
+out=$(bash "$FLEET" aws push --profile dev 2>&1); rc=$?
+assert "--profile outside the (empty) allowlist: refused, exit 2, nothing ran" bash -c "[ $rc = 2 ] && printf '%s' \"\$0\" | grep -q 'AWS profile dev refused: not in FLEET_AWS_PROFILES' && [ ! -s '$AWS_LOG' ] && [ ! -s '$SSH_LOG' ]" "$out"
+out=$(FLEET_SYNC_REEXEC=1 bash "$FLEET" sync 2>&1); rc=$?
+assert "sync with an empty allowlist: no aws command, no receive, quiet" bash -c "[ $rc = 0 ] && [ ! -s '$AWS_LOG' ] && ! grep -q 'aws receive' '$SSH_LOG' && ! printf '%s' \"\$0\" | grep -qi aws" "$out"
+# the allowlist: two fine profiles, the legacy form, a name that is not in the
+# config, and a long-term-keys profile
+printf 'FLEET_AWS_PROFILES="dev tools legacy nosuch static"\n' >>"$FLEET_HOME/fleet.conf"
+: >"$SSH_LOG"; : >"$AWS_LOG"
+out=$(bash "$FLEET" aws push 2>&1); rc=$?
+assert "push exits 0: dev, tools and legacy forwarded to both online nodes (one line each with the expiry)" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -Eq 'ok alpha: 3 profiles \(expire [0-9]{2}:[0-9]{2}\)' && printf '%s' \"\$0\" | grep -Eq 'ok awsnode: 3 profiles \(expire [0-9]{2}:[0-9]{2}\)'" "$out"
+assert "an allowlisted name the config does not have is refused and named with the reason" bash -c "printf '%s' \"\$0\" | grep -q 'AWS profiles refused:' && printf '%s' \"\$0\" | grep -q 'nosuch (no \[profile nosuch\] in $HOME/.aws/config)'" "$out"
+assert "long-term keys are never forwarded: static reported, not pushed" bash -c "printf '%s' \"\$0\" | grep -q 'not exported: static (no Expiration: long-term keys are never forwarded)' && [ ! -e '$NA_H/.config/fleet/aws/static.json' ]" "$out"
+assert "the master ran export-credentials --format process for dev, tools, legacy and static only, never a login" bash -c "grep -qx 'configure export-credentials --profile dev --format process' '$AWS_LOG' && grep -q -- '--profile tools ' '$AWS_LOG' && grep -q -- '--profile legacy ' '$AWS_LOG' && grep -q -- '--profile static ' '$AWS_LOG' && ! grep -q -- '--profile prod' '$AWS_LOG' && ! grep -q 'sso login' '$AWS_LOG'"
+assert "both nodes got one 'fleet aws receive' over ssh" bash -c "[ \"\$(grep -c 'fleet-alpha.tail1.ts.net ~/.local/bin/fleet aws receive' '$SSH_LOG')\" = 1 ] && [ \"\$(grep -c 'fleet-awsnode.tail1.ts.net ~/.local/bin/fleet aws receive' '$SSH_LOG')\" = 1 ]"
+assert "node files: ~/.config/fleet/aws/{dev,tools,legacy}.json 0600 in a 0700 dir, the credentials as exported, nothing else" bash -c "[ \"\$(mode_of '$NA_H/.config/fleet/aws')\" = 700 ] && [ \"\$(mode_of '$NA_H/.config/fleet/aws/dev.json')\" = 600 ] && [ \"\$(mode_of '$NA_H/.config/fleet/aws/tools.json')\" = 600 ] && [ \"\$(jget '$NA_H/.config/fleet/aws/legacy.json' AccessKeyId)\" = '${AWS_FAKE_ASIA}LEGACY' ] && [ \"\$(jget '$NA_H/.config/fleet/aws/dev.json' SecretAccessKey)\" = FAKE-SECRET-dev ] && [ \"\$(ls '$NA_H/.config/fleet/aws' | sort | tr '\n' ' ')\" = 'dev.json legacy.json tools.json ' ]"
+assert "node ~/.aws/config: one fleet block with credential_process = <abs ~/.local/bin/fleet> aws creds P plus region/output; no sso_* key, no account id" bash -c "c=\$(cat '$NA_H/.aws/config'); [ \"\$(printf '%s\n' \"\$c\" | grep -c '# >>> fleet aws >>>')\" = 1 ] && printf '%s\n' \"\$c\" | grep -qx 'credential_process = $NA_H/.local/bin/fleet aws creds dev' && printf '%s\n' \"\$c\" | grep -qx 'credential_process = $NA_H/.local/bin/fleet aws creds legacy' && printf '%s\n' \"\$c\" | grep -qx 'region = eu-central-1' && printf '%s\n' \"\$c\" | grep -qx 'output = json' && printf '%s\n' \"\$c\" | grep -qx 'region = eu-west-1' && ! printf '%s' \"\$c\" | grep -q 'sso_' && ! printf '%s' \"\$c\" | grep -q '111122223333' && [ \"\$(mode_of '$NA_H/.aws/config')\" = 600 ]"
+assert "the node answers fleet aws creds dev with the stored JSON (credential_process contract: Version 1, Expiration)" bash -c "o=\$(HOME='$NA_H' FLEET_HOME='$NA_H/.config/fleet' bash '$FLEET' aws creds dev) && printf '%s' \"\$o\" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"Version\"]==1 and d[\"AccessKeyId\"]==\"${AWS_FAKE_ASIA}DEV\" and d[\"SessionToken\"]==\"FAKE-SESSION-TOKEN-dev\" and d[\"Expiration\"]'"
+assert "nothing on the master's disk, in its temp dir or in a log holds a key, secret or session token" no_secret_on_master
+assert "audit: aws.push per node with the profile names and the expiry only" bash -c "grep -Eq ' aws.push alpha ok profiles:dev,tools,legacy expires:[0-9T:Z-]+$' '$FLEET_VAULT/audit.log' && grep -q ' aws.push awsnode ok profiles:dev,tools,legacy' '$FLEET_VAULT/audit.log' && ! grep -q FAKE- '$FLEET_VAULT/audit.log'"
+assert "vault/aws.json (0600) records the push: time, expiry, both nodes, the allowlist; no credential" bash -c "[ \"\$(mode_of '$FLEET_VAULT/aws.json')\" = 600 ] && [ -n \"\$(jget '$FLEET_VAULT/aws.json' pushed)\" ] && [ \"\$(jget '$FLEET_VAULT/aws.json' nodes)\" = '[\"nAAAACNTRL\", \"nAWSCNTRL\"]' ] && [ \"\$(jget '$FLEET_VAULT/aws.json' allowed)\" = 'dev tools legacy nosuch static' ]"
+# an explicit profile narrows the allowlist and never widens it
+: >"$AWS_LOG"
+out=$(bash "$FLEET" aws push --profile prod 2>&1); rc=$?
+assert "--profile prod (in the config, not allowlisted): refused, exit 2, no export, nothing on a node" bash -c "[ $rc = 2 ] && printf '%s' \"\$0\" | grep -q 'AWS profile prod refused: not in FLEET_AWS_PROFILES' && [ ! -s '$AWS_LOG' ] && [ ! -e '$NA_H/.config/fleet/aws/prod.json' ]" "$out"
+grep -v '^FLEET_AWS_PROFILES=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+printf 'FLEET_AWS_PROFILES="dev tools legacy nosuch"\n' >>"$FLEET_HOME/fleet.conf"
+: >"$SSH_LOG"; : >"$AWS_LOG"
+out=$(bash "$FLEET" aws push --profile dev --node awsnode 2>&1); rc=$?
+assert "--profile dev --node awsnode: only dev exported, only awsnode reached, exit 0" bash -c "[ $rc = 0 ] && [ \"\$(grep -c 'export-credentials' '$AWS_LOG')\" = 1 ] && grep -q -- '--profile dev ' '$AWS_LOG' && [ \"\$(grep -c 'aws receive' '$SSH_LOG')\" = 1 ] && grep -q 'fleet-awsnode.tail1.ts.net ~/.local/bin/fleet aws receive' '$SSH_LOG' && printf '%s' \"\$0\" | grep -q 'ok awsnode: 3 profiles'" "$out"
+assert "narrowing a push never revokes: awsnode still holds tools and legacy" bash -c "[ -f '$NW_H/.config/fleet/aws/tools.json' ] && [ -f '$NW_H/.config/fleet/aws/legacy.json' ] && grep -q 'aws creds tools' '$NW_H/.aws/config'"
+# tightening the allowlist on the master revokes on the nodes at the next push
+printf 'FLEET_AWS_PROFILES="dev legacy"\n' >>"$FLEET_HOME/fleet.conf"
+: >"$AWS_LOG"
+out=$(bash "$FLEET" aws push 2>&1); rc=$?
+assert "allowlist without tools: tools not even exported, dev and legacy pushed" bash -c "[ $rc = 0 ] && ! grep -q -- '--profile tools' '$AWS_LOG' && printf '%s' \"\$0\" | grep -q 'ok alpha: 2 profiles'" "$out"
+assert "the nodes dropped tools: file and block entry gone, dev and legacy kept" bash -c "[ ! -e '$NA_H/.config/fleet/aws/tools.json' ] && [ ! -e '$NW_H/.config/fleet/aws/tools.json' ] && ! grep -q 'aws creds tools' '$NA_H/.aws/config' && grep -q 'aws creds dev' '$NA_H/.aws/config' && [ -f '$NA_H/.config/fleet/aws/legacy.json' ]"
+grep -v '^FLEET_AWS_PROFILES=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+printf 'FLEET_AWS_PROFILES="dev tools legacy nosuch"\n' >>"$FLEET_HOME/fleet.conf"
+# only what is logged in right now (tools back on the nodes first)
+bash "$FLEET" aws push >/dev/null 2>&1
+assert "tools is back on the nodes once it is allowlisted again" [ -f "$NA_H/.config/fleet/aws/tools.json" ]
+touch "$T/aws-expired-tools"; : >"$SSH_LOG"
+out=$(bash "$FLEET" aws push 2>&1); rc=$?
+assert "one profile's session expired: reported with the login hint, the others pushed, exit 0, the node keeps its still-valid copy" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | grep -q 'AWS SSO session expired for tools: run aws sso login (or fleet aws login)' && printf '%s' \"\$0\" | grep -q 'ok alpha: 3 profiles' && [ -f '$NA_H/.config/fleet/aws/dev.json' ] && [ -f '$NA_H/.config/fleet/aws/tools.json' ]" "$out"
+rm -f "$T/aws-expired-tools"
+touch "$T/aws-expired"; : >"$SSH_LOG"
+out=$(bash "$FLEET" aws push 2>&1); rc=$?
+assert "every session expired: one clear line, exit 1, no node touched" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'AWS SSO session expired for dev tools legacy: run aws sso login (or fleet aws login)' && printf '%s' \"\$0\" | grep -q 'nothing to push: no allowed AWS profile is logged in' && ! grep -q 'aws receive' '$SSH_LOG'" "$out"
+assert "still nothing on the master's disk" no_secret_on_master
+# fleet sync: never logs in, warns once an hour while the session is dead, pushes
+# quietly on its cadence. The clock stays real (a fake one would make reconcile
+# expire invites); "an hour later" is a rewound timestamp in vault/aws.json.
+# FLEET_SYNC_REEXEC=1 skips the code fast-forward (no remote here); no skill publish.
+async() { FLEET_SYNC_REEXEC=1 FLEET_SYNC_PUBLISH_SKILLS=0 bash "$FLEET" sync 2>&1; }
+# aws_state_rewind KEY SECONDS — move a timestamp in vault/aws.json back
+aws_state_rewind() { python3 - "$FLEET_VAULT/aws.json" "$1" "$2" <<'PY'
+import json, sys, time
+f, k, s = sys.argv[1], sys.argv[2], int(sys.argv[3])
+d = json.load(open(f)); d[k] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - s)); json.dump(d, open(f, "w"))
+PY
+}
+rm -f "$FLEET_VAULT/aws.json"
+: >"$SSH_LOG"; : >"$AWS_LOG"
+out=$(async); rc=$?
+assert "sync with the session expired: exit 0, one warning naming aws sso login, no login attempted, no receive" bash -c "[ $rc = 0 ] && [ \"\$(printf '%s\n' \"\$0\" | grep -c 'AWS SSO session expired')\" = 1 ] && printf '%s' \"\$0\" | grep -q 'nodes keep what they have' && ! grep -q 'sso login' '$AWS_LOG' && ! grep -q 'aws receive' '$SSH_LOG'" "$out"
+assert "the allowlisted name the config lacks (nosuch) is warned about separately, once" bash -c "[ \"\$(printf '%s\n' \"\$0\" | grep -c 'aws: profiles refused: nosuch')\" = 1 ]" "$out"
+out=$(async)
+assert "a moment later: neither warning is repeated" bash -c "! printf '%s' \"\$0\" | grep -q 'AWS SSO session expired' && ! printf '%s' \"\$0\" | grep -q 'profiles refused'" "$out"
+aws_state_rewind warned_expired 3700
+out=$(async)
+assert "an hour later: the expired warning again (the refused one still rate-limited)" bash -c "printf '%s' \"\$0\" | grep -q 'AWS SSO session expired' && ! printf '%s' \"\$0\" | grep -q 'profiles refused'" "$out"
+rm -f "$T/aws-expired"; : >"$SSH_LOG"
+out=$(async); rc=$?
+assert "session back (the user logged in): sync pushes to both nodes quietly and records the run" bash -c "[ $rc = 0 ] && ! printf '%s' \"\$0\" | grep -qi 'sso\|receive\|profiles' && [ \"\$(grep -c 'aws receive' '$SSH_LOG')\" = 2 ] && [ -n \"\$(jget '$FLEET_VAULT/aws.json' pushed)\" ] && [ \"\$(jget '$FLEET_VAULT/aws.json' nodes)\" = '[\"nAAAACNTRL\", \"nAWSCNTRL\"]' ] && grep -q ' aws.push alpha ok' '$FLEET_VAULT/audit.log'" "$out"
+: >"$SSH_LOG"
+async >/dev/null
+refute "right after a push with two hours of validity left: no push (FLEET_AWS_REFRESH_MINUTES=60)" grep -q 'aws receive' "$SSH_LOG"
+aws_state_rewind pushed 3700
+async >/dev/null
+assert "61 minutes after the push: pushed again" [ "$(grep -c 'aws receive' "$SSH_LOG")" = 2 ]
+: >"$SSH_LOG"
+aws_state_rewind pushed 60; aws_state_rewind expires -3000
+async >/dev/null
+assert "a minute after a push whose credentials expire in 50 minutes (inside the window): pushed again" [ "$(grep -c 'aws receive' "$SSH_LOG")" = 2 ]
+: >"$SSH_LOG"
+printf 'FLEET_AWS_PROFILES="dev legacy"\n' >>"$FLEET_HOME/fleet.conf"
+async >/dev/null
+assert "a changed allowlist is pushed at once; the nodes drop tools" bash -c "[ \"\$(grep -c 'aws receive' '$SSH_LOG')\" = 2 ] && [ ! -e '$NA_H/.config/fleet/aws/tools.json' ] && [ -f '$NA_H/.config/fleet/aws/dev.json' ]"
+: >"$SSH_LOG"
+python3 - "$FLEET_VAULT/aws.json" <<'PY'
+import json, sys
+f = sys.argv[1]; d = json.load(open(f)); d["nodes"] = ["nAAAACNTRL"]; json.dump(d, open(f, "w"))
+PY
+async >/dev/null
+assert "an online provisioned node that never got a push makes the next sync push" [ "$(grep -c 'aws receive' "$SSH_LOG")" = 2 ]
+: >"$SSH_LOG"
+printf 'FLEET_AWS_SYNC=0\n' >>"$FLEET_HOME/fleet.conf"
+aws_state_rewind pushed 20000
+async >/dev/null
+refute "FLEET_AWS_SYNC=0: sync never pushes" grep -q 'aws receive' "$SSH_LOG"
+grep -v '^FLEET_AWS_SYNC=' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+: >"$SSH_LOG"
+out=$(FLEET_AWS_BIN="$T/no-such-aws" async); rc=$?
+assert "no aws CLI on the master: sync skips the step silently" bash -c "[ $rc = 0 ] && ! printf '%s' \"\$0\" | grep -qi aws && ! grep -q 'aws receive' '$SSH_LOG'" "$out"
+unset -f async aws_state_rewind
+out=$(FLEET_AWS_BIN="$T/no-such-aws" bash "$FLEET" aws push 2>&1); rc=$?
+assert "no aws CLI on the master: push dies with the install hint" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'aws CLI not found'" "$out"
+# fleet aws login: aws sso login here, then the push
+touch "$T/aws-expired"; rm -f "$T/aws-logged-in"; : >"$AWS_LOG"; : >"$SSH_LOG"
+out=$(bash "$FLEET" aws login 2>&1); rc=$?
+assert "aws login without flags: aws sso login --profile <first allowed>, then a push of the whole allowlist" bash -c "[ $rc = 0 ] && [ \"\$(head -n 1 '$AWS_LOG')\" = 'sso login --profile dev' ] && [ -f '$T/aws-logged-in' ] && grep -q -- '--profile legacy ' '$AWS_LOG' && [ \"\$(grep -c 'aws receive' '$SSH_LOG')\" = 2 ] && printf '%s' \"\$0\" | grep -q 'ok alpha: 2 profiles' && grep -q ' aws.login - ok dev' '$FLEET_VAULT/audit.log'" "$out"
+: >"$AWS_LOG"; : >"$SSH_LOG"
+out=$(bash "$FLEET" aws login --profile legacy -- --use-device-code 2>&1); rc=$?
+assert "aws login --profile legacy -- --use-device-code: the extra args reach aws sso login, the push is narrowed to legacy" bash -c "[ $rc = 0 ] && [ \"\$(head -n 1 '$AWS_LOG')\" = 'sso login --profile legacy --use-device-code' ] && [ \"\$(grep -c 'export-credentials' '$AWS_LOG')\" = 1 ] && grep -q -- '--profile legacy ' '$AWS_LOG'" "$out"
+out=$(bash "$FLEET" aws login --profile prod 2>&1); rc=$?
+assert "aws login --profile prod: refused (not allowlisted), exit 2, no login" bash -c "[ $rc = 2 ] && printf '%s' \"\$0\" | grep -q 'AWS profile prod refused' && ! grep -q 'sso login --profile prod' '$AWS_LOG'" "$out"
+# a node that fails to receive
+touch "$T/aws-receive-fail"; : >"$SSH_LOG"
+out=$(bash "$FLEET" aws push 2>&1); rc=$?
+assert "a node whose receive fails: warned per node, exit 1, audited fail" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'alpha: aws push failed' && grep -q ' aws.push alpha fail' '$FLEET_VAULT/audit.log'" "$out"
+rm -f "$T/aws-receive-fail"
+assert "still nothing on the master's disk after every push" no_secret_on_master
+# fleet list: the AWS column and json field come from the node's status
+python3 - "$T/status-reply.json" <<'EOF'
+import json, sys, time
+exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3 * 3600 + 120))
+json.dump({"fleet": "0.6.0", "name": "alpha", "os": "linux", "container": True, "tools": {"claude": {"state": "ok", "detail": "x"}},
+           "memory": {"state": "ok", "last_sync": None}, "timers": {}, "awake": "n/a",
+           "aws": {"profiles": 2, "expires": exp, "state": "ok"}, "token_age_days": {}, "updated": exp}, open(sys.argv[1], "w"))
+EOF
+out=$(bash "$FLEET" list 2>/dev/null)
+assert "list: AWS column 'ok 3h' from the node's aws status" bash -c "printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +[a-z?]+ +[0-9]+[mhd] +1 ok +ok +off +ok 3h +0\.6\.0$'" "$out"
+assert "list --json: aws field with profiles, expires, state" bash -c "bash '$FLEET' list --json 2>/dev/null | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; a=d[\"alpha\"][\"aws\"]; assert a[\"profiles\"]==2 and a[\"state\"]==\"ok\" and a[\"expires\"]; assert d[\"awsnode\"][\"aws\"][\"profiles\"]==2'"
+python3 - "$T/status-reply.json" <<'EOF'
+import json, sys
+f = sys.argv[1]; d = json.load(open(f)); d["aws"] = {"profiles": 1, "expires": "2020-01-01T00:00:00Z", "state": "expired"}; json.dump(d, open(f, "w"))
+EOF
+out=$(bash "$FLEET" list 2>/dev/null)
+assert "list: AWS column 'expired'" bash -c "printf '%s\n' \"\$0\" | grep -Eq '^alpha +fleet-alpha +yes +provisioned +[a-z?]+ +[0-9]+[mhd] +1 ok +ok +off +expired +0\.6\.0$'" "$out"
+# leave nothing behind: no aws state, no tools-push record (the sync section expects a first push), the second node gone
+rm -f "$T/status-reply.json" "$T/aws-expired" "$T/aws-logged-in" "$FLEET_VAULT/aws.json" "$FLEET_VAULT/sync.json" "$FLEET_VAULT/nodes/nAWSCNTRL.json"
+rm -rf "$NW_H" "$NA_H/.config/fleet/aws" "$NA_H/.aws" "$NA_H/.local"
+grep -v '^FLEET_AWS_' "$FLEET_HOME/fleet.conf" >"$T/lc"; cat "$T/lc" >"$FLEET_HOME/fleet.conf"
+echo '[{"nodeId":"nAAAACNTRL"},{"nodeId":"nEEEECNTRL"}]' >"$DEVICES_JSON"
 write_status ""
 
 # ======================================================================

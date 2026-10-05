@@ -408,6 +408,47 @@ assert "alpha: sees the master's memory too" bash -c "nfile $NA $MHOME/fleet-mem
 assert "fleet list: the master row (state master, memory ok) comes first, nodes say master false" bash -c "mexec fleet list --offline --json | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d[0]; assert m[\"master\"] is True and m[\"name\"]==\"master\" and m[\"state\"]==\"master\" and m[\"memory\"]==\"ok\" and m[\"memory_last_sync\"]; assert all(x[\"master\"] is False for x in d[1:])' && mexec fleet list --offline | sed -n 2p | grep -Eq '^master +[^ ]+ +yes +master +- +- +- +ok \([0-9]+[mhd]\) +- +- +[0-9.]+$'"
 
 # ======================================================================
+step "aws: the master forwards fake SSO role credentials; the nodes serve them through fleet aws creds without any aws CLI"
+AWS_EXP=$(python3 -c 'import time;print(time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(time.time()+7200)))')
+AWS_KEY="ASIA""FAKEE2EKEYID0001"
+# a fake aws on the master's PATH (export-credentials only) and an AWS config with a dev and a prod profile (only dev is allowlisted)
+mexec_i sh -c "mkdir -p $MHOME/.aws $MHOME/.local/bin && cat > $MHOME/.local/bin/aws && chmod 755 $MHOME/.local/bin/aws" <<EOF
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "configure export-credentials") printf '{"Version": 1, "AccessKeyId": "$AWS_KEY", "SecretAccessKey": "fake-aws-secret-e2e", "SessionToken": "fake-aws-session-e2e", "Expiration": "$AWS_EXP"}\n' ;;
+  *) echo "fake aws: \$*" >&2; exit 2 ;;
+esac
+EOF
+mexec_i sh -c "cat > $MHOME/.aws/config" <<'EOF'
+[profile dev]
+sso_session = corp
+sso_account_id = 111122223333
+sso_role_name = DeveloperAccess
+region = eu-central-1
+output = json
+
+[profile prod]
+sso_session = corp
+sso_account_id = 777788889999
+sso_role_name = AdminAccess
+
+[sso-session corp]
+sso_start_url = https://example.awsapps.com/start
+sso_region = eu-central-1
+EOF
+mexec sh -c "printf 'FLEET_AWS_PROFILES=\"dev\"\n' >> $MHOME/.config/fleet/fleet.conf"
+mexec fleet aws push >"$WORK/aws-push.log" 2>&1; rc=$?
+assert "fleet aws push exits 0: dev (the allowlist) forwarded to both nodes, the prod profile of the config untouched" bash -c "[ $rc = 0 ] && grep -Eq 'alpha: 1 profile \(expire' '$WORK/aws-push.log' && grep -Eq 'beta: 1 profile \(expire' '$WORK/aws-push.log' && ! grep -q prod '$WORK/aws-push.log'"
+assert "beta: dev.json 0600 in a 0700 dir, no prod" bash -c "[ \"\$(nmode $NB $MHOME/.config/fleet/aws/dev.json)\" = 600 ] && [ \"\$(nmode $NB $MHOME/.config/fleet/aws)\" = 700 ] && ! nexec $NB test -e $MHOME/.config/fleet/aws/prod.json"
+assert "beta has no aws CLI, yet fleet aws creds dev answers with the credentials (credential_process contract)" bash -c "nexec $NB sh -c '! command -v aws' && nexec $NB fleet aws creds dev | jget AccessKeyId | grep -qx '$AWS_KEY'"
+assert "beta ~/.aws/config: the fleet block with the absolute credential_process and the region, nothing else" bash -c "c=\$(nfile $NB $MHOME/.aws/config); printf '%s\n' \"\$c\" | grep -qx 'credential_process = $MHOME/.local/bin/fleet aws creds dev' && printf '%s\n' \"\$c\" | grep -qx 'region = eu-central-1' && ! printf '%s' \"\$c\" | grep -q sso_ && [ \"\$(nmode $NB $MHOME/.aws/config)\" = 600 ]"
+assert "alpha: fleet status reports aws ok with 1 profile" bash -c "nexec $NA fleet status --json | python3 -c 'import json,sys; a=json.load(sys.stdin)[\"aws\"]; assert a[\"profiles\"]==1 and a[\"state\"]==\"ok\" and a[\"expires\"]==\"$AWS_EXP\"'"
+assert "fleet list: AWS column ok 1h for both nodes, json field present" bash -c "mexec fleet list | grep -Eq '^alpha +fleet-alpha +yes +provisioned +yes +[0-9]+[mhd] .* +ok 1h +[0-9.]+$' && mexec fleet list --json | python3 -c 'import json,sys; d={x[\"name\"]: x for x in json.load(sys.stdin)}; assert d[\"beta\"][\"aws\"][\"profiles\"]==1 and d[\"beta\"][\"aws\"][\"state\"]==\"ok\"'"
+mroot sh -c 'grep -rlF -e fake-aws-secret-e2e -e fake-aws-session-e2e / --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev 2>/dev/null | grep -v "^/home/fleet/.local/bin/aws$"' >"$WORK/aws-canary-hits" 2>/dev/null
+assert "the master's filesystem holds no forwarded credential (only the fake CLI that mints them)" [ ! -s "$WORK/aws-canary-hits" ]
+assert "audit: aws.push per node, names and expiry only" bash -c "mfile $VAULT/audit.log | grep -q ' aws.push beta ok profiles:dev expires:$AWS_EXP' && ! mfile $VAULT/audit.log | grep -q fake-aws"
+
+# ======================================================================
 step "trust model: nodes cannot reach the master"
 assert "master: no sshd running" mroot sh -c '! pgrep -x sshd'
 assert "master: nothing listening on 22" mroot python3 -c 'import socket; s=socket.socket(); s.settimeout(1); r=s.connect_ex(("127.0.0.1",22)); s.close(); raise SystemExit(0 if r else 1)'
@@ -446,6 +487,8 @@ assert "alpha: daemon stopped, container exited cleanly" bash -c "i=0; while [ \
 assert "alpha: tailscale logout ran (fleet leave + supervisor)" grep -q '^logout' "$WORK/ts-$NA/log"
 assert "alpha: supervisor logged the shutdown" bash -c "docker logs $NA 2>&1 | grep -q 'logging out of the tailnet'"
 refute "alpha: leave stopped the daemon itself (supervisor pidfile workaround not needed)" bash -c "docker logs $NA 2>&1 | grep -q 'daemon.pid removed'"
+refute "alpha: the remote leave removed the forwarded AWS credentials" docker cp "$NA:$MHOME/.config/fleet/aws" "$WORK/alpha-aws-after-kick"
+assert "alpha: the fleet block left ~/.aws/config, the file itself stays" bash -c "docker cp $NA:$MHOME/.aws/config - 2>/dev/null | tar -xOf - 2>/dev/null | grep -q . && ! docker cp $NA:$MHOME/.aws/config - 2>/dev/null | tar -xOf - | grep -q 'fleet aws'"
 assert "alpha: daemon ran its own guarded leave once" bash -c "docker logs $NA 2>&1 | grep -c 'fleet daemon stopping' | grep -qx 1"
 refute "provision refuses the revoked node" mexec fleet provision alpha
 write_status false true

@@ -75,7 +75,7 @@ git_init() { git -c init.defaultBranch=main init -q "$@"; }
 setup_root() {
   mkdir -p "$ROOT/lib/tools" "$ROOT/config" "$WORK/bin" "$WORK/tmp" "$WORK/homes"
   cp "$SRC/fleet" "$ROOT/fleet"; chmod +x "$ROOT/fleet"
-  cp "$SRC/lib/common.sh" "$SRC/lib/node.sh" "$SRC/lib/join.sh" "$SRC/lib/secretscan.py" "$SRC/lib/memory_capture.py" "$ROOT/lib/"
+  cp "$SRC/lib/common.sh" "$SRC/lib/node.sh" "$SRC/lib/join.sh" "$SRC/lib/aws.sh" "$SRC/lib/secretscan.py" "$SRC/lib/memory_capture.py" "$SRC/lib/aws_creds.py" "$ROOT/lib/"
   cp "$SRC/config/defaults.conf" "$ROOT/config/defaults.conf"
   cp "$SRC/lib/tools/chrome.sh" "$ROOT/lib/tools/chrome.sh"   # real plug-in: wrapper + status tests
   cp "$SRC/lib/tools/cliproxy.sh" "$ROOT/lib/tools/cliproxy.sh" # real plug-in: remote mode in containers (env.sh proxy vars)
@@ -1419,6 +1419,79 @@ EOF
 # into the skill dir of every harness present, records the paths, and a skill
 # of the same name in the config repo replaces it. `fleet skill install` does
 # the same directly (the master's path).
+# The node side of `fleet aws push` (lib/aws.sh, lib/aws_creds.py): no aws CLI
+# needed anywhere here. The key id is a split literal (no ASIA-shaped token in the tree).
+case_aws() {
+  begin "aws: receive writes 0600 credential files + the fleet block (abs credential_process, region), allowlist header enforced, own profile kept, creds/expiry/skew, status, leave removes everything"
+  local h key exp past out rc orig
+  h=$(mk_home awsnode "")
+  mkdir -p "$h/.local/bin" "$h/.aws"; ln -sfn "$ROOT/fleet" "$h/.local/bin/fleet"
+  key="ASIA""FAKEKEYID0000001"
+  exp=$(python3 -c 'import time;print(time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(time.time()+7200)))')
+  past=2020-01-01T00:00:00Z
+  printf '[default]\nregion = us-east-1\n\n[profile mine]\nsso_session = own\nsso_account_id = 999999999999\nsso_role_name = Admin\nregion = eu-west-1\n\n[sso-session own]\nsso_start_url = https://own.example/start\nsso_region = us-east-1\n' >"$h/.aws/config"
+  orig=$(cat "$h/.aws/config")
+  # shellcheck disable=SC2329  # used through fleet_as below
+  bundle() {   # bundle ALLOWED_CSV NAME|EXPIRATION[|REGION[|OUTPUT]]... — the master's JSON on stdout
+    python3 - "$key" "$@" <<'PY'
+import json, sys
+key, allowed = sys.argv[1], sys.argv[2].split(",")
+b = {"v": 1, "allowed": [a for a in allowed if a], "profiles": {}}
+for spec in sys.argv[3:]:
+    parts = (spec.split("|", 3) + [None, None])[:4]
+    name, exp, region, output = parts[0], parts[1], parts[2], parts[3]
+    b["profiles"][name] = {"region": region or None, "output": output or None,
+                           "creds": {"Version": 1, "AccessKeyId": key + name.upper(), "SecretAccessKey": "FAKE-SECRET-" + name,
+                                     "SessionToken": "FAKE-SESSION-" + name, "Expiration": exp}}
+print(json.dumps(b))
+PY
+  }
+  bundle dev,staging,mine "dev|$exp|eu-central-1|json" "staging|$exp" "mine|$exp" "extra|$exp" | fleet_as "$h" aws receive >"$WORK/aws-recv.out" 2>"$WORK/aws-recv.err"; rc=$?
+  assert "receive exits 0 and reports the count and the earliest expiry" bash -c "[ $rc = 0 ] && grep -Eq '^2 profiles \(expire [0-9]{2}:[0-9]{2}\)$' '$WORK/aws-recv.out'"
+  assert "a profile outside the allowlist header and the user's own profile are skipped with a warning each" bash -c "grep -q 'extra: not in the master.s allowlist, skipped' '$WORK/aws-recv.err' && grep -q 'mine: this machine has its own \[profile mine\]' '$WORK/aws-recv.err'"
+  assert "credential files: dev.json + staging.json 0600 in a 0700 dir, nothing for extra or mine" bash -c "[ \"\$(stat -c %a '$h/.config/fleet/aws')\" = 700 ] && [ \"\$(stat -c %a '$h/.config/fleet/aws/dev.json')\" = 600 ] && [ \"\$(stat -c %a '$h/.config/fleet/aws/staging.json')\" = 600 ] && [ ! -e '$h/.config/fleet/aws/extra.json' ] && [ ! -e '$h/.config/fleet/aws/mine.json' ]"
+  assert "dev.json holds exactly the credential_process fields" bash -c "python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert sorted(d)==[\"AccessKeyId\",\"Expiration\",\"SecretAccessKey\",\"SessionToken\",\"Version\"] and d[\"AccessKeyId\"]==\"${key}DEV\"' '$h/.config/fleet/aws/dev.json'"
+  assert "the AWS config: one block, credential_process with the absolute path of .local/bin/fleet, region/output copied, no sso_* and no account id inside the block" bash -c "c=\$(sed -n '/# >>> fleet aws >>>/,/# <<< fleet aws <<</p' '$h/.aws/config'); [ \"\$(grep -c -F -- '# >>> fleet aws >>>' '$h/.aws/config')\" = 1 ] && [ \"\$(grep -c -F -- '# <<< fleet aws <<<' '$h/.aws/config')\" = 1 ] && printf '%s\n' \"\$c\" | grep -qx '\[profile dev\]' && printf '%s\n' \"\$c\" | grep -qx 'credential_process = $h/.local/bin/fleet aws creds dev' && printf '%s\n' \"\$c\" | grep -qx 'credential_process = $h/.local/bin/fleet aws creds staging' && printf '%s\n' \"\$c\" | grep -qx 'region = eu-central-1' && printf '%s\n' \"\$c\" | grep -qx 'output = json' && ! printf '%s' \"\$c\" | grep -q 'sso_' && ! printf '%s' \"\$c\" | grep -q 999999999999"
+  assert "the user's own sections are untouched and backed up once as config.pre-fleet" bash -c "grep -qx 'sso_session = own' '$h/.aws/config' && [ \"\$(grep -c -F -- '[profile mine]' '$h/.aws/config')\" = 1 ] && grep -qx 'region = us-east-1' '$h/.aws/config' && [ \"\$(cat '$h/.aws/config.pre-fleet')\" = \"\$0\" ]" "$orig"
+  cp "$h/.aws/config" "$WORK/aws-config-1"
+  bundle dev,staging,mine "dev|$exp|eu-central-1|json" "staging|$exp" | fleet_as "$h" aws receive >/dev/null 2>&1; rc=$?
+  assert "receive is idempotent: same bundle, config byte-identical, still one block" bash -c "[ $rc = 0 ] && cmp -s '$h/.aws/config' '$WORK/aws-config-1' && [ \"\$(grep -c -F -- '# >>> fleet aws >>>' '$h/.aws/config')\" = 1 ]"
+  out=$(fleet_as "$h" aws creds dev 2>&1); rc=$?
+  assert "fleet aws creds dev prints the stored JSON (exit 0)" bash -c "[ $rc = 0 ] && printf '%s' \"\$0\" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"Version\"]==1 and d[\"SecretAccessKey\"]==\"FAKE-SECRET-dev\" and d[\"Expiration\"]==\"$exp\"'" "$out"
+  out=$(FLEET_NOW_EPOCH=$(( $(date +%s) + 7200 - 100 )) fleet_as "$h" aws creds dev 2>&1); rc=$?
+  assert "within 2 minutes of the expiry (skew): exit 1 with the expired message and the master-side fix" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'fleet: AWS credentials for dev expired at $exp; on the master run: aws sso login (fleet sync pushes fresh ones)' && ! printf '%s' \"\$0\" | grep -q FAKE-" "$out"
+  out=$(fleet_as "$h" aws creds nosuch 2>&1); rc=$?
+  assert "an unknown profile: exit 1, says to push from the master" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'no AWS credentials for nosuch on this node; on the master run: fleet aws push'" "$out"
+  out=$(fleet_as "$h" aws creds '../x' 2>&1); rc=$?
+  assert "a profile name with a path in it: exit 1, invalid" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'invalid AWS profile name'" "$out"
+  fleet_as "$h" status --json >"$WORK/aws-status.json" 2>/dev/null
+  assert "status --json: aws = {profiles 2, expires <earliest>, state ok}" bash -c "python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))[\"aws\"]; assert a=={\"profiles\": 2, \"expires\": \"$exp\", \"state\": \"ok\"}' '$WORK/aws-status.json'"
+  out=$(fleet_as "$h" status 2>/dev/null)
+  assert "status table: aws line with the count and the expiry" bash -c "printf '%s\n' \"\$0\" | grep -q '^aws       ok  2 profiles, expire $exp\$'" "$out"
+  # the master tightened its allowlist: the bundle names only dev, staging goes
+  bundle dev | fleet_as "$h" aws receive >"$WORK/aws-recv2.out" 2>/dev/null; rc=$?
+  assert "a bundle whose allowlist dropped staging removes its file and block entry, keeps dev" bash -c "[ $rc = 0 ] && grep -q '^1 profile (expire' '$WORK/aws-recv2.out' && [ ! -e '$h/.config/fleet/aws/staging.json' ] && [ -f '$h/.config/fleet/aws/dev.json' ] && ! grep -q 'aws creds staging' '$h/.aws/config' && grep -q 'aws creds dev' '$h/.aws/config' && grep -qx 'region = eu-central-1' '$h/.aws/config'"
+  # an expired credential: stored (the master decides what to send), but creds refuses it and status says expired
+  bundle dev,old "old|$past" | fleet_as "$h" aws receive >/dev/null 2>&1
+  out=$(fleet_as "$h" aws creds old 2>&1); rc=$?
+  fleet_as "$h" status --json >"$WORK/aws-status2.json" 2>/dev/null
+  assert "expired stored credentials: creds exits 1 with 'expired at'; status state expired, earliest = the old one" bash -c "[ $rc = 1 ] && printf '%s' \"\$0\" | grep -q 'expired at $past' && [ \"\$(python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))[\"aws\"]; print(a[\"state\"], a[\"expires\"])' '$WORK/aws-status2.json')\" = 'expired $past' ]" "$out"
+  printf 'not json' | fleet_as "$h" aws receive >/dev/null 2>"$WORK/aws-bad.err"; rc=$?
+  assert "a bundle that is not JSON: exit 1, nothing changed" bash -c "[ $rc = 1 ] && grep -q 'not a JSON bundle' '$WORK/aws-bad.err' && [ -f '$h/.config/fleet/aws/dev.json' ]"
+  # leave: credentials and block gone, the user's config kept
+  echo "fleet-awsnode" >"$TS_STATE"
+  fleet_as "$h" leave >"$WORK/aws-leave.log" 2>&1; rc=$?
+  assert "leave exits 0, removes ~/.config/fleet/aws and the block, leaves the user's sections" bash -c "[ $rc = 0 ] && grep -q 'aws credentials removed' '$WORK/aws-leave.log' && [ ! -e '$h/.config/fleet/aws' ] && ! grep -q 'fleet aws' '$h/.aws/config' && grep -qx 'sso_session = own' '$h/.aws/config' && grep -qx '\[default\]' '$h/.aws/config'"
+  fleet_as "$h" leave >/dev/null 2>&1; rc=$?
+  assert "a second leave with nothing to remove still exits 0" [ "$rc" = 0 ]
+  # a node without any ~/.aws: receive creates the dir (0700) and the config (0600)
+  h=$(mk_home awsfresh "")
+  bundle dev "dev|$exp" | fleet_as "$h" aws receive >/dev/null 2>&1; rc=$?
+  assert "fresh node: ~/.aws 0700 and config 0600 created with just the block (credential_process falls back to the checkout's fleet)" bash -c "[ $rc = 0 ] && [ \"\$(stat -c %a '$h/.aws')\" = 700 ] && [ \"\$(stat -c %a '$h/.aws/config')\" = 600 ] && grep -qx 'credential_process = $ROOT/fleet aws creds dev' '$h/.aws/config' && [ ! -e '$h/.aws/config.pre-fleet' ]"
+  unset -f bundle
+  end
+}
+
 case_skill() {
   begin "skill: apply installs skills/fleet into the harness skill dirs (manifest), config repo's fleet/ wins, targets follow harness dirs + FLEET_TOOLS, skill install is idempotent"
   local r2="$WORK/fleet-h" h h2 cfg rc out m1 m2
@@ -1668,6 +1741,7 @@ case_awake
 case_lan_lid
 case_leave
 case_leave_tree
+case_aws
 case_sshd
 case_join_power
 case_chrome_wrapper

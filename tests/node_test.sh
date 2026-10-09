@@ -939,6 +939,13 @@ EOF
   assert "remote mode: ok remote, no docker logs read" bash -c "printf '%s' '$out' | grep -q '^ok remote ' && ! grep -q 'docker logs' '$FLEET_TEST_LOG'"
   rm -f "$h/.config/fleet/fleet.conf"
   unset -f st; unset CLIPROXY_LOGS
+  # auth/logs/ must keep its x bit: adopting master files chmods only *.json, and a dir that lost it is repaired
+  mkdir -p "$h/cli-proxy-api/auth/logs" "$h/.cli-proxy-api/auth"; chmod 0600 "$h/cli-proxy-api/auth/logs"
+  printf '{"refresh_token":"rt-FAKE2"}\n' >"$h/.cli-proxy-api/auth/claude-other.json"
+  # shellcheck disable=SC2016  # expanded by the inner bash
+  HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_ROOT="$SRC" \
+    bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/tools/cliproxy.sh"; _cliproxy_adopt; _cliproxy_fix_dirs "$(_cliproxy_dir)"' >/dev/null 2>&1
+  assert "adopt + repair: auth/logs is traversable (0700), json files are 0600" bash -c "[ -x '$h/cli-proxy-api/auth/logs' ] && ls '$h/cli-proxy-api/auth/logs' >/dev/null && [ \"\$(stat -c %a '$h/cli-proxy-api/auth/claude-other.json' 2>/dev/null || stat -f %Lp '$h/cli-proxy-api/auth/claude-other.json')\" = 600 ]"
   end
 }
 

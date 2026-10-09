@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.3 — 2026-10-09
+
+### Fixed
+
+- `fleet proxy login` failed after a successful browser login with `list Claude credentials for legacy migration: open /root/.cli-proxy-api/logs: permission denied`: provisioning chmod'ed everything in the proxy's `auth/` to 0600, including its `logs/` directory. Only the `*.json` files get 0600 now, and `fleet apply` repairs directories that lost their execute bit.
+
 ## 0.6.2 — 2026-10-05
 
 Switch the lid-closed setting on after the fact — on the master or a node

@@ -120,11 +120,23 @@ _cliproxy_adopt() {
         rm -f "$f"
       fi
     done
-    chmod 0600 "$dir"/auth/* 2>/dev/null || true
+    # files only: auth/ also holds the proxy's logs/ dir, which needs its x bit
+    chmod 0600 "$dir"/auth/*.json 2>/dev/null || true
     rmdir "$stage/auth" 2>/dev/null || true
   fi
   rm -f "$stage/.force"
   rmdir "$stage" 2>/dev/null || true
+}
+
+# _cliproxy_fix_dirs DIR — directories under auth/ must stay traversable. Older
+# fleet versions chmod'ed everything in auth/ to 0600, which made logs/
+# unreadable and broke the proxy's own login ("open .../logs: permission denied").
+_cliproxy_fix_dirs() {
+  local d
+  for d in "$1"/auth/*/; do
+    [ -d "$d" ] || continue
+    [ -x "$d" ] || { chmod 0700 "$d" && log "cliproxy: repaired permissions of auth/$(basename "$d")"; }
+  done
 }
 
 _cliproxy_install_launchd() {
@@ -207,6 +219,7 @@ tool_cliproxy_install() {
   [ "$(fleet_os)" = macos ] && _cliproxy_render "$tpl/set-anthropic-env.sh" "$dir/set-anthropic-env.sh" 0755
 
   _cliproxy_adopt
+  _cliproxy_fix_dirs "$dir"
   if [ ! -f "$dir/conf/config.yaml" ]; then
     warn "no $dir/conf/config.yaml yet; the master ships it with the full profile"
     return 0

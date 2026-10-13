@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5 — 2026-10-13
+
+### Added
+
+- `FLEET_CAPTURE_KEEP_MCP`: MCP servers that exist only in the config repo template (for example a server the nodes reach with an API key while the master logs in by OAuth) survive `fleet config publish`.
+
 ## 0.6.4 — 2026-10-13
 
 ### Fixed

@@ -991,6 +991,10 @@ EOF
   # second capture: idempotent (the kept blocks are not duplicated)
   HOME="$fh" FLEET_ROOT="$repo" FLEET_CONFIG_DIR="$repo" FLEET_HOME="$fh/.config/fleet" bash -c '. "$FLEET_ROOT/common.sh"; . "$FLEET_ROOT/harness.sh"; harness_capture' >/dev/null 2>&1
   assert "second capture: env subtable still exactly once" [ "$(grep -c '^\[mcp_servers.chrome-devtools.env\]' "$tpl")" = 1 ]
+  # FLEET_CAPTURE_KEEP_MCP: a template-only server (absent on the master) survives capture, others are dropped
+  printf '{"mcpServers":{"keyed":{"type":"http","url":"https://k.invalid/mcp","headers":{"Authorization":"Bearer ${K_KEY}"}},"gone":{"type":"http","url":"https://g.invalid/mcp"}}}\n' >"$repo/harness/claude/mcp.json"
+  HOME="$fh" FLEET_ROOT="$repo" FLEET_CONFIG_DIR="$repo" FLEET_HOME="$fh/.config/fleet" FLEET_CAPTURE_KEEP_MCP="keyed" bash -c '. "$FLEET_ROOT/common.sh"; . "$FLEET_ROOT/harness.sh"; harness_capture' >/dev/null 2>&1
+  assert "FLEET_CAPTURE_KEEP_MCP keeps the listed template server with its \${VAR} header; an unlisted one is dropped" bash -c "grep -q '\"keyed\"' '$repo/harness/claude/mcp.json' && grep -q 'Bearer \\\${K_KEY}' '$repo/harness/claude/mcp.json' && ! grep -q '\"gone\"' '$repo/harness/claude/mcp.json'"
   end
 }
 

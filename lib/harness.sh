@@ -259,6 +259,7 @@ def _words(var): return [w for w in os.environ.get(var, '').split() if w]
 MACHINE_ONLY = tuple(['/Library/Application Support/', '/Applications/', '127.0.0.1', 'localhost'] + _words('FLEET_CAPTURE_MACHINE_ONLY'))
 # Tools installed from a per-user toolchain dir on the master but on PATH on nodes.
 COMMAND_REWRITE = {'jbcontext_binary': 'jbcontext', 'jbcontext': 'jbcontext', 'mcpvault': 'mcpvault'}
+KEEP_MCP = set(_words('FLEET_CAPTURE_KEEP_MCP'))   # template-only MCP servers capture must keep (e.g. a key-auth server the master logs into by OAuth)
 AGENT_EXCLUDE = set(_words('FLEET_CAPTURE_AGENT_EXCLUDE'))   # Claude agent files not shipped (basename without .md)
 AGENT_EXCLUDE_MARKERS = tuple(m.strip() for m in os.environ.get('FLEET_CAPTURE_AGENT_MARKERS', '').split(';') if m.strip())
 SKILL_EXCLUDE = {
@@ -417,7 +418,7 @@ class Capture:
         try: old = json.load(open(path)).get('mcpServers', {})
         except Exception: return out
         for name, server in old.items():
-            if '/.local/bin/fleet-' in str(server.get('command', '')):
+            if '/.local/bin/fleet-' in str(server.get('command', '')) or name in KEEP_MCP:
                 out[name] = server
         return dict(sorted(out.items()))
 
@@ -428,7 +429,8 @@ class Capture:
         try: old = toml_blocks(open(path, encoding='utf-8').read())
         except Exception: return out_blocks
         names = set(toml_group(pp) for pp, ll in old[1:]
-                    if toml_group(pp).startswith('mcp_servers.') and any('/.local/bin/fleet-' in l for l in ll))
+                    if toml_group(pp).startswith('mcp_servers.') and (any('/.local/bin/fleet-' in l for l in ll)
+                                                                     or toml_group(pp).split('.', 1)[1].strip('"') in KEEP_MCP))
         keep = [(pp, ll) for pp, ll in old[1:] if toml_group(pp) in names]
         out = [b for b in out_blocks if not (b[0] and toml_group(b[0]) in names)]
         return out + keep
@@ -641,6 +643,7 @@ harness_capture() (   # subshell: helpers use plain globals (name, s, …); keep
   log "capturing harness config from $HOME into $FLEET_CONFIG_DIR"
   FLEET_SKILL_EXCLUDE="${FLEET_SKILL_EXCLUDE:-}" FLEET_CAPTURE_MACHINE_ONLY="${FLEET_CAPTURE_MACHINE_ONLY:-}" \
   FLEET_CAPTURE_AGENT_EXCLUDE="${FLEET_CAPTURE_AGENT_EXCLUDE:-}" FLEET_CAPTURE_AGENT_MARKERS="${FLEET_CAPTURE_AGENT_MARKERS:-}" \
+  FLEET_CAPTURE_KEEP_MCP="${FLEET_CAPTURE_KEEP_MCP:-}" \
   FLEET_CAPTURE_RULE_DROP="${FLEET_CAPTURE_RULE_DROP:-}" \
     harness_py capture "$HOME" "$FLEET_CONFIG_DIR" || die "harness capture failed"
   log "secret scan"

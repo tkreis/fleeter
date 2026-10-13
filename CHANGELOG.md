@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.4 — 2026-10-13
+
+### Fixed
+
+- The secret scan treated documentation placeholders such as `/Users/you/…` or `/home/user/…` as machine paths, so skills that explain paths (e.g. pstack's `recall`) were never published to the fleet. Placeholder user names are ignored; real home paths are still refused.
+
 ## 0.6.3 — 2026-10-09
 
 ### Fixed

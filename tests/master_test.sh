@@ -1557,6 +1557,11 @@ n_before=$(git -C "$CFG" rev-list --count HEAD)
 printf 'token: %s%s\n' 'ghp_' 'abcdefghijklmnopqrstuvwxyz0123456789' >"$CFG/skills/leak.md"   # split: no token-shaped literal in the repo
 out=$(bash "$FLEET" config publish --no-capture --yes 2>&1); rc=$?
 assert "publish --no-capture still runs the secret scan and refuses to commit a token" bash -c "[ $rc != 0 ] && [ \"\$(git -C '$CFG' rev-list --count HEAD)\" = $n_before ] && printf '%s' \"\$0\" | grep -q 'secrets or machine paths found' && printf '%s' \"\$0\" | grep -q 'leak.md:1: github token'" "$out"
+assert "secret scan: placeholder home paths in docs (/Users/you/, /home/user/) are not machine paths; a real one is" python3 -c "
+import sys; sys.path.insert(0, sys.argv[1]); import secretscan as s
+assert s.scan_text('see /Users/you/x and /home/user/y') == []
+assert s.scan_text('cd /Users/thomas/repo') == [(1, 'machine home path')]
+assert s.scan_text('/Users/you/a /Users/realname/b') == [(1, 'machine home path')]" "$ROOT/lib"
 rm -f "$CFG/skills/leak.md"
 out=$(printf 'n\n' | bash "$FLEET" config publish --no-capture 2>&1); rc=$?
 assert "declined confirmation: nothing committed, non-zero" bash -c "[ $rc != 0 ] && [ \"\$(git -C '$CFG' rev-list --count HEAD)\" = $n_before ] && printf '%s' \"\$0\" | grep -q 'Commit 1 changed file(s)'" "$out"

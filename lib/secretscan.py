@@ -32,7 +32,10 @@ SECRET_PATTERNS = [
 ]
 # 32+ char hex/base64 run in a value position (after : or =), with at least 2 digits.
 VALUE_RUN = re.compile(r'[:=]\s*["\']?([A-Za-z0-9+/=_-]{32,})')
-MACHINE_PATH = re.compile(r'/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/')
+MACHINE_PATH = re.compile(r'/(?:Users|home)/([A-Za-z0-9._-]+)/')
+# documentation placeholders (`/Users/you/…`) are not anyone's machine path
+PLACEHOLDER_USERS = {'you', 'me', 'user', 'username', 'name', 'example', 'someone',
+                     'alice', 'bob', 'jane', 'john', 'jdoe', 'me.myself'}
 HASH_LIKE = re.compile(r'^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$')
 SLUG_LIKE = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+){2,}$')   # lower-case words joined by dashes: a slug, not a key
 PORT_PATH = re.compile(r'^\d{2,5}/')                      # "localhost:8080/api/..." after the host's colon
@@ -56,7 +59,7 @@ def scan_text(text, machine_paths=True, allow_ids=False):
             if allow_ids and (HASH_LIKE.match(v) or SLUG_LIKE.match(v) or PORT_PATH.match(v)):
                 continue
             hits.append((ln, 'long token-like value'))
-        if machine_paths and MACHINE_PATH.search(line):
+        if machine_paths and any(m.group(1).lower() not in PLACEHOLDER_USERS for m in MACHINE_PATH.finditer(line)):
             hits.append((ln, 'machine home path'))
     return hits
 

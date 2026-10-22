@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0 — 2026-10-22
+
+### Added
+
+- `fleet harden on|off|status [NODE]`: a node answers new inbound connections only from the tailnet (pf anchor `com.apple/fleet` on macOS, nftables `inet fleet` on Linux, both reapplied at boot). From the master the node arms a 90 s rollback that only a fresh tailnet ssh connection cancels, then the master probes the node's LAN address on port 22. `fleet join` applies it to new nodes.
+- Tailscale stays current: `tailscale set --auto-update` for the macOS app and Linux packages, and a nightly root LaunchDaemon (`dev.fleet.tailscale-update`) that upgrades Homebrew's `tailscaled` and restarts it. `fleet status` shows firewall and Tailscale version/updates on a `harden` line.
+
+### Fixed
+
+- T3 Code stayed on whatever version a node installed first: `fleet apply` only checked that the app existed, and the app updates itself only while it runs. `apply` and `fleet update` now replace an app older than the latest GitHub release (an older `T3 Code (Alpha)` app included); a running app is left to its own updater.
+
+### Changed
+
+- `FLEET_CHROME_DEVTOOLS_MCP` default 1.10.1 → 1.11.0.
+
 ## 0.6.5 — 2026-10-13
 
 ### Added

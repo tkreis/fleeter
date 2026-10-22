@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 — 2026-10-22
+
+### Added
+
+- `FLEET_T3_MOBILE=1`: the T3 phone app reaches nodes over the tailnet. `fleet apply` installs T3's background service, pins it to `127.0.0.1:3773`, moves a desktop-launched server onto it while no agent session is open, and maps `https://<node>.<tailnet>.ts.net` to it with Tailscale Serve. The t3code status line gains `mobile:<state>`.
+- `fleet t3 pair NODE`: links T3 Connect publish-only (push notifications, no relay tunnel) and prints a pairing QR code for the phone.
+
 ## 0.7.0 — 2026-10-22
 
 ### Added

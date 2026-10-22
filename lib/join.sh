@@ -822,6 +822,216 @@ Host github-fleet-memory
   j_ok "ssh config aliases written"
 }
 
+# ---------- 7b. tailnet-only firewall + Tailscale updates ----------
+
+# A node answers new inbound connections only from the tailnet (100.64.0.0/10,
+# fd7a:115c:a1e0::/48) and loopback; replies to its own outbound traffic,
+# DHCP, ICMPv6 (neighbour discovery) and WireGuard on 41641 still pass. So
+# ssh, Screen Sharing and anything else listening on the LAN interface are
+# closed to the LAN. Shared by `fleet join` and `fleet harden on|off` (which
+# sources this file).
+#   macOS: anchor com.apple/fleet (macOS's own /etc/pf.conf evaluates
+#          com.apple/*), reloaded at boot by /Library/LaunchDaemons/dev.fleet.firewall.plist
+#   Linux: nftables table inet fleet, reloaded at boot by fleet-firewall.service
+# Tailscale updates: the macOS app and Linux packages update themselves once
+# `tailscale set --auto-update` is on; Homebrew's tailscaled does not, so a
+# root LaunchDaemon (dev.fleet.tailscale-update) runs `brew upgrade tailscale`
+# as the user every night and restarts the daemon when the binary changed.
+
+JOIN_FW_PF_ANCHOR="com.apple/fleet"
+JOIN_FW_PF_FILE=/etc/pf.anchors/fleet
+JOIN_FW_PF_PLIST=/Library/LaunchDaemons/dev.fleet.firewall.plist
+JOIN_FW_NFT_FILE=/etc/fleet/firewall.nft
+JOIN_FW_NFT_UNIT=/etc/systemd/system/fleet-firewall.service
+JOIN_TSU_DIR="/Library/Application Support/fleet"
+JOIN_TSU_PLIST=/Library/LaunchDaemons/dev.fleet.tailscale-update.plist
+
+JOIN_FW_PF_RULES='# managed by fleet: accept new inbound connections only from the tailnet.
+pass in quick on lo0 all flags any keep state
+pass in quick inet from 100.64.0.0/10 to any flags any keep state
+pass in quick inet6 from fd7a:115c:a1e0::/48 to any flags any keep state
+pass in quick inet6 proto icmp6 all no state
+pass in quick inet proto udp from any port 67 to any port 68 no state
+pass in quick inet6 proto udp from any port 547 to any port 546 no state
+pass in quick proto udp from any to any port 41641 keep state
+pass out quick all flags any keep state
+block drop in quick all'
+
+JOIN_FW_NFT_RULES='# managed by fleet: accept new inbound connections only from the tailnet.
+table inet fleet
+delete table inet fleet
+table inet fleet {
+  chain input {
+    type filter hook input priority 0; policy accept;
+    iif "lo" accept
+    ct state established,related accept
+    iifname "tailscale0" accept
+    iifname "docker0" accept
+    iifname "br-*" accept
+    meta l4proto ipv6-icmp accept
+    udp sport 67 udp dport 68 accept
+    udp sport 547 udp dport 546 accept
+    udp dport 41641 accept
+    drop
+  }
+}'
+
+# join_fw_pf_load — load the anchor into the running pf and enable pf. macOS's
+# pfctl LaunchDaemon loads /etc/pf.conf (with `anchor "com.apple/*"`) at boot;
+# load it here when the main ruleset lacks that anchor.
+join_fw_pf_load() {
+  j_root /sbin/pfctl -sr 2>/dev/null | grep -q 'anchor "com.apple/\*"' || j_root /sbin/pfctl -q -f /etc/pf.conf 2>/dev/null || true
+  j_root /sbin/pfctl -q -a "$JOIN_FW_PF_ANCHOR" -f "$JOIN_FW_PF_FILE" 2>/dev/null || return 1
+  j_root /sbin/pfctl -q -E >/dev/null 2>&1 || true
+  j_root /sbin/pfctl -a "$JOIN_FW_PF_ANCHOR" -sr 2>/dev/null | grep -q '^block drop in quick all' || return 1
+  j_root /sbin/pfctl -s info 2>/dev/null | grep -q 'Status: Enabled'
+}
+
+join_fw_on() {
+  local _tmp
+  if join_in_container; then j_ok "container: no firewall (the host decides what reaches it)"; return 0; fi
+  _tmp=$(mktemp "${TMPDIR:-/tmp}/fleet-fw.XXXXXX") || j_die "mktemp failed"
+  case "$(join_os)" in
+    macos)
+      printf '%s\n' "$JOIN_FW_PF_RULES" >"$_tmp"
+      j_root install -m 0644 -o root -g wheel "$_tmp" "$JOIN_FW_PF_FILE"
+      cat >"$_tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fleet.firewall</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/sh</string><string>-c</string>
+    <string>sleep 15; /sbin/pfctl -sr 2>/dev/null | grep -q 'anchor "com.apple/\*"' || /sbin/pfctl -q -f /etc/pf.conf; /sbin/pfctl -q -a $JOIN_FW_PF_ANCHOR -f $JOIN_FW_PF_FILE &amp;&amp; /sbin/pfctl -q -E</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>900</integer>
+</dict>
+</plist>
+EOF
+      j_root install -m 0644 -o root -g wheel "$_tmp" "$JOIN_FW_PF_PLIST"
+      rm -f "$_tmp"
+      j_root launchctl bootout system/dev.fleet.firewall >/dev/null 2>&1 || true
+      j_root launchctl bootstrap system "$JOIN_FW_PF_PLIST" >/dev/null 2>&1 || true
+      join_fw_pf_load || { j_warn "pf did not take the fleet anchor (pfctl -a $JOIN_FW_PF_ANCHOR -sr)"; return 1; }
+      j_ok "firewall: pf anchor $JOIN_FW_PF_ANCHOR active, only the tailnet reaches this Mac" ;;
+    linux)
+      j_have nft || { rm -f "$_tmp"; j_warn "firewall: nft not found (install nftables), not applied"; return 1; }
+      printf '%s\n' "$JOIN_FW_NFT_RULES" >"$_tmp"
+      j_root mkdir -p "$(dirname "$JOIN_FW_NFT_FILE")"
+      j_root install -m 0644 "$_tmp" "$JOIN_FW_NFT_FILE"
+      printf '[Unit]\nDescription=fleet: accept inbound only from the tailnet\nWants=network-pre.target\nBefore=network-pre.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=%s -f %s\nExecStop=%s delete table inet fleet\n\n[Install]\nWantedBy=multi-user.target\n' \
+        "$(command -v nft)" "$JOIN_FW_NFT_FILE" "$(command -v nft)" >"$_tmp"
+      j_root install -m 0644 "$_tmp" "$JOIN_FW_NFT_UNIT"
+      rm -f "$_tmp"
+      j_root nft -f "$JOIN_FW_NFT_FILE" || { j_warn "nft rejected $JOIN_FW_NFT_FILE"; return 1; }
+      if j_have systemctl; then j_root systemctl daemon-reload; j_root systemctl enable fleet-firewall.service >/dev/null 2>&1 || true; fi
+      j_ok "firewall: nftables table inet fleet active, only the tailnet reaches this machine" ;;
+    *) rm -f "$_tmp"; j_warn "firewall: unsupported OS"; return 1 ;;
+  esac
+}
+
+join_fw_off() {
+  case "$(join_os)" in
+    macos)
+      j_root launchctl bootout system/dev.fleet.firewall >/dev/null 2>&1 || true
+      j_root rm -f "$JOIN_FW_PF_PLIST" "$JOIN_FW_PF_FILE"
+      j_root /sbin/pfctl -q -a "$JOIN_FW_PF_ANCHOR" -F all >/dev/null 2>&1 || true ;;
+    linux)
+      if j_have systemctl; then j_root systemctl disable fleet-firewall.service >/dev/null 2>&1 || true; fi
+      j_root rm -f "$JOIN_FW_NFT_UNIT" "$JOIN_FW_NFT_FILE"
+      ! j_have nft || j_root nft delete table inet fleet >/dev/null 2>&1 || true ;;
+  esac
+  j_ok "firewall: off, the LAN reaches this machine again"
+}
+
+# join_fw_watchdog CONFIRM_FILE SECS — `fleet harden on` from the master: undo
+# the firewall unless CONFIRM_FILE appears within SECS (the master creates it
+# over a fresh tailnet ssh connection once the rules are live). Detached and
+# HUP-proof, so it outlives the ssh session that started it.
+join_fw_watchdog() {
+  local _undo
+  case "$(join_os)" in
+    macos) _undo="launchctl bootout system/dev.fleet.firewall; rm -f '$JOIN_FW_PF_PLIST' '$JOIN_FW_PF_FILE'; /sbin/pfctl -q -a $JOIN_FW_PF_ANCHOR -F all" ;;
+    *)     _undo="systemctl disable fleet-firewall.service; rm -f '$JOIN_FW_NFT_UNIT' '$JOIN_FW_NFT_FILE'; nft delete table inet fleet" ;;
+  esac
+  j_root nohup sh -c "i=0; while [ \$i -lt $2 ]; do [ -e '$1' ] && { rm -f '$1'; exit 0; }; sleep 1; i=\$((i+1)); done; $_undo" >/dev/null 2>&1 </dev/null &
+}
+
+# join_ts_bin — the tailscale CLI (macOS app's CLI, Homebrew, or the package).
+join_ts_bin() {
+  local _c
+  for _c in /Applications/Tailscale.app/Contents/MacOS/Tailscale /usr/local/bin/tailscale /opt/homebrew/bin/tailscale /usr/bin/tailscale; do
+    [ -x "$_c" ] && { echo "$_c"; return 0; }
+  done
+  command -v tailscale
+}
+
+# join_ts_brew — true when tailscaled is Homebrew's (it does not update itself).
+join_ts_brew() {
+  [ "$(join_os)" = macos ] || return 1
+  [ -x /opt/homebrew/opt/tailscale/bin/tailscaled ] || [ -x /usr/local/opt/tailscale/bin/tailscaled ]
+}
+
+join_ts_autoupdate_on() {
+  local _ts _brew _user _tsd _tmp _label=sh.brew.tailscale
+  if join_in_container; then j_ok "container: Tailscale updates come with the image"; return 0; fi
+  _ts=$(join_ts_bin) || { j_warn "tailscale CLI not found; updates not configured"; return 1; }
+  if ! join_ts_brew; then
+    if "$_ts" set --auto-update=true >/dev/null 2>&1 || j_root "$_ts" set --auto-update=true >/dev/null 2>&1; then
+      j_ok "Tailscale updates itself (tailscale set --auto-update)"; return 0
+    fi
+    j_warn "tailscale set --auto-update failed; update Tailscale by hand"; return 1
+  fi
+  _brew=/opt/homebrew/bin/brew; [ -x "$_brew" ] || _brew=/usr/local/bin/brew
+  [ -f /Library/LaunchDaemons/sh.brew.tailscale.plist ] || _label=homebrew.mxcl.tailscale
+  _user=$(id -un); _tsd=$(dirname "$(dirname "$_brew")")/opt/tailscale/bin/tailscaled
+  _tmp=$(mktemp "${TMPDIR:-/tmp}/fleet-tsu.XXXXXX") || j_die "mktemp failed"
+  cat >"$_tmp" <<EOF
+#!/bin/sh
+# managed by fleet: upgrade Homebrew's tailscale as $_user, restart tailscaled when it changed.
+before=\$($_tsd --version 2>/dev/null | head -1)
+/usr/bin/su -l "$_user" -c "$_brew upgrade --quiet tailscale" || exit 0
+after=\$($_tsd --version 2>/dev/null | head -1)
+[ "\$before" = "\$after" ] || /bin/launchctl kickstart -k system/$_label
+echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) tailscale \${before%% *} -> \${after%% *}"
+EOF
+  j_root mkdir -p "$JOIN_TSU_DIR"
+  j_root install -m 0755 -o root -g wheel "$_tmp" "$JOIN_TSU_DIR/tailscale-update.sh"
+  cat >"$_tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fleet.tailscale-update</string>
+  <key>ProgramArguments</key><array><string>$JOIN_TSU_DIR/tailscale-update.sh</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>40</integer></dict>
+  <key>StandardOutPath</key><string>/var/log/fleet-tailscale-update.log</string>
+  <key>StandardErrorPath</key><string>/var/log/fleet-tailscale-update.log</string>
+</dict>
+</plist>
+EOF
+  j_root install -m 0644 -o root -g wheel "$_tmp" "$JOIN_TSU_PLIST"
+  rm -f "$_tmp"
+  j_root launchctl bootout system/dev.fleet.tailscale-update >/dev/null 2>&1 || true
+  j_root launchctl bootstrap system "$JOIN_TSU_PLIST" || { j_warn "could not load $JOIN_TSU_PLIST"; return 1; }
+  j_ok "Tailscale (Homebrew) is upgraded nightly at 04:40 by dev.fleet.tailscale-update"
+}
+
+join_ts_autoupdate_off() {
+  [ "$(join_os)" = macos ] || return 0
+  j_root launchctl bootout system/dev.fleet.tailscale-update >/dev/null 2>&1 || true
+  j_root rm -f "$JOIN_TSU_PLIST" "$JOIN_TSU_DIR/tailscale-update.sh"
+}
+
+# join_harden — join step: firewall + Tailscale updates. A failure warns; the
+# master shows it (fleet harden status NODE) and `fleet harden on NODE` retries.
+join_harden() {
+  join_fw_on || j_warn "firewall not applied; on the master: fleet harden on $JOIN_NAME"
+  join_ts_autoupdate_on || true
+}
+
 # ---------- 8. enrol.json ----------
 
 join_write_enrol() {
@@ -859,6 +1069,7 @@ join_main() {
   join_ssh_enable
   join_privileged
   join_power
+  join_harden
   join_authorized_keys
   join_deploy_keys
   join_ssh_config

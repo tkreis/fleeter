@@ -172,7 +172,7 @@ every node converges, in install order. Three presets, documented in
 | `grok` | Grok Build (`grok`) | `XAI_API_KEY` or a device code: `fleet login grok` | all |
 | `chrome` | a browser (Google Chrome on macOS and Debian/Ubuntu amd64, chromium on arm64 and in containers) plus `chrome-devtools-mcp` and `@playwright/mcp` pinned (`FLEET_CHROME_DEVTOOLS_MCP`, `FLEET_PLAYWRIGHT_MCP`) behind `~/.local/bin/fleet-chrome-mcp` / `fleet-playwright-mcp` wrappers (headless without a display, fleet-owned profile) | none | macOS, apt-based Linux (browser via `fleet join`), containers (chromium baked into the image; `--build-arg FLEET_BROWSER=0` for a slim image without it) |
 | `cliproxy` | CLIProxyAPI in Docker from `templates/cliproxy/` (`FLEET_PROXY_MODE=local`) or just the harness variables for one you run elsewhere (`remote`) | `fleet proxy import` on the master (config.yaml with the client key, full profile), then `fleet proxy login NODE` once per node for its own upstream accounts | macOS and Linux with Docker; containers always remote |
-| `t3code` | the T3 Code desktop app from GitHub releases (self-updating) | none | macOS, Linux with a display; skipped in containers. Remote use of a node from the master's T3 Code is `fleet t3 …` (opt-in, `FLEET_T3_REMOTE`), independent of this plug-in |
+| `t3code` | the T3 Code desktop app from GitHub releases; `apply` and `update` replace an app older than the latest release unless it is running (it then updates itself) | none | macOS, Linux with a display; skipped in containers. Remote use of a node from the master's T3 Code is `fleet t3 …` (opt-in, `FLEET_T3_REMOTE`), independent of this plug-in |
 
 `fleet join` reads the fleet's tool list from the invite and skips the
 privileged installs the fleet does not use (no browser without `chrome`, no
@@ -368,6 +368,37 @@ disablesleep 0)` (without "set at join" when `fleet power` set it);
 and on the master row for the master's own Mac. With `FLEET_KEEP_AWAKE_LID=0`
 again, apply only reminds you of the undo for a join-set lid, and with `1` on
 a Mac that joined before the opt-in it points at `fleet power lid on`.
+
+### Only the tailnet reaches a node
+
+```sh
+fleet harden on mac2                   # from the master: you type the node's sudo password at its prompt
+fleet harden status mac2               # firewall + Tailscale version/updates, then a port-22 probe of its LAN address
+fleet harden off mac2                  # undo
+```
+
+A node accepts new inbound connections only from the tailnet (`100.64.0.0/10`,
+`fd7a:115c:a1e0::/48`) and loopback: ssh, Screen Sharing and anything else
+listening on the LAN interface stop answering the LAN. Replies to the node's own
+traffic, DHCP, ICMPv6 and WireGuard (UDP 41641) still pass. macOS loads a pf
+anchor `com.apple/fleet` (macOS's own `/etc/pf.conf` evaluates `com.apple/*`),
+reapplied at boot and every 15 minutes by `dev.fleet.firewall`; Linux loads an
+nftables table `inet fleet` from `fleet-firewall.service`. Containers are left
+to their host. `fleet join` applies it from 0.7.0 on; nodes that joined earlier
+need `fleet harden on NODE` once.
+
+From the master, the node arms a rollback first: unless a fresh tailnet ssh
+connection from the master confirms within 90 s (`FLEET_HARDEN_CONFIRM_SECS`),
+it removes the firewall again, so a rule that cuts the tailnet off cannot lock
+you out. `fleet unlock` still works: the FileVault pre-boot prompt runs before
+macOS loads pf.
+
+The same step keeps Tailscale current: the macOS app and Linux packages get
+`tailscale set --auto-update`; Homebrew's `tailscaled` does not update itself,
+so a root LaunchDaemon `dev.fleet.tailscale-update` runs `brew upgrade
+tailscale` as you at 04:40 and restarts the daemon when the binary changed
+(log: `/var/log/fleet-tailscale-update.log`). `fleet status` shows both on its
+`harden` line.
 
 ### Restart a node
 
@@ -965,6 +996,7 @@ and kick).
 | `fleet unlock NODE` | `--host IP` | A FileVault Mac at its pre-boot prompt (macOS 26+, Remote Login on, same LAN, Ethernet): probes the recorded `lan_ips` (or `--host`) with `nc -z -w 3 IP 22`, opens a password-only ssh session (`PubkeyAuthentication=no`, `PreferredAuthentications=keyboard-interactive,password`, `vault/ssh/known_hosts_preboot`, `accept-new`) for you to type the account password at the Mac's prompt, then waits `FLEET_UNLOCK_WAIT_SECS` for the node on the tailnet. Refuses with an explanation when no address answers; Linux nodes: nothing to unlock, exit 0. See "Unlock a node after a power cut". |
 | `fleet power lid on\|off [NODE]` | `--yes` | Keep a MacBook awake with the lid closed (`sudo pmset -a disablesleep 1`, the only setting the clamshell rule honours) or undo it (`0`). No NODE = this machine (master or node); NODE = over an interactive fleet session, the sudo password typed at the node's prompt. Caveats (heat, battery) and the undo printed, typed `yes` unless `--yes`, `pmset -g` read back (`SleepDisabled 1|0`), `lid` recorded in `power_done`, audited on the master. Mac laptops only: desktops, Linux and containers are explained, exit 0. See "Keep a MacBook awake with the lid closed". |
 | `fleet power status [NODE]` | | The lid setting as `pmset -g` reports it, laptop yes/no, who recorded it (`set at join` / `set by fleet power lid on` / none) and the undo. |
+| `fleet harden on\|off\|status [NODE]` | `--yes` | Tailnet-only firewall (pf anchor `com.apple/fleet` / nftables `inet fleet`) plus Tailscale auto-updates; from the master with a 90 s rollback until a fresh tailnet ssh connection confirms, then a LAN probe on port 22. No NODE = this machine. |
 | `fleet t3 setup [NODE]` | | Creates `vault/ssh/t3_client` if missing, pins the node's host key, puts the restricted key line into the node's `authorized_keys`, regenerates `~/.ssh/config.d/fleet` and the `Include` at the top of `~/.ssh/config`, prints what to click in T3 Code. Without NODE: every registered node. Re-enables a node after `t3 revoke`. |
 | `fleet t3 status [NODE]` | | Per node: pinned host key, the alias as `ssh -G` resolves it, a BatchMode connection with the client key running T3's discovery, and the node's T3 sessions and pairing tokens (metadata only). |
 | `fleet t3 revoke NODE` | | On the node: revokes every pairing-token session and live pairing token, stops the servers T3 started, removes the `fleet-t3-client` line; records `t3_access: false`; drops the `Host fleet-<name>` block. Unreachable node → `t3:<id>` in `pending_cleanup`. |

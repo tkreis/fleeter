@@ -828,6 +828,7 @@ node_write_status() {
   FLEET_ST_AWAKE_LID="$(node_awake_lid_state)" \
   FLEET_ST_POWER_DONE="$(cat "$FLEET_HOME/power_done" 2>/dev/null || true)" \
   FLEET_ST_LAN="$(node_lan_info)" \
+  FLEET_ST_FIREWALL="$(harden_fw_state)" FLEET_ST_TS="$(harden_ts_info)" \
   FLEET_ST_AWS="$(node_aws_status_json 2>/dev/null || true)" \
   python3 - "$tmp" <<'PY' | atomic_write "$FLEET_HOME/status.json" 0600
 import json, os, re, sys, time
@@ -874,6 +875,8 @@ print(json.dumps({
     "lan_ips": [ip for ip in lan[0].split(",") if ip],
     "ethernet": lan[1] if len(lan) > 1 and lan[1] else "no",
     "aws": aws,
+    "firewall": e("FLEET_ST_FIREWALL") or "n/a",
+    "tailscale": dict(zip(("version", "updates"), (e("FLEET_ST_TS") or "- n/a").split(" ", 1))),
     "token_age_days": ages,
     "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 }, indent=2))
@@ -903,6 +906,10 @@ if d.get("awake_lid") == "on":
 print("awake     %s%s" % (d.get("awake", "n/a"), lid_note))
 if d.get("lan_ips"):
     print("lan       %s  ethernet %s" % (" ".join(d["lan_ips"]), d.get("ethernet", "no")))
+ts = d.get("tailscale") or {}
+if d.get("firewall", "n/a") != "n/a" or ts.get("updates", "n/a") != "n/a":
+    print("harden    firewall %s  tailscale %s (updates %s)%s" % (d.get("firewall", "n/a"), ts.get("version", "-"), ts.get("updates", "n/a"),
+          "  (on the master: fleet harden on %s)" % d["name"] if d.get("firewall") == "off" or ts.get("updates") == "off" else ""))
 a = d.get("aws") or {}
 if a.get("state") in ("ok", "expired"):
     print("aws       %s  %d profile%s, expire %s%s" % (a["state"], a.get("profiles") or 0, "" if a.get("profiles") == 1 else "s",

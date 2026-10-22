@@ -885,6 +885,85 @@ case_base_status() {
   end
 }
 
+# t3code replaces an AppImage older than the latest release, keeps a current
+# one, and leaves a running one to its own updater.
+case_t3code_upgrade() {
+  begin "t3code: apply replaces an older app, keeps a current or running one"
+  local h="$WORK/homes/t3" d out
+  d="$WORK/t3-bin"
+  rm -rf "$h" "$d"; mkdir -p "$h/.local/bin" "$h/.config/fleet" "$d"
+  cat >"$d/curl" <<'EOF'
+#!/usr/bin/env bash
+out=""
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; esac; shift; done
+if [ -n "$out" ]; then echo "appimage-$T3_LATEST" >"$out"; exit 0; fi
+printf '{"tag_name":"v%s","assets":[{"name":"T3-Code-%s-x86_64.AppImage","browser_download_url":"https://example.invalid/x64"},{"name":"T3-Code-%s-arm64.AppImage","browser_download_url":"https://example.invalid/arm64"}]}' "$T3_LATEST" "$T3_LATEST" "$T3_LATEST"
+EOF
+  # shellcheck disable=SC2016  # expanded by the fake when it runs
+  printf '#!/bin/sh\n[ "${T3_RUNNING:-0}" = 1 ]\n' >"$d/pgrep"
+  chmod +x "$d/curl" "$d/pgrep"
+  t3_run() {
+    HOME="$h" FLEET_HOME="$h/.config/fleet" FLEET_BIN="$h/.local/bin" DISPLAY=:0 PATH="$d:$PATH" FLEET_ROOT="$SRC" \
+      bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; FLEET_HOME="$h_home"; FLEET_BIN="$h_bin"
+        . "$FLEET_ROOT/lib/tools/t3code.sh"; fleet_in_container() { return 1; }; fleet_os() { echo linux; }; tool_t3code_install' 2>&1
+  }
+  export h_home="$h/.config/fleet" h_bin="$h/.local/bin"
+  printf '#!/bin/sh\n' >"$h/.local/bin/t3code"; chmod +x "$h/.local/bin/t3code"
+  echo 0.1.0 >"$h/.config/fleet/t3code.version"
+  out=$(T3_LATEST=0.1.1 t3_run)
+  assert "older app is replaced by the latest release" bash -c "grep -q '^0.1.1$' '$h/.config/fleet/t3code.version' && grep -q 'appimage-0.1.1' '$h/.local/bin/t3code'"
+  out=$(T3_LATEST=0.1.1 t3_run)
+  assert "current app is kept" bash -c "printf '%s' '$out' | grep -q 'T3 Code 0.1.1 present'"
+  out=$(T3_LATEST=0.2.0 T3_RUNNING=1 t3_run)
+  assert "running app is left alone" bash -c "grep -q '^0.1.1$' '$h/.config/fleet/t3code.version' && printf '%s' '$out' | grep -q 'is running'"
+  out=$(T3_LATEST=0.10.0 t3_run)
+  assert "versions compare numerically (0.10.0 is newer than 0.1.1)" grep -q '^0.10.0$' "$h/.config/fleet/t3code.version"
+  unset h_home h_bin
+  end
+}
+
+# harden on Linux: nft rules + boot unit written, loaded through nft, status
+# says on; the watchdog undoes it without a confirmation; off removes it.
+case_harden_linux() {
+  begin "harden: linux firewall on/off, status, rollback without confirmation"
+  local h="$WORK/homes/harden" d out
+  d="$WORK/harden-bin"
+  rm -rf "$h" "$d"; mkdir -p "$h/etc" "$d"
+  # shellcheck disable=SC2016  # expanded by the fakes when they run
+  printf '#!/bin/sh\necho "nft $*" >>"$HARDEN_LOG"\n[ "$1" != -f ] || cp "$2" "$HARDEN_LOADED"\n' >"$d/nft"
+  # shellcheck disable=SC2016  # expanded by the fake when it runs
+  printf '#!/bin/sh\necho "systemctl $*" >>"$HARDEN_LOG"\n' >"$d/systemctl"
+  printf '#!/bin/sh\n"$@"\n' >"$d/sudo"
+  chmod +x "$d/nft" "$d/systemctl" "$d/sudo"
+  harden_run() {
+    HARDEN_LOG="$h/log" HARDEN_LOADED="$h/loaded.nft" PATH="$d:$PATH" FLEET_ROOT="$SRC" HOME="$h" FLEET_HARDEN_CONFIRM_SECS=2 \
+      bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; for f in "$FLEET_ROOT"/lib/[a-z]*.sh; do . "$f"; done
+        JOIN_FW_NFT_FILE="$HOME/etc/firewall.nft"; JOIN_FW_NFT_UNIT="$HOME/etc/fleet-firewall.service"
+        fleet_in_container() { return 1; }; join_in_container() { return 1; }; fleet_os() { echo linux; }; join_os() { echo linux; }
+        join_ts_bin() { return 1; }
+        "$@"' _ "$@" 2>&1
+  }
+  out=$(harden_run cmd_harden on --yes)
+  assert "on writes the rules and the boot unit" bash -c "grep -q 'iifname \"tailscale0\" accept' '$h/etc/firewall.nft' && grep -q 'ExecStart=.*nft -f' '$h/etc/fleet-firewall.service'"
+  assert "on loads the rules and enables the unit" bash -c "grep -q 'drop' '$h/loaded.nft' && grep -q 'systemctl enable fleet-firewall.service' '$h/log'"
+  out=$(harden_run cmd_harden status)
+  assert "status says firewall on" bash -c "printf '%s' '$out' | grep -q '^firewall   on'"
+  out=$(harden_run cmd_harden off --yes)
+  assert "off removes rules and unit" bash -c "[ ! -e '$h/etc/firewall.nft' ] && [ ! -e '$h/etc/fleet-firewall.service' ] && grep -q 'nft delete table inet fleet' '$h/log'"
+  # rollback: on with --confirm, nothing confirms, the watchdog undoes it
+  : >"$h/log"
+  harden_run cmd_harden on --yes --confirm "$h/confirm" >/dev/null
+  sleep 4
+  assert "unconfirmed: the watchdog removes the firewall" bash -c "[ ! -e '$h/etc/firewall.nft' ] && grep -q 'nft delete table inet fleet' '$h/log'"
+  # confirmed in time: the firewall stays, the confirm file is consumed
+  harden_run cmd_harden on --yes --confirm "$h/confirm" >/dev/null
+  touch "$h/confirm"; sleep 3
+  assert "confirmed: the firewall stays and the confirm file is gone" bash -c "[ -e '$h/etc/firewall.nft' ] && [ ! -e '$h/confirm' ]"
+  out=$(FLEET_ROOT="$SRC" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; for f in "$FLEET_ROOT"/lib/[a-z]*.sh; do . "$f"; done; fleet_in_container() { return 0; }; cmd_harden on --yes' 2>&1)
+  assert "a container changes nothing" bash -c "printf '%s' '$out' | grep -q 'container has no firewall'"
+  end
+}
+
 # N8: the real cliproxy plug-in (local mode) says `login` once the container
 # logged an upstream refresh failure newer than the newest auth file, so
 # `fleet list` shows `1 login: cliproxy` and names the fix; `ok` otherwise.
@@ -1901,6 +1980,8 @@ case_join_power
 case_power
 case_chrome_wrapper
 case_base_status
+case_t3code_upgrade
+case_harden_linux
 case_cliproxy_status
 case_harness_toml
 case_entrypoint_invite

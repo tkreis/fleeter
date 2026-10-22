@@ -136,14 +136,183 @@ _t3_converge() {
   _t3_install "$rel"
 }
 
+# ---------- phone access (FLEET_T3_MOBILE=1) ----------
+# The T3 phone app has no SSH route ("SSH environments are only available in
+# the desktop app"). A node it should reach runs T3's own background service
+# (`t3 service install`: launchd gui/<uid>, or systemd --user) on loopback, and
+# Tailscale Serve publishes it as https://<node>.<tailnet>.ts.net (443, tailnet
+# only). T3 Connect stays publish-only (push notifications through the relay,
+# no tunnel); linking it needs a browser approval, see `fleet t3 pair`.
+# The unit is T3's. fleet only pins T3CODE_HOST=127.0.0.1 in it, because
+# `t3 serve` outside desktop mode binds every interface and `t3 update`
+# re-renders the unit without the pin (a systemd drop-in survives that, the
+# launchd plist does not). Restarting the server ends the agent sessions it
+# runs, so apply restarts it only while none is open and retries otherwise.
+T3_MOBILE_PORT=3773
+T3_MOBILE_SERVE_PORT=443
+T3_SERVICE_LABEL=com.t3tools.t3code.service
+T3_AGENT_RE='claude|codex|cursor-agent|grok|opencode'
+
+# _t3_cli — the newest t3 CLI runtime T3 installed, or nothing.
+_t3_cli() {
+  local v
+  v=$(_t3_runtimes | tr ' ' '\n' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+  [ -n "$v" ] && echo "$HOME/.t3/runtime/versions/$v/t3"
+}
+
+_t3_unit() {
+  if [ "$(fleet_os)" = macos ]; then echo "$HOME/Library/LaunchAgents/$T3_SERVICE_LABEL.plist"
+  else echo "$HOME/.config/systemd/user/t3code.service"; fi
+}
+_t3_dropin() { echo "$HOME/.config/systemd/user/t3code.service.d/fleet.conf"; }
+
+_t3_host_pinned() {
+  if [ "$(fleet_os)" = macos ]; then
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:T3CODE_HOST' "$(_t3_unit)" 2>/dev/null)" = 127.0.0.1 ]
+  else
+    grep -qx 'Environment=T3CODE_HOST=127.0.0.1' "$(_t3_dropin)" 2>/dev/null
+  fi
+}
+
+_t3_pin_host() {
+  if [ "$(fleet_os)" = macos ]; then
+    /usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:T3CODE_HOST 127.0.0.1' "$(_t3_unit)" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c 'Add :EnvironmentVariables:T3CODE_HOST string 127.0.0.1' "$(_t3_unit)"
+  else
+    mkdir -p "$(dirname "$(_t3_dropin)")"
+    printf '# managed by fleet: keep the T3 server on loopback (Tailscale Serve publishes it)\n[Service]\nEnvironment=T3CODE_HOST=127.0.0.1\n' \
+      | atomic_write "$(_t3_dropin)"
+    systemctl --user daemon-reload
+  fi
+}
+
+# _t3_servers — pids of running T3 servers (the service's, or one T3's SSH flow started).
+_t3_servers() { pgrep -f '\.t3/runtime/versions/[^/]*/t3 serve' 2>/dev/null || true; }
+
+# _t3_foreign_servers — servers the service did not start (desktop SSH launches).
+_t3_foreign_servers() {
+  local p pp
+  for p in $(_t3_servers); do
+    pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    ps -o command= -p "${pp:-0}" 2>/dev/null | grep -q -- '__service-launcher' || echo "$p"
+  done
+}
+
+# _t3_sessions — agent processes the running servers own.
+_t3_sessions() {
+  local s
+  s=$(_t3_servers | tr '\n' ' ')
+  [ -n "$s" ] || { echo 0; return; }
+  ps -axo ppid=,command= 2>/dev/null | awk -v s=" $s" -v re="$T3_AGENT_RE" \
+    'index(s, " " $1 " ") { $1 = ""; if ($0 ~ re) n++ } END { print n + 0 }'
+}
+
+# _t3_exposed — true when something listens on the T3 port beyond loopback.
+_t3_exposed() {
+  local l
+  if [ "$(fleet_os)" = macos ]; then
+    l=$(lsof -nP -iTCP:"$T3_MOBILE_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print $9 }')
+  else
+    l=$(ss -ltnH "sport = :$T3_MOBILE_PORT" 2>/dev/null | awk '{ print $4 }')
+  fi
+  printf '%s\n' "$l" | grep -vE '^(127\.0\.0\.1|\[::1\]|::1):|^$' | grep -q .
+}
+
+_t3_service_restart() {
+  local p n=0
+  for p in $(_t3_foreign_servers); do kill -TERM "$p" 2>/dev/null || true; done
+  while [ -n "$(_t3_foreign_servers)" ] && [ "$n" -lt 60 ]; do sleep 1; n=$((n + 1)); done
+  if [ "$(fleet_os)" = macos ]; then
+    if launchctl print "gui/$(id -u)/$T3_SERVICE_LABEL" >/dev/null 2>&1; then
+      launchctl kickstart -k "gui/$(id -u)/$T3_SERVICE_LABEL"
+    else
+      launchctl bootstrap "gui/$(id -u)" "$(_t3_unit)"
+    fi
+  else
+    systemctl --user enable t3code.service >/dev/null 2>&1 || true
+    systemctl --user restart t3code.service
+  fi
+}
+
+_t3_ts() { if type join_ts_bin >/dev/null 2>&1; then join_ts_bin; else command -v tailscale; fi; }
+
+# _t3_serve_ok TS — Tailscale Serve maps https 443 to the local T3 server.
+_t3_serve_ok() {
+  "$1" serve status --json 2>/dev/null | python3 -c '
+import json, sys
+port, target = sys.argv[1], sys.argv[2]
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(1)
+if not d.get("TCP", {}).get(port, {}).get("HTTPS"): sys.exit(1)
+ok = any(k.endswith(":" + port) and v.get("Handlers", {}).get("/", {}).get("Proxy") == target
+         for k, v in (d.get("Web") or {}).items())
+sys.exit(0 if ok else 1)' "$T3_MOBILE_SERVE_PORT" "http://127.0.0.1:$T3_MOBILE_PORT"
+}
+
+# _t3_mobile_converge — service installed, host pinned, server restarted onto
+# it when needed and idle, Tailscale Serve mapping present. Only warns.
+_t3_mobile_converge() {
+  local cli ts n cmd restart=0
+  cli=$(_t3_cli)
+  if [ -z "$cli" ]; then
+    log "t3 mobile: no t3 runtime yet; connect once from the master's T3 app (fleet t3 setup)"; return 0
+  fi
+  if [ ! -f "$(_t3_unit)" ]; then
+    "$cli" service install </dev/null >/dev/null 2>&1 || { warn "t3 mobile: t3 service install failed"; return 0; }
+    ok "T3 background service installed"
+    restart=1
+  fi
+  if ! _t3_host_pinned; then
+    _t3_pin_host || { warn "t3 mobile: could not pin T3CODE_HOST in $(_t3_unit)"; return 0; }
+    restart=1
+  fi
+  if [ -n "$(_t3_foreign_servers)" ] || [ -z "$(_t3_servers)" ] || _t3_exposed; then restart=1; fi
+  if [ "$restart" = 1 ]; then
+    n=$(_t3_sessions)
+    if [ "$n" -gt 0 ]; then
+      if [ "$(fleet_os)" = macos ]; then cmd="launchctl kickstart -k gui/\$(id -u)/$T3_SERVICE_LABEL"
+      else cmd="systemctl --user restart t3code.service"; fi
+      warn "t3 mobile: T3 server restart deferred, $n agent session(s) open; next apply retries (now, ending them: $cmd)"
+    elif _t3_service_restart; then
+      ok "T3 server restarted on the background service (127.0.0.1:$T3_MOBILE_PORT)"
+    else
+      warn "t3 mobile: could not restart the T3 service"
+    fi
+  fi
+  ts=$(_t3_ts) || ts=""
+  if [ -z "$ts" ]; then warn "t3 mobile: tailscale CLI not found; no Tailscale Serve mapping"
+  elif ! _t3_serve_ok "$ts"; then
+    if "$ts" serve --bg --https="$T3_MOBILE_SERVE_PORT" "http://127.0.0.1:$T3_MOBILE_PORT" >/dev/null 2>&1; then
+      ok "Tailscale Serve: https port $T3_MOBILE_SERVE_PORT -> T3 (tailnet only)"
+    else
+      warn "t3 mobile: tailscale serve failed (linux: sudo tailscale set --operator=\$USER, then fleet apply)"
+    fi
+  fi
+  if pgrep -f '\.t3/tools/cloudflared' >/dev/null 2>&1; then
+    warn "t3 mobile: a T3 Connect relay tunnel is running; switch to publish-only with fleet t3 pair NODE on the master"
+  fi
+  return 0
+}
+
+# _t3_mobile_state — one word for the status line.
+_t3_mobile_state() {
+  local ts
+  [ -n "$(_t3_cli)" ] || { echo no-runtime; return; }
+  [ -f "$(_t3_unit)" ] || { echo no-service; return; }
+  _t3_host_pinned || { echo unpinned; return; }
+  if [ -n "$(_t3_foreign_servers)" ] || [ -z "$(_t3_servers)" ] || _t3_exposed; then echo restart-pending; return; fi
+  if ! ts=$(_t3_ts) || ! _t3_serve_ok "$ts"; then echo no-serve; return; fi
+  echo ok
+}
+
 tool_t3code_install() {
   if fleet_in_container; then log "t3code: skipped inside container"; return 0; fi
   case "$(fleet_os)" in
     macos) _t3_converge ;;
     linux)
-      if ! _t3_has_display; then log "t3code: no display, skipped"; return 0; fi
-      _t3_converge ;;
+      if _t3_has_display; then _t3_converge; else log "t3code: no display, app skipped"; fi ;;
   esac
+  [ "${FLEET_T3_MOBILE:-0}" != 1 ] || _t3_mobile_converge
 }
 
 tool_t3code_update() { tool_t3code_install; }
@@ -152,6 +321,7 @@ tool_t3code_status() {
   local app ver rt
   if fleet_in_container; then echo "skipped container"; return 0; fi
   rt=$(_t3_runtimes); rt=${rt:+ runtime:$(printf '%s' "$rt" | tr ' ' ',')}
+  [ "${FLEET_T3_MOBILE:-0}" != 1 ] || rt="$rt mobile:$(_t3_mobile_state)"
   case "$(fleet_os)" in
     macos)
       app=$(_t3_app) || { echo "missing run: fleet apply"; return 0; }

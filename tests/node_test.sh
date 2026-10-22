@@ -922,6 +922,52 @@ EOF
   end
 }
 
+# FLEET_T3_MOBILE=1 on Linux: T3's service is installed, pinned to loopback by
+# a drop-in, restarted only while no agent session is open, and Tailscale Serve
+# maps https 443 to it once; the status word follows each step.
+case_t3code_mobile() {
+  begin "t3code: mobile access installs the service, pins loopback, defers restarts, maps Tailscale Serve"
+  local h="$WORK/homes/t3m" d out
+  d="$WORK/t3m-bin"
+  rm -rf "$h" "$d"; mkdir -p "$h/.config/fleet" "$h/.t3/runtime/versions/0.1.1" "$d"
+  # shellcheck disable=SC2016  # expanded by the fakes when they run
+  printf '#!/bin/sh\necho "t3 $*" >>"$T3M_LOG"\n[ "$1 $2" != "service install" ] || { mkdir -p "$HOME/.config/systemd/user"; echo unit >"$HOME/.config/systemd/user/t3code.service"; }\n' \
+    >"$h/.t3/runtime/versions/0.1.1/t3"
+  echo ok >"$h/.t3/runtime/versions/0.1.1/.install-complete"
+  # shellcheck disable=SC2016  # expanded by the fakes when they run
+  printf '#!/bin/sh\necho "systemctl $*" >>"$T3M_LOG"\n' >"$d/systemctl"
+  # shellcheck disable=SC2016  # expanded by the fakes when they run
+  printf '#!/bin/sh\nif [ "$2" = status ]; then cat "$T3M_SERVE" 2>/dev/null || echo "{}"; exit 0; fi\necho "tailscale $*" >>"$T3M_LOG"\necho '"'"'{"TCP":{"443":{"HTTPS":true}},"Web":{"n.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3773"}}}}}'"'"' >"$T3M_SERVE"\n' >"$d/tailscale"
+  chmod +x "$h/.t3/runtime/versions/0.1.1/t3" "$d/systemctl" "$d/tailscale"
+  t3m_run() {
+    T3M_LOG="$h/log" T3M_SERVE="$h/serve.json" HOME="$h" PATH="$d:$PATH" FLEET_ROOT="$SRC" FLEET_T3_MOBILE=1 \
+      bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; FLEET_HOME="$HOME/.config/fleet"; FLEET_T3_MOBILE=1
+        . "$FLEET_ROOT/lib/tools/t3code.sh"; fleet_in_container() { return 1; }; fleet_os() { echo linux; }
+        _t3_servers() { [ "${T3M_UP:-1}" = 0 ] || echo 4242; }; _t3_foreign_servers() { [ "${T3M_FOREIGN:-0}" = 0 ] || echo 4243; }
+        _t3_sessions() { echo "${T3M_SESSIONS:-0}"; }; _t3_exposed() { return 1; }; pgrep() { return 1; }
+        "$@"' _ "$@" 2>&1
+  }
+  out=$(T3M_FOREIGN=1 T3M_SESSIONS=2 t3m_run tool_t3code_install)
+  assert "the service is installed through t3" grep -q '^t3 service install' "$h/log"
+  assert "a drop-in pins T3CODE_HOST to loopback" grep -qx 'Environment=T3CODE_HOST=127.0.0.1' "$h/.config/systemd/user/t3code.service.d/fleet.conf"
+  assert "open agent sessions defer the restart" bash -c "printf '%s' '$out' | grep -q 'restart deferred, 2 agent session' && ! grep -q 'systemctl --user restart' '$h/log'"
+  assert "Tailscale Serve maps 443 to the T3 port" grep -q 'tailscale serve --bg --https=443 http://127.0.0.1:3773' "$h/log"
+  out=$(T3M_FOREIGN=1 t3m_run _t3_mobile_state)
+  assert "status says restart-pending while a desktop-launched server runs" bash -c "[ '$out' = restart-pending ]"
+  : >"$h/log"
+  out=$(T3M_FOREIGN=1 t3m_run tool_t3code_install)
+  assert "with no session open the service is restarted" grep -q 'systemctl --user restart t3code.service' "$h/log"
+  assert "an existing Serve mapping is left alone" bash -c "! grep -q 'tailscale serve' '$h/log'"
+  assert "the service is not installed twice" bash -c "! grep -q 't3 service install' '$h/log'"
+  out=$(t3m_run _t3_mobile_state)
+  assert "status says ok once everything is in place" bash -c "[ '$out' = ok ]"
+  : >"$h/log"
+  out=$(FLEET_T3_MOBILE=0 HOME="$h" FLEET_ROOT="$SRC" bash -c '. "$FLEET_ROOT/lib/common.sh"; fleet_load_config; . "$FLEET_ROOT/lib/tools/t3code.sh"
+    fleet_in_container() { return 1; }; fleet_os() { echo linux; }; tool_t3code_install' 2>&1)
+  assert "FLEET_T3_MOBILE=0 touches nothing" bash -c "[ ! -s '$h/log' ]"
+  end
+}
+
 # harden on Linux: nft rules + boot unit written, loaded through nft, status
 # says on; the watchdog undoes it without a confirmation; off removes it.
 case_harden_linux() {
@@ -1981,6 +2027,7 @@ case_power
 case_chrome_wrapper
 case_base_status
 case_t3code_upgrade
+case_t3code_mobile
 case_harden_linux
 case_cliproxy_status
 case_harness_toml

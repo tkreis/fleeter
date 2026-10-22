@@ -241,6 +241,19 @@ for d in "$HOME"/.t3/ssh-launch/*/; do
 done
 exit 0'
 
+# Phone pairing (fleet t3 pair), run on the node in a TTY: link T3 Connect
+# publish-only (push notifications, never a relay tunnel; a browser approval of
+# the device code the first time, the stored credential after that), then mint
+# a pairing token served through Tailscale Serve and print it as a QR code.
+T3_NODE_PAIR_SH='export PATH="/Applications/Tailscale.app/Contents/MacOS:/opt/homebrew/bin:/usr/local/bin:$PATH"
+t=$(for f in "$HOME"/.t3/runtime/versions/*/t3; do [ -x "$f" ] && printf "%s %s\n" "$(basename "$(dirname "$f")")" "$f"; done \
+  | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -d" " -f2-)
+[ -n "$t" ] || { echo "no t3 runtime on this node yet: add it once in the T3 desktop app (fleet t3 setup)" >&2; exit 1; }
+"$t" connect link --publish-only --headless || exit 1
+"$t" pair --tailscale --label phone --ttl 15m || exit 1
+echo
+echo "A first T3 Connect link takes effect at the next T3 server restart (push notifications)."'
+
 # t3_node_revoke ID — the node side of `fleet t3 revoke` and `fleet kick`:
 # sessions, pairings, managed servers, then the authorized_keys line.
 t3_node_revoke() {
@@ -277,7 +290,7 @@ for p in ps:
 
 # ---------- commands ----------
 
-t3_usage() { die "usage: fleet t3 setup [NODE] | status [NODE] | revoke NODE"; }
+t3_usage() { die "usage: fleet t3 setup [NODE] | status [NODE] | revoke NODE | pair NODE"; }
 
 # t3_node_ids [NODE] — the node, or every registered non-revoked node.
 t3_node_ids() {
@@ -380,6 +393,18 @@ cmd_t3_revoke() {
   ok "$name: ssh config block removed; T3 Code's environment entry 'fleet-$name' can be deleted in the app (Settings -> Connections)"
 }
 
+# fleet t3 pair NODE — pair the T3 phone app with NODE over the tailnet (needs
+# FLEET_T3_MOBILE=1 on the node and the Tailscale app on the phone).
+cmd_t3_pair() {
+  local id name
+  [ $# -eq 1 ] || t3_usage
+  vault_require
+  id=$(t3_node_ids "$1"); name=$(registry_get "$id" name)
+  ssh_tty_to "$(registry_get "$id" user)" "$(registry_get "$id" dnsname)" "sh -c $(printf '%q' "$T3_NODE_PAIR_SH")" \
+    || die "$name: pairing failed" "fleet status $name (t3code mobile:...) and fleet apply on the node"
+  audit "t3.pair" "$name" ok
+}
+
 cmd_t3() {
   local sub=${1:-}
   [ $# -gt 0 ] && shift
@@ -387,6 +412,7 @@ cmd_t3() {
     setup)  cmd_t3_setup "$@" ;;
     status) cmd_t3_status "$@" ;;
     revoke) cmd_t3_revoke "$@" ;;
+    pair)   cmd_t3_pair "$@" ;;
     *) t3_usage ;;
   esac
 }

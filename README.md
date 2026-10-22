@@ -853,6 +853,38 @@ Intel Mac cannot be a T3 node) and reuses the node's running desktop-app server
 when `~/.t3/userdata/server-runtime.json` points at one, else starts
 `t3 serve --host 127.0.0.1` itself. `fleet t3 status` shows all of that.
 
+### Reach a node from the T3 phone app (opt-in)
+
+The phone app has no SSH environment type, so the route above does not exist
+there. With `FLEET_T3_MOBILE=1`, `fleet apply` gives each node a tailnet-only
+HTTPS endpoint instead:
+
+- T3's own background service (`t3 service install`: a `gui/<uid>` LaunchAgent
+  on macOS, a systemd user unit on Linux) runs the server, so it is up after a
+  reboot without the desktop app connecting first;
+- fleet pins `T3CODE_HOST=127.0.0.1` in that unit (plist key on macOS, a
+  drop-in on Linux): outside desktop mode `t3 serve` binds every interface;
+- Tailscale Serve maps `https://<node>.<tailnet>.ts.net` (port 443, tailnet
+  only, a real certificate) to `127.0.0.1:3773`.
+
+Moving the server onto the service means restarting it, and that ends the
+agent sessions it runs. `apply` therefore restarts only while no agent process
+is open and says "restart deferred" otherwise; the next apply retries.
+`fleet status` shows `mobile:ok`, or which step is missing
+(`no-runtime`, `no-service`, `unpinned`, `restart-pending`, `no-serve`).
+
+```sh
+fleet t3 pair studio         # on the master; QR code (and URL) for the phone, valid 15 minutes
+```
+
+`pair` links T3 Connect **publish-only** (push notifications and Live
+Activities through T3's relay, never a relay tunnel; the first time it shows a
+device code to approve in a browser) and then runs `t3 pair --tailscale`. The
+phone needs the Tailscale app connected to the same tailnet. A first link
+takes effect (push notifications) at the next restart of the T3 server. A
+full `t3 connect link` would open an outbound tunnel that bypasses
+`fleet harden`; apply warns when one runs.
+
 ### Kick a node
 
 ```sh
@@ -999,6 +1031,7 @@ and kick).
 | `fleet harden on\|off\|status [NODE]` | `--yes` | Tailnet-only firewall (pf anchor `com.apple/fleet` / nftables `inet fleet`) plus Tailscale auto-updates; from the master with a 90 s rollback until a fresh tailnet ssh connection confirms, then a LAN probe on port 22. No NODE = this machine. |
 | `fleet t3 setup [NODE]` | | Creates `vault/ssh/t3_client` if missing, pins the node's host key, puts the restricted key line into the node's `authorized_keys`, regenerates `~/.ssh/config.d/fleet` and the `Include` at the top of `~/.ssh/config`, prints what to click in T3 Code. Without NODE: every registered node. Re-enables a node after `t3 revoke`. |
 | `fleet t3 status [NODE]` | | Per node: pinned host key, the alias as `ssh -G` resolves it, a BatchMode connection with the client key running T3's discovery, and the node's T3 sessions and pairing tokens (metadata only). |
+| `fleet t3 pair NODE` | | Links T3 Connect publish-only on the node (device-code approval the first time) and prints a pairing QR code for the T3 phone app, served over Tailscale Serve. Needs `FLEET_T3_MOBILE=1`. |
 | `fleet t3 revoke NODE` | | On the node: revokes every pairing-token session and live pairing token, stops the servers T3 started, removes the `fleet-t3-client` line; records `t3_access: false`; drops the `Host fleet-<name>` block. Unreachable node → `t3:<id>` in `pending_cleanup`. |
 | `fleet config publish` | `--yes`, `--no-capture` | Git identity check, `harness_capture` into the config dir (authoritative; skipped with `--no-capture`), secret scan over `harness/` and `skills/` (always), staged diff, confirm, commit (`publish fleet config`), push to the checkout's `origin`. Never touches the fleeter checkout. |
 | `fleet policy check` | | Fetches the live policy with the OAuth client and checks it against the template. Exit 1 on findings. |
@@ -1055,6 +1088,7 @@ always wins. Plain shell assignments; a key you leave out keeps its default.
 | `FLEET_AWS_REFRESH_MINUTES` | `60` | `fleet sync` pushes again when the last push is this old, when what it pushed expires within this window, when the allowlist changed, or when an online provisioned node never got a push. |
 | `FLEET_AWS_CLI` | `1` | `devtools` installs the AWS CLI on the nodes (macOS `brew install awscli`; Linux the official installer into `~/.local/aws-cli` + `~/.local/bin/aws`, no root). `0` = skip; `fleet aws creds` works without it. |
 | `FLEET_T3_REMOTE` | `0` | `1`: `fleet init master` creates the T3 client key, so every node gets the restricted `authorized_keys` line and `~/.ssh/config.d/fleet` is maintained. `0`: only after `fleet t3 setup`. |
+| `FLEET_T3_MOBILE` | `0` | `1`: `fleet apply` keeps T3's background service on `127.0.0.1:3773` and a Tailscale Serve mapping (`https://<node>.<tailnet>.ts.net`) to it, for the T3 phone app; see `fleet t3 pair`. |
 | `FLEET_SKILL_EXCLUDE` | `""` | Skills on the master never captured. |
 | `FLEET_CAPTURE_MACHINE_ONLY` | `""` | Extra words marking MCP servers/hooks as machine-only (dropped on capture). |
 | `FLEET_CAPTURE_AGENT_EXCLUDE` | `""` | Claude agent files (basename without `.md`) not captured. |
